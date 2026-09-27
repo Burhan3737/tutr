@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Study Hub</title>
+<link rel="stylesheet" href="vendor/katex.min.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app" id="app">
+  <nav class="side" aria-label="Courses">
+    <div class="side-head">
+      <a class="brand" href="#" id="home">Study Hub</a>
+      <input id="search" type="search" placeholder="Search your notes  (Ctrl K)" aria-label="Search your notes" autocomplete="off">
+      <button class="phone-btn" id="phone-btn" type="button" hidden>Open on your phone</button>
+    </div>
+    <div class="side-body" id="nav"></div>
+    <div class="side-body" id="results" hidden></div>
+  </nav>
+
+  <main class="reader" id="reader" tabindex="-1">
+    <header class="crumbs" id="crumbs"></header>
+    <article class="doc" id="doc"></article>
+  </main>
+
+  <aside class="ask" id="ask" aria-label="Ask about the material">
+    <div class="ask-head">
+      <h2>Ask about the material</h2>
+      <button class="ghost" id="new-thread" type="button">New thread</button>
+      <button class="ghost icon" id="close-ask" type="button" aria-label="Hide the Ask panel">×</button>
+    </div>
+    <div class="scope">
+      <label>Answer from <select id="ask-scope"></select></label>
+    </div>
+    <div class="thread" id="thread" aria-live="polite">
+      <p class="hint">Answers come from the parts of your study guide and slides that match your question, with slide citations.</p>
+    </div>
+    <form class="compose" id="compose">
+      <textarea id="question" rows="3" placeholder="e.g. Why does demand slope down?" aria-label="Your question"></textarea>
+      <button id="send" type="submit">Ask</button>
+    </form>
+  </aside>
+  <button class="ask-open" id="open-ask" type="button" hidden>Ask a question</button>
+  <button class="menu-btn" id="menu-btn" type="button" aria-controls="nav" aria-expanded="false">☰ Topics</button>
+</div>
+<dialog class="phone-dlg" id="phone-dlg">
+  <h2>Open on your phone</h2>
+  <p>Connect your phone to the same Wi-Fi as this computer, then scan this with its camera.</p>
+  <div class="qr" id="qr"></div>
+  <p class="phone-url"><span id="phone-url"></span></p>
+  <p class="fine">Keep this computer on and the Study Hub window open while you use it on your phone.</p>
+  <form method="dialog"><button>Done</button></form>
+</dialog>
+<script src="vendor/qrcode.js"></script>
+<script src="vendor/marked.min.js"></script>
+<script src="vendor/katex.min.js"></script>
+<script src="vendor/mermaid.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
