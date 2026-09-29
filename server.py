@@ -13,7 +13,7 @@ no API key). Slide context comes from `<course>/.cache/WeekN/<deck>.transcript.m
 present, otherwise from the PDF's text layer, extracted once and re-extracted if the PDF
 changes. The log records timing and cost only, never question text.
 """
-import argparse, hashlib, http.server, json, math, os, re, socketserver, subprocess, sys, threading, time, webbrowser
+import argparse, hashlib, http.server, json, os, re, socketserver, subprocess, sys, threading, time, webbrowser
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
@@ -21,10 +21,15 @@ HERE = Path(__file__).resolve().parent
 ROOT = Path(os.environ.get("STUDY_HUB_ROOT") or HERE.parent.parent).resolve()
 STATIC = HERE / "static"
 WORK = HERE / ".cache"
-CONTEXT_CAP = 60_000   # characters of material sent with a question (~15k tokens)
-TOPICS_PER_QUESTION = 4   # guide topics picked by relevance, besides the one on screen
-SLIDES_PER_QUESTION = 10  # slide sections picked by relevance
-MODEL = os.environ.get("STUDY_HUB_MODEL", "sonnet")
+ASK_MAX_TURNS = 25    # tool calls Claude may make while looking things up for one answer
+ASK_TIMEOUT = 420     # seconds before a question gives up
+# Models the Ask panel offers (id -> label). The first is the default unless STUDY_HUB_MODEL names another.
+MODELS = {
+    "claude-opus-5-5": "Opus 5.5 — best answers, highest cost",
+    "claude-sonnet-5-5": "Sonnet 5.5 — balanced",
+    "claude-haiku-4-5": "Haiku 4.5 — fastest, cheapest",
+}
+MODEL = os.environ.get("STUDY_HUB_MODEL", "claude-opus-5-5")
 
 WEEK_RE = re.compile(r"^Week(\d+)$", re.I)
 LOCK = threading.Lock()
@@ -222,128 +227,233 @@ def slide_text(cdir, week, pdf):
     return txt.read_text(encoding="utf-8")
 
 
-STOP = set("""a an and are as at be by can do does for from how i if in is it its of on or so
-that the their then there these this to was what when where which who why will with you your
-not no yes me my we our they them than into about over under between each any all also""".split())
+_MAPS = {}   # course folder -> (signature of its files, map text)
 
 
-def tokens(text):
-    return [w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in STOP and len(w) > 1]
+def map_signature(cdir):
+    """Name, size and modification time of every file the map is built from."""
+    pats = ("CLAUDE.md", "study/*.md", "study/weeks/Week*/guide.md", "course/Week*/*.pdf",
+            ".cache/Week*/*.transcript.md", ".cache/Week*/*.txt", "labs/**/*", "assignments/**/*")
+    sig = []
+    for pat in pats:
+        for p in sorted(cdir.glob(pat)):
+            if p.is_file():
+                st = p.stat()
+                sig.append((p.relative_to(cdir).as_posix(), st.st_size, st.st_mtime_ns))
+    return tuple(sig)
 
 
-def chunks_of(text, marker):
-    """Split Markdown into (heading, body) chunks at lines starting with `marker`."""
-    parts = re.split(rf"^(?={re.escape(marker)})", text, flags=re.M)
-    out = []
-    for p in parts:
-        if p.startswith(marker):
-            out.append((p.splitlines()[0][len(marker):].strip(), p))
-    return out
+def course_map(cdir):
+    """The course map, rebuilt only when a guide, deck, transcript or handout was added or changed.
+    Keeping it byte-identical between questions also lets prompt caching reuse it."""
+    sig = map_signature(cdir)
+    cached = _MAPS.get(cdir)
+    if cached and cached[0] == sig:
+        return cached[1]
+    text = build_course_map(cdir)
+    _MAPS[cdir] = (map_signature(cdir), text)   # re-sign: building may extract a missing text layer
+    return text
 
 
-def bm25_top(query, docs, k):
-    """Indices of the k docs (strings) most relevant to query (Okapi BM25)."""
-    q = set(tokens(query))
-    if not q or not docs:
-        return []
-    toks = [tokens(d) for d in docs]
-    n = len(docs)
-    avg = sum(map(len, toks)) / n or 1
-    df = {t: sum(1 for d in toks if t in set(d)) for t in q}
-    scores = []
-    for i, d in enumerate(toks):
-        tf = {}
-        for w in d:
-            if w in q:
-                tf[w] = tf.get(w, 0) + 1
-        s = 0.0
-        for t, f in tf.items():
-            idf = math.log(1 + (n - df[t] + .5) / (df[t] + .5))
-            s += idf * f * 2.2 / (f + 1.2 * (.25 + .75 * len(d) / avg))
-        scores.append((s, i))
-    return [i for s, i in sorted(scores, reverse=True)[:k] if s > 0]
-
-
-def build_context(cdir, week, scope, question="", topic=""):
-    """Only what this question needs: course facts, the topic being read, and the guide topics and
-    slides that best match the question (BM25) — from one week, or from every week of the course."""
-    parts = []
-    cm = cdir / "CLAUDE.md"
-    if cm.exists():
-        parts.append(("Course facts (CLAUDE.md)", cm.read_text(encoding="utf-8")))
-    weeks = [week] if scope == "week" else sorted(
-        n for n in (week_num(w.name) for w in (cdir / "study" / "weeks").glob("Week*")) if n is not None)
-    if scope != "week":
-        weeks = sorted(set(weeks) | {n for n in (week_num(w.name) for w in (cdir / "course").glob("Week*")) if n is not None})
-
-    topics, slides = [], []          # (label, text)
+def build_course_map(cdir):
+    """A compact map of everything in the course that Claude can open: every week guide with its
+    topics (numbered, with line numbers), every slide transcript with its slides (tag, number, line),
+    and the other study and handout files. Paths are relative to the course folder."""
+    code, title = course_meta(cdir)
+    out = [f"# {code} {title} — map of the course material",
+           "Every path below is relative to the course folder, which is your working directory.", ""]
+    for f in ("CLAUDE.md", "study/course-map.md", "study/progress.md"):
+        if (cdir / f).exists():
+            out.append(f"- `{f}` — " + {"CLAUDE.md": "course facts: grading, assessment format, dates, AI policy",
+                                         "study/course-map.md": "every topic's key takeaways, all weeks",
+                                         "study/progress.md": "deadlines, weak topics, review queue"}[f])
+    weeks = sorted({n for base in (cdir / "course", cdir / "study" / "weeks") if base.is_dir()
+                    for n in (week_num(w.name) for w in base.iterdir() if w.is_dir()) if n is not None})
     for w in weeks:
         g = cdir / "study" / "weeks" / f"Week{w}" / "guide.md"
         if g.exists():
-            for head, body in chunks_of(g.read_text(encoding="utf-8"), "## "):
-                if head.lower() != "mixed review":   # cross-topic problems match everything; skip
-                    topics.append((f"Week {w} guide · {head}", body, head))
-        for pdf in sorted((cdir / "course" / f"Week{w}").glob("*.pdf")):
-            text = slide_text(cdir, w, pdf)
-            for head, body in chunks_of(text, "## [") or chunks_of(text, "===== "):
-                slides.append((f"Week {w} slides · [{head.split(']')[0].lstrip('[')}]", body, head))
-
-    # A title that matches the question is the strongest signal: count it three times.
-    ranked = lambda items: [f"{h} {h} {h}\n{b}" for _, b, h in items]
-    picked = []
-    if topic:   # the topic open on screen always comes first
-        picked += [t for t in topics if t[2] == topic][:1]
-    for i in bm25_top(question, ranked(topics), TOPICS_PER_QUESTION):
-        if topics[i] not in picked:
-            picked.append(topics[i])
-    parts += [(label, body) for label, body, _ in picked]
-    for i in sorted(bm25_top(question, ranked(slides), SLIDES_PER_QUESTION)):
-        parts.append((slides[i][0], slides[i][1]))
-
-    out, used, dropped = [], 0, []
-    for title, body in parts:
-        block = f"\n\n########## {title} ##########\n{body}"
-        if used + len(block) > CONTEXT_CAP:
-            dropped.append(title)
-            continue
-        out.append(block)
-        used += len(block)
-    if dropped:
-        out.append("\n\n[Left out to fit the size limit: " + "; ".join(dropped) + "]")
-    return "".join(out)
+            lines = g.read_text(encoding="utf-8").splitlines()
+            head = next((l[2:] for l in lines if l.startswith("# ")), f"Week {w}")
+            out += ["", f"## {head}", f"Study guide `study/weeks/Week{w}/guide.md` ({len(lines)} lines). Topics — line: title",
+                    "(each topic runs to the line before the next; inside each: From the slides, What you need to "
+                    "know first, In plain English, Watch out, Sample problems, Remember)"]
+            n = 0
+            for i, l in enumerate(lines, 1):
+                if l.startswith("## "):
+                    t = l[3:].strip()
+                    if t.lower() == "mixed review":
+                        out.append(f"  {i}: Mixed review (problems combining the week's topics)")
+                    else:
+                        n += 1
+                        out.append(f"  {i}: {n}. {t}")
+        pdfs = sorted((cdir / "course" / f"Week{w}").glob("*.pdf"))
+        if pdfs:
+            if not g.exists():
+                out += ["", f"## Week {w} (no study guide yet)"]
+            out.append(f"Slides for week {w} — exact slide wording; section per slide — line: [tag sN] title")
+        for pdf in pdfs:
+            tr = cdir / ".cache" / f"Week{w}" / f"{pdf.stem}.transcript.md"
+            if tr.exists():
+                src = tr
+            else:   # no transcript yet: fall back to the PDF's text layer (extracted once)
+                slide_text(cdir, w, pdf)
+                src = cdir / ".cache" / f"Week{w}" / f"{pdf.stem}.txt"
+            rel_src = src.relative_to(cdir).as_posix()
+            entries = []
+            for i, l in enumerate(src.read_text(encoding="utf-8").splitlines(), 1):
+                m = re.match(r"^## \[([^\]]+)\]\s*(.*)$", l) or re.match(r"^===== \S+ PAGE (\d+) =====", l)
+                if m:
+                    label = f"[{m.group(1)}] {m.group(2)[:60]}" if m.lastindex == 2 else f"page {m.group(1)}"
+                    entries.append(f"{i}: {label}")
+            kind = "transcript" if src.suffix == ".md" else "text layer only (no transcript: may miss equations/diagrams)"
+            out.append(f"- `{rel_src}` — {pdf.stem}, {kind}")
+            out.append("    " + " · ".join(entries))
+    extra = [p for grp in ("labs", "assignments") if (cdir / grp).is_dir()
+             for p in sorted((cdir / grp).rglob("*")) if p.is_file() and p.suffix.lower() in (".md", ".txt", ".html")]
+    if extra:
+        out += ["", "## Labs and assignments (handouts, grading grids, report templates, guides)"]
+        out += [f"- `{p.relative_to(cdir).as_posix()}`" for p in extra]
+    return "\n".join(out)
 
 
 SYSTEM = """You are a patient tutor for {code} {title}, answering one student's questions.
-The course material for the selected scope ({scope_label}) is below. Rules:
 
-- Ground every answer in the material. Cite slides exactly as the material does, e.g. [S&D-2 s14].
-- If the material does not cover the question, say "Not covered in the selected material", then
-  give a short explanation labelled **Beyond slides** if it helps the student understand.
+You can open every piece of this course's material with the Read, Grep and Glob tools (read-only;
+confined to this course's folder). The map below lists all of it. Decide from the question what to load:
+
+- Read only what the question needs, by line range: a guide topic runs from its line to the next
+  topic's line. Guides teach (plain English, worked examples, prerequisites); slide transcripts give the
+  exact slide wording, formulas and diagrams — open them when wording or detail matters.
+- Use Grep to find a term, formula or name across the whole course; then Read around the hits.
+- Questions about structure ("what's in week 2", "which decks") can be answered from the map.
+- Questions spanning topics or weeks: open each relevant topic, not just one.
+- Never answer from memory when the material covers it. If, after looking, nothing in the course
+  covers the question, say "Not covered in the course material", then give a short explanation
+  labelled **Beyond slides** if it helps.
+
+Answering:
+- Cite slides as the material does, e.g. [S&D-2 s14]; cite a guide topic by its title.
 - Teach: plain-language idea first, then the precise version. In any algebra or derivation show
   every step and name the rule it uses, e.g. "(solving a linear equation: same step on both sides)".
-- Be concise; no preamble. Markdown; math in KaTeX with $...$ and $$...$$.
+- Be concise; no preamble; don't narrate which files you opened. Markdown; math in KaTeX with $...$ and $$...$$.
 - If the student says the question is from a live graded quiz, test or exam, add one short line
-  noting the course's rule on AI use during assessments (see the course facts), then answer it fully.
-{material}"""
+  noting the course's rule on AI use during assessments (CLAUDE.md), then answer it fully.
+{screen}
+{course_map}"""
 
 
-def ask(course_id, week, scope, question, session, topic=""):
+def screen_note(cdir, week, topic):
+    """Where the student is reading, so "explain this" works without searching."""
+    if not topic or not week:
+        return ""
+    g = cdir / "study" / "weeks" / f"Week{week}" / "guide.md"
+    if not g.exists():
+        return ""
+    lines = g.read_text(encoding="utf-8").splitlines()
+    starts = [i for i, l in enumerate(lines, 1) if l.startswith("## ")]
+    for k, i in enumerate(starts):
+        if lines[i - 1][3:].strip() == topic:
+            end = starts[k + 1] - 1 if k + 1 < len(starts) else len(lines)
+            return (f"\nThe student is reading week {week}, topic \"{topic}\" — "
+                    f"study/weeks/Week{week}/guide.md lines {i}–{end}. \"This\" / \"here\" refers to it.\n")
+    return ""
+
+
+# ---------------------------------------------------------------- saved chats
+# One JSON file per Ask conversation. The Claude session id stays here on the server, so the
+# browser only ever holds the chat id; reopening a chat resumes the same Claude session.
+
+CHATS = WORK / "chats"
+CHAT_ID = re.compile(r"^[a-f0-9]{12}$")
+
+
+def chat_file(chat_id):
+    return CHATS / f"{chat_id}.json" if chat_id and CHAT_ID.match(chat_id) else None
+
+
+def load_chat(chat_id):
+    f = chat_file(chat_id)
+    return json.loads(f.read_text(encoding="utf-8")) if f and f.exists() else None
+
+
+def save_chat(chat):
+    CHATS.mkdir(parents=True, exist_ok=True)
+    with LOCK:
+        chat_file(chat["id"]).write_text(json.dumps(chat, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def list_chats():
+    out = []
+    for f in CHATS.glob("*.json") if CHATS.exists() else []:
+        try:
+            c = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        out.append({k: c.get(k) for k in ("id", "title", "course", "code", "created", "updated")}
+                   | {"count": sum(1 for m in c.get("messages", []) if m["role"] == "q")})
+    return sorted(out, key=lambda c: c["updated"] or "", reverse=True)
+
+
+def public_chat(c):
+    """A chat as the browser sees it — everything except the Claude session id."""
+    return {k: v for k, v in c.items() if k != "session"}
+
+
+def ask_chat(chat_id, course_id, question, week=0, topic="", model=None):
+    """Answer a question inside a saved chat (a new one when chat_id is empty) and record both."""
+    chat = load_chat(chat_id) if chat_id else None
+    if chat_id and chat is None:
+        return {"error": "That chat no longer exists. Start a new one."}, 404
+    history = ""
+    if chat:   # a chat keeps its course
+        course_id = chat["course"]
+        if chat.get("v") != 2:
+            # Chats from before course-wide lookup ran in another folder, so their Claude session
+            # can't be resumed; carry the conversation over as text instead.
+            history = "\n\n".join(f"{'Student' if m['role'] == 'q' else 'Tutor'}: {m['text']}"
+                                  for m in chat.get("messages", [])[-8:])
+    model = model if model in MODELS else MODEL
+    session = chat["session"] if chat and chat.get("v") == 2 else None
+    prompt = (f"Earlier in this chat:\n\n{history}\n\nNew question: {question}" if history else question)
+    payload, status = ask(course_id, prompt, session, week, topic, model)
+    if status != 200:
+        return payload, status
+    now = time.strftime("%Y-%m-%d %H:%M")
+    if chat is None:
+        import uuid
+        cdir = next(c for c in course_dirs() if c.name == course_id)
+        chat = {"id": uuid.uuid4().hex[:12], "title": " ".join(question.split())[:80], "course": course_id,
+                "code": course_meta(cdir)[0], "created": now, "messages": []}
+    chat["v"] = 2
+    chat["session"] = payload["session"]
+    chat["updated"] = now
+    chat["messages"] += [{"role": "q", "text": question},
+                         {"role": "a", "text": payload["answer"], "ms": payload["ms"], "cost": payload["cost"],
+                          "model": model}]
+    save_chat(chat)
+    return {"answer": payload["answer"], "ms": payload["ms"], "cost": payload["cost"], "chat": chat["id"],
+            "model": model}, 200
+
+
+def ask(course_id, question, session, week=0, topic="", model=None):
+    """One question to Claude, run inside the course folder with read-only tools, so it can open
+    any of the course's material it decides the question needs (and nothing outside the course)."""
     cdir = next((c for c in course_dirs() if c.name == course_id), None)
     if cdir is None:
         return {"error": "Unknown course."}, 400
-    if scope == "week" and not ((cdir / "course" / f"Week{week}").is_dir() or (cdir / "study" / "weeks" / f"Week{week}").is_dir()):
-        return {"error": f"Week {week} has no material yet."}, 400
     code, title = course_meta(cdir)
-    material = build_context(cdir, week, scope, question, topic)
-    label = (f"week {week}" if scope == "week" else "the whole course") +         ": the parts of the study guide and slides most relevant to the question"
-    system = SYSTEM.format(code=code, title=title, scope_label=label, material=material)
+    system = SYSTEM.format(code=code, title=title, screen=screen_note(cdir, week, topic), course_map=course_map(cdir))
     WORK.mkdir(exist_ok=True)
     key = hashlib.sha1(system.encode("utf-8")).hexdigest()[:16]
     pfile = WORK / f"prompt-{key}-{threading.get_ident()}.md"
     pfile.write_text(system, encoding="utf-8")   # deleted as soon as Claude has answered
-    # Tutor-only session: no tools, connectors, skills, hooks or user/project settings.
-    # Without these flags every question also pays for the whole Claude Code setup (~30x the cost).
-    cmd = ["claude", "-p", "--output-format", "json", "--model", MODEL, "--tools", "",
+    model = model if model in MODELS else MODEL
+    # Read, Grep and Glob only — no writing, commands or web. With default permissions and the course
+    # folder as the working directory, reads outside the course are refused (nobody can approve them in
+    # -p mode). Never pass --allowedTools for these: that pre-approves reads anywhere on the machine.
+    # No connectors, skills, hooks or user/project settings (each would add cost and reach).
+    cmd = ["claude", "-p", "--output-format", "json", "--model", model,
+           "--tools", "Read,Grep,Glob", "--max-turns", str(ASK_MAX_TURNS),
            "--strict-mcp-config", "--disable-slash-commands", "--setting-sources", "local",
            "--system-prompt-file", str(pfile)]
     if session:
@@ -351,11 +461,11 @@ def ask(course_id, week, scope, question, session, topic=""):
     t0 = time.time()
     try:
         proc = subprocess.run(cmd, input=question, capture_output=True, text=True, encoding="utf-8",
-                              timeout=240, cwd=str(WORK))
+                              timeout=ASK_TIMEOUT, cwd=str(cdir))
     except FileNotFoundError:
         return {"error": "The claude command isn't on PATH. Install Claude Code, then restart the hub."}, 500
     except subprocess.TimeoutExpired:
-        return {"error": "Claude took longer than 4 minutes. Ask again, or narrow the question."}, 504
+        return {"error": f"Claude took longer than {ASK_TIMEOUT // 60} minutes. Ask again, or narrow the question."}, 504
     finally:
         pfile.unlink(missing_ok=True)
     ms = int((time.time() - t0) * 1000)
@@ -363,10 +473,14 @@ def ask(course_id, week, scope, question, session, topic=""):
         data = json.loads(proc.stdout)
     except json.JSONDecodeError:
         return {"error": "Claude returned no answer. " + (proc.stderr or proc.stdout)[-400:].strip()}, 502
+    if data.get("subtype") == "error_max_turns":
+        return {"error": "Claude ran out of look-up steps before answering. Ask a narrower question."}, 502
     if data.get("is_error"):
         return {"error": str(data.get("result") or "Claude reported an error.")}, 502
     cost = data.get("total_cost_usd")
-    log(f"ask course={code} scope={scope} week={week} context_chars={len(material)} ms={ms} cost={cost}")
+    denied = len(data.get("permission_denials") or [])
+    log(f"ask course={code} model={model} map_chars={len(system)} turns={data.get('num_turns')} "
+        f"denied={denied} ms={ms} cost={cost}")
     return {"answer": data.get("result", ""), "session": data.get("session_id"), "ms": ms, "cost": cost}, 200
 
 
@@ -474,27 +588,42 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._file(p, IMAGE_TYPES[p.suffix.lower()]) if p else self._json({"error": "Not a study image."}, 404)
         if u.path == "/api/search":
             return self._json(search(qs.get("q", [""])[0]))
+        if u.path == "/api/models":
+            return self._json({"default": MODEL, "models": [{"id": k, "label": v} for k, v in MODELS.items()]})
+        if u.path == "/api/chats":
+            return self._json(list_chats())
+        if u.path == "/api/chat":
+            c = load_chat(qs.get("id", [""])[0])
+            return self._json(public_chat(c)) if c else self._json({"error": "That chat no longer exists."}, 404)
         return super().do_GET()
 
-    def do_POST(self):
-        if urlparse(self.path).path != "/api/ask":
-            return self._json({"error": "Not found."}, 404)
+    def _body(self):
         try:
-            req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            return json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
         except json.JSONDecodeError:
+            return None
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        req = self._body()
+        if req is None:
             return self._json({"error": "Bad request."}, 400)
+        if path == "/api/chat/delete":
+            f = chat_file(str(req.get("id", "")))
+            if f and f.exists():
+                f.unlink()
+            return self._json({"ok": True})
+        if path != "/api/ask":
+            return self._json({"error": "Not found."}, 404)
         q = (req.get("question") or "").strip()
         if not q:
             return self._json({"error": "Type a question first."}, 400)
-        session = req.get("session") or None
-        if session and not re.fullmatch(r"[A-Za-z0-9-]+", session):
-            session = None
-        scope = "course" if req.get("scope") == "course" else "week"
         try:
             week = int(req.get("week") or 0)
         except (TypeError, ValueError):
             week = 0
-        payload, status = ask(str(req.get("course", "")), week, scope, q, session, str(req.get("topic") or ""))
+        payload, status = ask_chat(str(req.get("chat") or ""), str(req.get("course", "")), q, week,
+                                   str(req.get("topic") or ""), str(req.get("model") or ""))
         self._json(payload, status)
 
 

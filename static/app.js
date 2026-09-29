@@ -10,7 +10,7 @@ const state = {
   week: null,        // week number of the open document, or null
   guide: null,       // parsed week guide (topics) when a guide is open
   view: null,        // -1 = guide overview, n = topic index
-  session: null,     // Ask thread id
+  chat: null,        // id of the saved Ask chat that's open, or null for a new one
 };
 
 // ------------------------------------------------------------ rendering
@@ -725,31 +725,37 @@ document.addEventListener("keydown", (e) => {
 
 // ------------------------------------------------------------ ask panel
 
-// One choice: what Claude answers from — a week of one course, or the whole course.
-// It follows the page you're reading until you pick something else.
+// One choice: which course Claude answers from. It can open any of that course's material.
+// It follows the page you're reading, unless a saved chat is open (a chat keeps its course).
 function fillAskScope() {
   const sel = $("#ask-scope");
   sel.innerHTML = "";
-  for (const c of state.tree) {
-    const grp = document.createElement("optgroup");
-    grp.label = `${c.code} ${c.title}`;
-    for (const w of c.weeks) {
-      const title = weekTitle(w);
-      grp.append(new Option(`Week ${w.n}${title ? " — " + title : ""}`, `${c.id}|week|${w.n}`));
-    }
-    grp.append(new Option(`All of ${c.code} (every week)`, `${c.id}|course|0`));
-    sel.append(grp);
-  }
+  for (const c of state.tree) sel.add(new Option(`${c.code} ${c.title}`, c.id));
 }
 
-function askScope() {
-  const [course, scope, week] = ($("#ask-scope").value || "").split("|");
-  return { course, scope, week: +week || 0 };
+// Which Claude model answers. Remembered in this browser; each answer shows the model used.
+const modelNames = {};
+async function fillModels() {
+  let data = { default: "", models: [] };
+  try { data = await (await fetch("/api/models")).json(); } catch { /* keep the server default */ }
+  const sel = $("#ask-model");
+  sel.innerHTML = "";
+  for (const m of data.models) {
+    sel.add(new Option(m.label, m.id));
+    modelNames[m.id] = m.label.split(" — ")[0];
+  }
+  const saved = store.get("askModel", data.default);
+  sel.value = data.models.some((m) => m.id === saved) ? saved : data.default;
+}
+$("#ask-model").addEventListener("change", (e) => store.set("askModel", e.target.value));
+
+function askCourse() {
+  return $("#ask-scope").value || "";
 }
 
 function syncAskScope() {
-  if (!state.course) return;
-  const want = state.week ? `${state.course.id}|week|${state.week}` : `${state.course.id}|course|0`;
+  if (!state.course || state.chat) return;
+  const want = state.course.id;
   if ($("#ask-scope").value !== want && [...$("#ask-scope").options].some((o) => o.value === want)) {
     $("#ask-scope").value = want;
     newThread();
@@ -757,8 +763,11 @@ function syncAskScope() {
 }
 
 function newThread() {
-  state.session = null;
-  $("#thread").innerHTML = `<p class="hint">Answers come from the parts of your study guide and slides that match your question, with slide citations.</p>`;
+  state.chat = null;
+  $("#ask-scope").disabled = false;
+  $("#chat-title").textContent = "";
+  $("#thread").innerHTML = `<p class="hint">Claude looks through all of this course's guides, slides and handouts and opens what your question needs, with slide citations. Your chats are saved — reopen them from <b>Chats</b>.</p>`;
+  showChats(false);
 }
 
 function addMsg(cls, content) {
@@ -770,25 +779,110 @@ function addMsg(cls, content) {
   return m;
 }
 
+function answerBody(text, course, ms, cost, model) {
+  const body = renderMarkdown(text, course);
+  if (ms != null) {
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const who = model ? `${modelNames[model] || model} · ` : "";
+    meta.textContent = `${who}${(ms / 1000).toFixed(1)} s${cost != null ? ` · $${cost.toFixed(3)}` : ""}`;
+    body.append(meta);
+  }
+  return body;
+}
+
+// ----- saved chats
+
+async function showChats(open) {
+  const list = $("#chat-list");
+  $("#app").classList.toggle("chats-open", open);
+  $("#chats-btn").setAttribute("aria-expanded", open);
+  if (!open) return;
+  list.innerHTML = `<p class="hint">Loading your chats…</p>`;
+  let chats = [];
+  try { chats = await (await fetch("/api/chats")).json(); } catch { /* shown as empty */ }
+  list.innerHTML = chats.length ? "" : `<p class="hint">No saved chats yet. Ask a question and it's saved here automatically.</p>`;
+  for (const c of chats) {
+    const row = document.createElement("div");
+    row.className = "chat-row" + (c.id === state.chat ? " current" : "");
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "chat-open";
+    open.innerHTML = `<strong></strong><span></span>`;
+    open.querySelector("strong").textContent = c.title;
+    open.querySelector("span").textContent =
+      `${c.code || ""} · ${c.count} question${c.count === 1 ? "" : "s"} · ${c.updated}`;
+    open.addEventListener("click", () => openChat(c.id));
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "chat-del";
+    del.textContent = "Delete";
+    del.setAttribute("aria-label", `Delete chat: ${c.title}`);
+    del.addEventListener("click", async () => {
+      if (!confirm(`Delete this chat?\n\n${c.title}`)) return;
+      await fetch("/api/chat/delete", { method: "POST", headers: { "Content-Type": "application/json" },
+                                         body: JSON.stringify({ id: c.id }) });
+      if (state.chat === c.id) newThread();
+      showChats(true);
+    });
+    row.append(open, del);
+    list.append(row);
+  }
+}
+
+async function openChat(id) {
+  const r = await fetch(`/api/chat?id=${encodeURIComponent(id)}`);
+  if (!r.ok) { showChats(true); return; }
+  const c = await r.json();
+  const course = state.tree.find((x) => x.id === c.course);
+  state.chat = c.id;
+  if ([...$("#ask-scope").options].some((o) => o.value === c.course)) $("#ask-scope").value = c.course;
+  $("#ask-scope").disabled = true;   // a chat keeps the course it started with
+  $("#chat-title").textContent = c.title;
+  $("#thread").innerHTML = "";
+  for (const m of c.messages) {
+    if (m.role === "q") addMsg("q", m.text);
+    else drawDiagrams(addMsg("a", answerBody(m.text, course, m.ms, m.cost, m.model)));
+  }
+  showChats(false);
+  $("#question").focus();
+}
+
+$("#chats-btn").addEventListener("click", () => showChats(!$("#app").classList.contains("chats-open")));
 $("#ask-scope").addEventListener("change", newThread);
 $("#new-thread").addEventListener("click", newThread);
 $("#question").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#compose").requestSubmit(); }
 });
 
+// ----- full-screen chat
+
+function setAskFull(on) {
+  $("#app").classList.toggle("ask-full", on);
+  $("#expand-ask").setAttribute("aria-pressed", on);
+  $("#expand-ask").title = on ? "Back to the side panel (Esc)" : "Fill the screen";
+  $("#expand-ask").textContent = on ? "⤡" : "⤢";
+}
+$("#expand-ask").addEventListener("click", () => setAskFull(!$("#app").classList.contains("ask-full")));
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && $("#app").classList.contains("ask-full")) setAskFull(false);
+});
+
 $("#compose").addEventListener("submit", async (e) => {
   e.preventDefault();
   const q = $("#question").value.trim();
   if (!q) return;
-  const { course: courseId, scope, week } = askScope();
+  const courseId = askCourse();
   const course = state.tree.find((x) => x.id === courseId);
   if (!course) return;
-  // The topic on screen (if it's in the chosen scope) is always sent along with the question.
+  // The topic on screen (if it's in the chosen course) is sent along, so "explain this" works.
   const g = state.guide;
-  const onScreen = g && state.view >= 0 && state.course?.id === courseId && (scope === "course" || state.week === week)
-    ? g.topics[state.view].title : "";
+  const here = g && state.view >= 0 && state.course?.id === courseId;
+  const onScreen = here ? g.topics[state.view].title : "";
+  const week = here ? state.week : 0;
   $("#question").value = "";
   $("#thread .hint")?.remove();
+  showChats(false);
   addMsg("q", q);
   const wait = addMsg("wait", "Reading the material…");
   const t0 = Date.now();
@@ -798,18 +892,18 @@ $("#compose").addEventListener("submit", async (e) => {
     const r = await fetch("/api/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ course: courseId, week, scope, question: q, session: state.session, topic: onScreen }),
+      body: JSON.stringify({ chat: state.chat, course: courseId, week, question: q, topic: onScreen,
+                             model: $("#ask-model").value }),
     });
     const data = await r.json();
     wait.remove();
     if (!r.ok || data.error) { addMsg("err", data.error || "The hub couldn't get an answer. Check that it's still running."); return; }
-    state.session = data.session;
-    const body = renderMarkdown(data.answer, course);
-    const meta = document.createElement("div");
-    meta.className = "meta";
-    meta.textContent = `${(data.ms / 1000).toFixed(1)} s${data.cost != null ? ` · $${data.cost.toFixed(3)}` : ""}`;
-    body.append(meta);
-    drawDiagrams(addMsg("a", body));
+    if (!state.chat) {
+      state.chat = data.chat;
+      $("#ask-scope").disabled = true;
+      $("#chat-title").textContent = q.replace(/\s+/g, " ").slice(0, 80);
+    }
+    drawDiagrams(addMsg("a", answerBody(data.answer, course, data.ms, data.cost, data.model)));
   } catch {
     wait.remove();
     addMsg("err", "The hub isn't responding. Start it again with start.bat, then retry.");
@@ -862,6 +956,7 @@ async function setupPhoneLink() {
   state.tree = await (await fetch("/api/tree")).json();
   renderNav();
   fillAskScope();
+  fillModels();
   setupPhoneLink();
   window.addEventListener("hashchange", route);
   route();

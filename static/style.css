@@ -248,9 +248,38 @@ a.wk-row:hover { background: var(--blue-soft); }
 /* ---------- ask panel */
 .ask { border-left: 1px solid var(--rule); background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
 .ask-head { display: flex; align-items: center; gap: .5rem; padding: .8rem 1rem; border-bottom: 1px solid var(--rule); }
-.ask-head h2 { margin: 0 auto 0 0; font: 600 1rem var(--sans); }
+.ask-head h2 { margin: 0 auto 0 0; font: 600 1rem var(--sans); white-space: nowrap; }
+.ask-head .ghost { white-space: nowrap; }
 .ghost { border: 1px solid var(--rule); background: var(--paper); border-radius: 6px; padding: .2rem .6rem; cursor: pointer; font-size: .85rem; }
 .ghost.icon { width: 2rem; font-size: 1.1rem; line-height: 1; padding: .2rem 0; }
+/* saved chats */
+.chat-title { margin: .45rem 0 0; font: 600 .82rem var(--sans); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-title:empty { display: none; }
+.chat-title::before { content: "Continuing: "; font-weight: 400; color: var(--muted); }
+.scope select:disabled { opacity: .75; cursor: not-allowed; }
+.model-pick { display: block; margin-top: .45rem; }
+.chat-list { display: none; flex: 1; overflow-y: auto; padding: .6rem .8rem; }
+.app.chats-open .chat-list { display: block; }
+.app.chats-open .thread, .app.chats-open .compose { display: none; }
+.chat-row { display: flex; align-items: stretch; gap: .3rem; margin-bottom: .35rem; border: 1px solid var(--rule); border-radius: 8px; background: var(--paper); }
+.chat-row.current { border-color: var(--blue); }
+.chat-open { flex: 1; min-width: 0; text-align: left; border: 0; background: none; padding: .55rem .7rem; cursor: pointer; font-family: var(--sans); color: var(--ink); }
+.chat-open:hover { background: var(--blue-soft); border-radius: 8px 0 0 8px; }
+.chat-open strong { display: block; font-size: .86rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-open span { display: block; font-size: .74rem; color: var(--muted); margin-top: .15rem; }
+.chat-del { border: 0; border-left: 1px solid var(--rule); background: none; color: var(--muted); padding: 0 .7rem; cursor: pointer; font: .75rem var(--sans); border-radius: 0 8px 8px 0; }
+.chat-del:hover { color: #b3261e; background: rgba(179, 38, 30, .07); }
+#chats-btn[aria-expanded="true"] { background: var(--blue-soft); border-color: var(--blue); color: var(--blue); }
+
+/* full-screen chat: the panel covers the window; the conversation sits in a readable column */
+.app.ask-full .ask { position: fixed; inset: 0; z-index: 8; width: auto; box-shadow: none; border: 0; }
+.app.ask-full .ask-head, .app.ask-full .scope { padding-left: max(1rem, calc(50% - 26rem)); padding-right: max(1rem, calc(50% - 26rem)); }
+.app.ask-full .thread, .app.ask-full .chat-list { padding-left: max(1rem, calc(50% - 26rem)); padding-right: max(1rem, calc(50% - 26rem)); }
+.app.ask-full .compose { padding-left: max(1rem, calc(50% - 26rem)); padding-right: max(1rem, calc(50% - 26rem)); }
+.app.ask-full .msg { font-size: 1rem; }
+.app.ask-full .scope select { max-width: 30rem; }
+#expand-ask[aria-pressed="true"] { background: var(--blue-soft); color: var(--blue); }
+
 .scope { padding: .7rem 1rem; border-bottom: 1px solid var(--rule); font-size: .82rem; color: var(--muted); }
 .scope select { display: block; width: 100%; margin-top: .25rem; padding: .4rem .45rem; border: 1px solid var(--rule); border-radius: 6px; background: var(--paper); font-size: .88rem; color: var(--ink); }
 .thread { flex: 1; overflow-y: auto; padding: 1rem; display: flex; flex-direction: column; gap: .9rem; }

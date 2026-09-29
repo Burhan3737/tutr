@@ -26,15 +26,20 @@
 
   <aside class="ask" id="ask" aria-label="Ask about the material">
     <div class="ask-head">
-      <h2>Ask about the material</h2>
-      <button class="ghost" id="new-thread" type="button">New thread</button>
+      <h2>Ask</h2>
+      <button class="ghost" id="chats-btn" type="button" aria-expanded="false" aria-controls="chat-list">Chats</button>
+      <button class="ghost" id="new-thread" type="button">New chat</button>
+      <button class="ghost icon" id="expand-ask" type="button" aria-pressed="false" title="Fill the screen" aria-label="Fill the screen">⤢</button>
       <button class="ghost icon" id="close-ask" type="button" aria-label="Hide the Ask panel">×</button>
     </div>
     <div class="scope">
-      <label>Answer from <select id="ask-scope"></select></label>
+      <label>Course <select id="ask-scope"></select></label>
+      <label class="model-pick">Model <select id="ask-model"></select></label>
+      <p class="chat-title" id="chat-title"></p>
     </div>
+    <div class="chat-list" id="chat-list" aria-label="Saved chats"></div>
     <div class="thread" id="thread" aria-live="polite">
-      <p class="hint">Answers come from the parts of your study guide and slides that match your question, with slide citations.</p>
+      <p class="hint">Claude looks through all of this course's guides, slides and handouts and opens what your question needs, with slide citations.</p>
     </div>
     <form class="compose" id="compose">
       <textarea id="question" rows="3" placeholder="e.g. Why does demand slope down?" aria-label="Your question"></textarea>
