@@ -519,6 +519,52 @@ function setupResizer() {
   });
 }
 
+// ---- star and rename
+
+async function updateChat(chat, change) {
+  const r = await api("/api/chat/update", { id: chat.id, ...change });
+  chat.title = r.title; chat.starred = r.starred;
+  return r;
+}
+
+function starButton(chat, after) {
+  const b = h("button", { class: "star" + (chat.starred ? " on" : ""), type: "button" }, chat.starred ? "★" : "☆");
+  const label = () => { b.title = chat.starred ? "Unstar this chat" : "Star this chat"; b.setAttribute("aria-label", b.title); b.setAttribute("aria-pressed", String(!!chat.starred)); };
+  label();
+  b.onclick = async (e) => {
+    e.stopPropagation();
+    try { await updateChat(chat, { starred: !chat.starred }); } catch (err) { return toast(err.message); }
+    b.textContent = chat.starred ? "★" : "☆"; b.classList.toggle("on", chat.starred); label();
+    if (after) after();
+  };
+  return b;
+}
+
+// Click the title to rename it in place: Enter saves, Esc cancels.
+function renamable(chat, cls, after) {
+  const t = h("button", { class: `chat-title ${cls || ""}`, type: "button", title: "Rename this chat" }, chat.title);
+  t.onclick = (e) => {
+    e.stopPropagation();
+    const input = h("input", { class: "rename", type: "text", value: chat.title, maxlength: "120", "aria-label": "Chat name" });
+    let done = false;
+    const finish = async (save) => {
+      if (done) return; done = true;
+      const v = input.value.trim();
+      if (save && v && v !== chat.title) { try { await updateChat(chat, { title: v }); } catch (err) { toast(err.message); } }
+      t.textContent = chat.title; input.replaceWith(t);
+      if (after) after();
+    };
+    input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); finish(true); } if (ev.key === "Escape") { ev.stopPropagation(); finish(false); } });
+    input.addEventListener("blur", () => finish(true));
+    t.replaceWith(input); input.focus(); input.select();
+  };
+  return t;
+}
+
+function chatBar(chat) {
+  return h("div", { class: "chat-bar" }, starButton(chat), renamable(chat));
+}
+
 async function newChat() {
   const d = APP.deck;
   try { await api("/api/chat/new", { course: d.course, tag: d.tag }); } catch { /* the next question still starts fresh */ }
@@ -595,11 +641,12 @@ function drawThread() {
   if (!th) return;
   th.replaceChildren();
   const msgs = APP.deck.chat ? APP.deck.chat.messages : [];
+  if (APP.deck.chat && msgs.length) th.append(chatBar(APP.deck.chat));
   if (!msgs.length) {
     th.append(h("p", { class: "empty" }, "Ask anything about this slide, or tap Try one to practise it."));
     const earlier = APP.deck.chats || [];
     if (earlier.length) th.append(h("div", { class: "earlier" }, h("p", { class: "empty" }, "Earlier chats on this deck:"),
-      ...earlier.map((c) => h("button", { class: "link", type: "button", onclick: () => openChat(c.id) }, c.title))));
+      ...earlier.map((c) => h("button", { class: "link", type: "button", onclick: () => openChat(c.id) }, c.starred ? `★ ${c.title}` : c.title))));
   }
   msgs.forEach((m, i) => {
     if (m.role === "q") th.append(h("p", { class: "msg-q" }, m.text, h("span", { class: "where" }, m.slide ? ` · s${m.slide}` : "")));
@@ -1167,9 +1214,13 @@ async function showHistory() {
   list.replaceChildren();
   if (!chats.length) list.append(h("p", { class: "muted" }, "No tutor chats yet."));
   for (const c of chats) {
+    const open = () => { $("#history-dlg").close(); if (!c.deck) return go({ chat: c.id }); openChat(c.id); };
+    const title = renamable(c, "hist-title", () => { if (APP.deck && APP.deck.chat && APP.deck.chat.id === c.id) { APP.deck.chat.title = c.title; drawThread(); } });
     const row = h("div", { class: "hist-row" },
-      h("button", { class: "open", type: "button", onclick: () => { $("#history-dlg").close(); if (!c.deck) return go({ chat: c.id }); openChat(c.id); } },
-        h("b", {}, c.title), h("span", {}, `${c.code}${c.deck ? " · " + c.deck : ""} · ${c.count} question${c.count === 1 ? "" : "s"} · ${c.updated || c.created}`)),
+      starButton(c, () => { if (APP.deck && APP.deck.chat && APP.deck.chat.id === c.id) { APP.deck.chat.starred = c.starred; drawThread(); } }),
+      h("div", { class: "open" }, title,
+        h("button", { class: "hist-meta", type: "button", onclick: open },
+          `${c.code}${c.deck ? " · " + c.deck : ""} · ${c.count} question${c.count === 1 ? "" : "s"} · ${c.updated || c.created} · Open ›`)),
       h("button", { class: "link quiet", type: "button", onclick: async () => {
         if (!confirm(`Delete this chat?\n\n${c.title}`)) return;
         await api("/api/chat/delete", { id: c.id }).catch(() => {});

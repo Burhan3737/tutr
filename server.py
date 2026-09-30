@@ -236,6 +236,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         S.set_chat(c, ch["deck"], None)
                 f.unlink()
             return self._json({"ok": True})
+        if path == "/api/chat/update":       # rename and/or star
+            return self._json(T.update_chat(str(req.get("id", "")), req.get("title"), req.get("starred")))
         if path == "/api/chat/open":         # make a saved chat the deck's current one
             ch = T.load_chat(str(req.get("id", "")))
             c = self._course(ch["course"]) if ch else None

@@ -195,8 +195,25 @@ def list_chats():
         except (OSError, json.JSONDecodeError):
             continue
         out.append({k: c.get(k) for k in ("id", "title", "course", "code", "deck", "created", "updated")}
-                   | {"count": sum(1 for m in c.get("messages", []) if m["role"] == "q")})
-    return sorted(out, key=lambda c: c["updated"] or "", reverse=True)
+                   | {"starred": bool(c.get("starred")), "count": sum(1 for m in c.get("messages", []) if m["role"] == "q")})
+    out.sort(key=lambda c: c["updated"] or "", reverse=True)
+    return sorted(out, key=lambda c: not c["starred"])       # starred first, each group newest first
+
+
+def update_chat(chat_id, title=None, starred=None):
+    """Rename and/or star a saved chat."""
+    chat = load_chat(chat_id)
+    if not chat:
+        raise TutorError("That chat no longer exists.", 404)
+    if title is not None:
+        title = " ".join(str(title).split())[:120]
+        if not title:
+            raise TutorError("A chat needs a name.", 400)
+        chat["title"] = title
+    if starred is not None:
+        chat["starred"] = bool(starred)
+    save_chat(chat)
+    return {"id": chat["id"], "title": chat["title"], "starred": bool(chat.get("starred"))}
 
 
 def deck_chats(cdir, tag):
