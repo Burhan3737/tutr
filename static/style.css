@@ -241,7 +241,28 @@ h1.page-title { font-size: 28px; line-height: 34px; font-weight: 600; margin: 0 
 .resizer { flex: none; width: 8px; margin: 0 -4px; position: relative; z-index: 3; cursor: col-resize; touch-action: none; }
 .resizer::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: transparent; transition: background .15s; }
 .resizer:hover::after, .resizer:focus-visible::after, .resizer.active::after { background: var(--accent); }
-.new-chat { font-size: 13px; min-height: 36px; }
+.new-chat { font-size: 13px; min-height: 36px; padding: 0 6px; }
+.copy-one { display: block; margin: 0 0 0 auto; border: 0; background: none; color: var(--text-2);
+  font-size: 12px; padding: 2px 8px; border-radius: 6px; cursor: pointer; opacity: 0; transition: opacity .15s; }
+.ans:hover .copy-one, .copy-one:focus-visible { opacity: 1; }
+.copy-one:hover { color: var(--accent); background: var(--accent-soft); }
+@media (hover: none) { .copy-one { opacity: 1; } }
+.toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 90; background: var(--text);
+  color: var(--bg); padding: 8px 16px; border-radius: 999px; font-size: 13px; box-shadow: var(--shadow-pop); }
+#print-root { display: none; }
+@media print {
+  body.printing { display: block; overflow: visible; height: auto; background: #fff; color: #000; }
+  body.printing > *:not(#print-root) { display: none !important; }
+  body.printing #print-root { display: block; max-width: 70ch; margin: 0 auto; font: 11pt/1.55 var(--font); color: #000; }
+  #print-root h1 { font-size: 16pt; line-height: 1.3; margin: 0 0 2pt; }
+  #print-root .print-meta { color: #555; font-size: 9pt; margin: 0 0 14pt; border-bottom: 1px solid #ccc; padding-bottom: 8pt; }
+  #print-root .print-q { background: #edf1f9; border-radius: 8px; padding: 6pt 10pt; margin: 14pt 0 6pt; break-inside: avoid; }
+  #print-root .print-a { margin: 0 0 6pt; }
+  #print-root .print-a p, #print-root .print-a li { orphans: 3; widows: 3; }
+  #print-root pre, #print-root table, #print-root .katex-display { break-inside: avoid; }
+  #print-root a { color: #000; }
+  #print-root .cite { background: none; padding: 0; color: #333; font-weight: 600; }
+}
 .earlier { display: flex; flex-direction: column; align-items: flex-start; margin-top: 8px; }
 .earlier .link { font-weight: 400; min-height: 32px; text-align: left; }
 .tutor.quiet-rail .rail .go { background: none; color: var(--accent); box-shadow: inset 0 0 0 1.5px var(--accent); }

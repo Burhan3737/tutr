@@ -558,6 +558,8 @@ function renderTutor() {
   const thread = h("div", { class: "thread", id: "thread", "aria-live": "polite" });
   t.replaceChildren(h("div", { class: "panel" },
     h("div", { class: "panel-head" }, h("h2", {}, "Tutor"), h("span", { class: "muted small", id: "tutor-where" }),
+      h("button", { class: "link quiet new-chat", type: "button", title: "Copy this chat as Markdown", onclick: () => copyChat(APP.deck.chat, APP.deck) }, "Copy chat"),
+      h("button", { class: "link quiet new-chat", type: "button", title: "Print this chat, or save it as a PDF", onclick: () => printChat(APP.deck.chat, APP.deck) }, "PDF"),
       h("button", { class: "link quiet new-chat", type: "button", title: "Start a new chat on this deck", onclick: newChat }, "New chat"),
       h("button", { class: "icon-btn", type: "button", "aria-label": "Close the tutor", onclick: () => { APP.tutor = "closed"; renderTutor(); } }, "×")),
     h("div", { class: "panel-actions" },
@@ -617,7 +619,8 @@ function answerEl(m, isLast) {
     needsP.replaceWith(h("div", { class: "needs" }, "Needs:",
       ...items.map((it) => h("button", { class: "chip wrap", type: "button", title: "Brush up on this", onclick: () => tutorAsk("brush", it) }, plain(it)))));
   }
-  const wrap = h("div", {}, body);
+  const wrap = h("div", { class: "ans" }, body,
+    h("button", { class: "copy-one", type: "button", title: "Copy this answer", onclick: (e) => copyText(m.text, e.currentTarget) }, "Copy"));
   if (isLast) {
     const next = m.mode === "example"
       ? h("button", { class: "link", type: "button", onclick: () => startPracticeInPanel({ kind: "yourturn", example_md: m.text }) }, "Your turn: finish from here ›")
@@ -646,6 +649,65 @@ function inlineMd(t, courseId) {
   const box = renderMd(t, courseId);
   const p = box.firstElementChild;
   return p && p.tagName === "P" && box.children.length === 1 ? [...p.childNodes] : [...box.childNodes];
+}
+
+// ---- copy and print a chat
+
+function toast(msg) {
+  const t = h("div", { class: "toast", role: "status" }, msg);
+  document.body.append(t);
+  setTimeout(() => t.remove(), 1800);
+}
+
+// navigator.clipboard needs a secure page; over the Wi-Fi address (http) the old copy command is the fallback.
+async function copyText(text, btn) {
+  let ok = false;
+  try { await navigator.clipboard.writeText(text); ok = true; } catch {
+    const ta = h("textarea", { style: "position:fixed;opacity:0" });
+    ta.value = text; document.body.append(ta); ta.select();
+    try { ok = document.execCommand("copy"); } catch { ok = false; }
+    ta.remove();
+  }
+  if (btn) { const old = btn.textContent; btn.textContent = ok ? "Copied" : "Couldn't copy"; setTimeout(() => { btn.textContent = old; }, 1500); }
+  else toast(ok ? "Copied" : "Couldn't copy");
+}
+
+function chatMeta(chat, deck) {
+  const code = chat.code || (deck && deck.code) || "";
+  const where = deck ? `${deck.tag} · ${deck.title}` : (chat.deck || "");
+  return [code, where, chat.updated || chat.created || ""].filter(Boolean).join(" · ");
+}
+
+function chatMarkdown(chat, deck) {
+  const out = [`# ${chat.title || "Tutor chat"}`, "", `_${chatMeta(chat, deck)}_`, ""];
+  for (const m of chat.messages || []) {
+    if (m.role === "q") out.push(`**You**${m.slide ? ` (slide ${m.slide})` : ""}: ${m.text}`, "");
+    else out.push(m.text.trim(), "", "---", "");
+  }
+  return out.join("\n");
+}
+
+function copyChat(chat, deck) {
+  if (!chat || !(chat.messages || []).length) return toast("Nothing to copy yet");
+  copyText(chatMarkdown(chat, deck));
+}
+
+// Print only the chat (questions, answers with rendered maths); the browser's dialog offers "Save as PDF".
+function printChat(chat, deck) {
+  if (!chat || !(chat.messages || []).length) return toast("Nothing to print yet");
+  const courseId = chat.course || (deck && deck.course);
+  const root = h("article", { id: "print-root" },
+    h("h1", {}, chat.title || "Tutor chat"), h("p", { class: "print-meta" }, chatMeta(chat, deck)));
+  for (const m of chat.messages) {
+    if (m.role === "q") root.append(h("p", { class: "print-q" }, h("b", {}, "You"), m.slide ? ` (slide ${m.slide})` : "", ": ", m.text));
+    else { const b = renderMd(m.text, courseId); b.className = "print-a"; root.append(b); }
+  }
+  $("#print-root")?.remove();
+  document.body.append(root);
+  document.body.classList.add("printing");
+  const done = () => { document.body.classList.remove("printing"); root.remove(); };
+  window.addEventListener("afterprint", done, { once: true });
+  setTimeout(() => window.print(), 50);
 }
 
 function metaText(m) {
@@ -682,6 +744,7 @@ async function tutorAsk(mode, question = "") {
     });
     const chat = d.chat || { id: r.chat, title: mode === "ask" ? question : MODE_LABEL[mode] || question, updated: "", messages: [] };
     chat.messages.push({ role: "q", mode, slide: n, text: mode === "ask" ? question : mode === "brush" ? `Brush up: ${question}` : MODE_LABEL[mode] }, r.message);
+    chat.updated = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
     d.chat = chat;
     if (!d.asked.includes(n)) d.asked.push(n);
     if (APP.deck === d) { drawThread(); showAskedMark(); }
@@ -949,7 +1012,9 @@ async function showOldChat(id, token) {
   const c = await api(`/api/chat?id=${encodeURIComponent(id)}`);
   if (token !== routeToken) return;
   setCrumbs({ label: "Home", href: "#" }, { label: "Earlier chat" });
-  const art = h("article", { class: "prose" }, h("h1", {}, c.title));
+  const art = h("article", { class: "prose" }, h("h1", {}, c.title),
+    h("p", {}, h("button", { class: "link", type: "button", onclick: () => copyChat(c) }, "Copy chat"), " ",
+      h("button", { class: "link", type: "button", onclick: () => printChat(c) }, "Save as PDF")));
   for (const m of c.messages || []) {
     if (m.role === "q") art.append(h("p", { class: "msg-q" }, m.text));
     else { const b = renderMd(m.text, c.course); b.className = "msg-a"; art.append(b); }
