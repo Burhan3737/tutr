@@ -261,8 +261,11 @@ h1.page-title { font-size: 28px; line-height: 34px; font-weight: 600; margin: 0 
 .panel-actions .links { display: flex; gap: 12px; flex-wrap: wrap; }
 .thread { flex: 1; min-height: 0; overflow: auto; padding: 8px 20px 16px; }
 .thread .empty { color: var(--text-2); font-size: 13px; }
-.msg-q { font-weight: 600; font-size: 13px; color: var(--text-2); margin: 20px 0 6px; }
-.msg-q .where { font-weight: 400; }
+/* Your messages: right-aligned bubbles; the tutor's answers stay full width on the left. */
+.msg-q { width: fit-content; max-width: 85%; margin: 20px 0 10px auto; padding: 8px 12px;
+  background: var(--accent-soft); color: var(--text); border-radius: 14px 14px 4px 14px;
+  font-size: 15px; line-height: 22px; font-weight: 400; white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg-q .where { font-size: 12px; color: var(--text-2); white-space: nowrap; }
 .msg-a { font-size: 16px; line-height: 26px; max-width: 62ch; }
 .msg-a p { margin: 0 0 10px; }
 .msg-a ul, .msg-a ol { padding-left: 22px; margin: 0 0 10px; }
