@@ -67,7 +67,8 @@ def deck_view(cdir, tag):
     asked = sorted({m["slide"] for m in (chat or {}).get("messages", []) if m.get("slide")})
     info = L.course_info(cdir)
     topic = next(t for t in info["topics"] if t["name"] == d["topic"])
-    return {**_deck_public(d), "course": cdir.name, "code": info["code"], "read_more": topic["read_more"],
+    chats = [c for c in T.deck_chats(cdir, tag) if not chat or c["id"] != chat["id"]][:5]
+    return {**_deck_public(d), "course": cdir.name, "code": info["code"], "read_more": topic["read_more"], "chats": chats,
             "topic_decks": topic["decks"],
             "slides_text": [{"n": x["n"], "title": x["title"], "md": x["md"], "raw": x.get("raw", False)}
                             for x in L.slide_texts(cdir, tag)],
@@ -235,6 +236,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         S.set_chat(c, ch["deck"], None)
                 f.unlink()
             return self._json({"ok": True})
+        if path == "/api/chat/open":         # make a saved chat the deck's current one
+            ch = T.load_chat(str(req.get("id", "")))
+            c = self._course(ch["course"]) if ch else None
+            if not c or not ch.get("deck"):
+                return self._json({"error": "That chat can't be continued."}, 404)
+            S.set_chat(c, ch["deck"], ch["id"])
+            return self._json({"course": ch["course"], "deck": ch["deck"]})
         if path == "/api/practice/hint":
             return self._json(T.hint(str(req.get("id", ""))))
         if path == "/api/practice/photo":
@@ -257,6 +265,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         c = self._course(req.get("course"))
         if not c:
             return self._json({"error": "Unknown course."}, 404)
+        if path == "/api/chat/new":          # the next question on this deck starts a fresh conversation
+            S.set_chat(c, str(req.get("tag", "")), None)
+            return self._json({"ok": True})
         if path == "/api/seen":
             ds = S.mark_seen(c, str(req.get("tag", "")), int(req.get("n") or 1))
             return self._json({"state": ds} if ds else {"error": "Unknown deck."}, 200 if ds else 404)

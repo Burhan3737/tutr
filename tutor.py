@@ -199,6 +199,11 @@ def list_chats():
     return sorted(out, key=lambda c: c["updated"] or "", reverse=True)
 
 
+def deck_chats(cdir, tag):
+    """Every saved chat on one deck, newest first (for the 'earlier chats' list)."""
+    return [c for c in list_chats() if c.get("course") == cdir.name and c.get("deck") == tag]
+
+
 def public_chat(c):
     return {k: v for k, v in c.items() if k != "session"}
 

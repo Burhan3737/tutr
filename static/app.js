@@ -350,7 +350,10 @@ function buildViewer() {
     h("button", { class: "nav-arrow next", id: "next", type: "button", "aria-label": "Next slide (→)", onclick: () => step(1) }, "›"),
     h("div", { class: "transcript", id: "transcript", hidden: true }, h("div", { class: "inner", id: "transcript-inner" })));
   const tutor = h("aside", { class: "tutor", id: "tutor", "aria-label": "Tutor" });
-  $("#main").replaceChildren(h("div", { class: "viewer" }, stage, tutor));
+  const resizer = h("div", { class: "resizer", id: "resizer", role: "separator", "aria-orientation": "vertical", tabindex: "0",
+    "aria-label": "Resize the tutor panel (drag, or ← → keys; double-click to reset)", title: "Drag to resize · double-click to reset", hidden: true });
+  $("#main").replaceChildren(h("div", { class: "viewer" }, stage, resizer, tutor));
+  setupResizer();
   const sm = $("#stage-main");
   let x0 = null, y0 = null;
   sm.addEventListener("touchstart", (e) => { if (e.touches.length === 1) { x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; } }, { passive: true });
@@ -475,8 +478,66 @@ function setTutor(mode) {
   if (!t) return;
   t.classList.toggle("open", mode === "open");
   t.classList.toggle("focus", mode === "focus");
+  // The panel's width is dragged by its left edge; practice mode remembers its own width.
+  const saved = mode === "open" ? store.get("panelW", 0) : mode === "focus" ? store.get("focusW", 0) : 0;
+  t.style.width = saved && !isPhone() ? `${clampPanel(saved)}px` : "";
+  $("#resizer")?.toggleAttribute("hidden", mode === "closed" || isPhone());
   $("#stage")?.classList.toggle("shrunk", mode === "focus");
   if (mode !== "focus") restoreStage();
+}
+
+function clampPanel(w) {
+  const v = $(".viewer");
+  const max = (v ? v.clientWidth : innerWidth) * 0.75;
+  return Math.round(Math.max(300, Math.min(max, w)));
+}
+
+function setupResizer() {
+  const r = $("#resizer"), t = $("#tutor");
+  if (!r || !t) return;
+  r.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    r.setPointerCapture(e.pointerId);
+    t.classList.add("dragging"); r.classList.add("active");
+    const right = $(".viewer").getBoundingClientRect().right;
+    const move = (ev) => { t.style.width = `${clampPanel(right - ev.clientX)}px`; };
+    const up = () => {
+      t.classList.remove("dragging"); r.classList.remove("active");
+      r.removeEventListener("pointermove", move);
+      store.set(APP.tutor === "focus" ? "focusW" : "panelW", parseInt(t.style.width, 10));
+    };
+    r.addEventListener("pointermove", move);
+    r.addEventListener("pointerup", up, { once: true });
+  });
+  r.addEventListener("dblclick", () => { store.set(APP.tutor === "focus" ? "focusW" : "panelW", 0); t.style.width = ""; });
+  r.addEventListener("keydown", (e) => {      // keyboard: ←/→ widen or narrow by 40 px
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    const w = clampPanel(t.getBoundingClientRect().width + (e.key === "ArrowLeft" ? 40 : -40));
+    t.style.width = `${w}px`;
+    store.set(APP.tutor === "focus" ? "focusW" : "panelW", w);
+  });
+}
+
+async function newChat() {
+  const d = APP.deck;
+  try { await api("/api/chat/new", { course: d.course, tag: d.tag }); } catch { /* the next question still starts fresh */ }
+  if (d.chat) d.chats = [{ id: d.chat.id, title: d.chat.title, updated: d.chat.updated }, ...(d.chats || [])].slice(0, 5);
+  d.chat = null;
+  d.asked = [];
+  drawThread();
+  $("#ask-input")?.focus();
+}
+
+async function openChat(id) {
+  try {
+    const r = await api("/api/chat/open", { id });
+    APP.tutor = "open";
+    if (APP.deck && APP.deck.course === r.course && APP.deck.tag === r.deck) {
+      APP.deck = await api(`/api/deck?course=${encodeURIComponent(r.course)}&tag=${encodeURIComponent(r.deck)}`);
+      renderTutor();
+    } else go({ c: r.course, d: r.deck, s: "" });
+  } catch (e) { alert(e.message); }
 }
 
 function renderTutor() {
@@ -497,6 +558,7 @@ function renderTutor() {
   const thread = h("div", { class: "thread", id: "thread", "aria-live": "polite" });
   t.replaceChildren(h("div", { class: "panel" },
     h("div", { class: "panel-head" }, h("h2", {}, "Tutor"), h("span", { class: "muted small", id: "tutor-where" }),
+      h("button", { class: "link quiet new-chat", type: "button", title: "Start a new chat on this deck", onclick: newChat }, "New chat"),
       h("button", { class: "icon-btn", type: "button", "aria-label": "Close the tutor", onclick: () => { APP.tutor = "closed"; renderTutor(); } }, "×")),
     h("div", { class: "panel-actions" },
       h("button", { class: "btn block", type: "button", onclick: () => startPracticeInPanel({ kind: "try" }) }, "Try one"),
@@ -531,7 +593,12 @@ function drawThread() {
   if (!th) return;
   th.replaceChildren();
   const msgs = APP.deck.chat ? APP.deck.chat.messages : [];
-  if (!msgs.length) th.append(h("p", { class: "empty" }, "Ask anything about this slide, or tap Try one to practise it."));
+  if (!msgs.length) {
+    th.append(h("p", { class: "empty" }, "Ask anything about this slide, or tap Try one to practise it."));
+    const earlier = APP.deck.chats || [];
+    if (earlier.length) th.append(h("div", { class: "earlier" }, h("p", { class: "empty" }, "Earlier chats on this deck:"),
+      ...earlier.map((c) => h("button", { class: "link", type: "button", onclick: () => openChat(c.id) }, c.title))));
+  }
   msgs.forEach((m, i) => {
     if (m.role === "q") th.append(h("p", { class: "msg-q" }, m.text, h("span", { class: "where" }, m.slide ? ` · s${m.slide}` : "")));
     else th.append(answerEl(m, i === msgs.length - 1));
@@ -1036,8 +1103,8 @@ async function showHistory() {
   if (!chats.length) list.append(h("p", { class: "muted" }, "No tutor chats yet."));
   for (const c of chats) {
     const row = h("div", { class: "hist-row" },
-      h("button", { class: "open", type: "button", onclick: () => { $("#history-dlg").close(); if (!c.deck) return go({ chat: c.id }); APP.tutor = "open"; go({ c: c.course, d: c.deck, s: "" }); } },
-        h("b", {}, c.title), h("span", {}, `${c.code} · ${c.count} question${c.count === 1 ? "" : "s"} · ${c.updated || c.created}`)),
+      h("button", { class: "open", type: "button", onclick: () => { $("#history-dlg").close(); if (!c.deck) return go({ chat: c.id }); openChat(c.id); } },
+        h("b", {}, c.title), h("span", {}, `${c.code}${c.deck ? " · " + c.deck : ""} · ${c.count} question${c.count === 1 ? "" : "s"} · ${c.updated || c.created}`)),
       h("button", { class: "link quiet", type: "button", onclick: async () => {
         if (!confirm(`Delete this chat?\n\n${c.title}`)) return;
         await api("/api/chat/delete", { id: c.id }).catch(() => {});
