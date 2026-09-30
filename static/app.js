@@ -1,121 +1,101 @@
+// Study Hub — slide-first study with a tutor. Course → Topic → Deck → Slide.
+// Routes (hash): "" home · c=ID course · c=ID&d=TAG&s=N slide · c=ID&notes=PATH class notes ·
+//                review=ID reviews · upload=PID phone photo page
 "use strict";
-// Study Hub front end: sidebar tree, Markdown + KaTeX reader, search, Ask panel.
-// All data comes from server.py; nothing here knows about specific courses.
 
-const $ = (s) => document.querySelector(s);
-const state = {
-  tree: [],
-  path: null,        // repo-relative path of the open document
-  course: null,      // course object the open document belongs to
-  week: null,        // week number of the open document, or null
-  guide: null,       // parsed week guide (topics) when a guide is open
-  view: null,        // -1 = guide overview, n = topic index
-  chat: null,        // id of the saved Ask chat that's open, or null for a new one
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const h = (tag, attrs = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v == null || v === false) continue;
+    if (k === "class") e.className = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else if (k === "html") e.innerHTML = v;
+    else e.setAttribute(k, v === true ? "" : v);
+  }
+  for (const k of kids.flat()) if (k != null && k !== false) e.append(k.nodeType ? k : String(k));
+  return e;
 };
+// Let replaceChildren/append skip null/false, so "cond ? el : null" can be passed straight in.
+for (const proto of [Element.prototype, DocumentFragment.prototype]) {
+  for (const name of ["replaceChildren", "append"]) {
+    const orig = proto[name];
+    proto[name] = function (...kids) { return orig.apply(this, kids.flat().filter((k) => k != null && k !== false)); };
+  }
+}
+const store = {
+  get: (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } },
+};
+const isPhone = () => matchMedia("(max-width: 760px)").matches;
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
-// ------------------------------------------------------------ rendering
-
-function slug(text) {
-  return text.toLowerCase().replace(/MATHTOKEN\d+X/g, "").replace(/<[^>]+>/g, "")
-    .replace(/[^\p{L}\p{N}\s-]/gu, "").trim().replace(/\s+/g, "-");
+async function api(path, body) {
+  const opt = body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {};
+  let r;
+  try { r = await fetch(path, opt); } catch { throw new Error("The hub isn't responding. Start it again with start.bat, then retry."); }
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok || data.error) throw new Error(data.error || "Something went wrong. Try again.");
+  return data;
 }
 
-function renderMarkdown(md, course, docPath) {
+const APP = {
+  home: null, courses: {}, deck: null, n: 1, tutor: "closed", pending: null, text: false, zoom: false,
+  model: null, models: [], phoneUrl: null,
+  session: store.get("session", null),
+};
+const STEPS = [["review", "Review"], ["new", "New slides"], ["practise", "Practise"], ["mix", "Mixed"], ["note", "Note"]];
+
+// ------------------------------------------------------------ markdown + math
+
+function renderMd(md, courseId) {
   const code = [], math = [];
-  // Point relative image paths at the hub before the HTML exists, so the browser never
-  // requests the unresolved path (it starts loading <img> as soon as it's parsed).
-  if (docPath) {
-    const dir = docPath.split("/").slice(0, -1);
-    md = md.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (m, alt, src) => {
-      if (/^[a-z]+:|^\//i.test(src)) return m;
-      const parts = [...dir];
-      for (const seg of src.split("/")) { if (seg === "..") parts.pop(); else if (seg && seg !== ".") parts.push(seg); }
-      return `![${alt}](/api/img?path=${encodeURIComponent(parts.join("/"))})`;
-    });
-  }
-  // Keep code verbatim so dollar signs inside it are never read as math.
-  let src = md.replace(/```[\s\S]*?```|`[^`\n]+`/g, (m) => { code.push(m); return `CODETOKEN${code.length - 1}X`; });
+  let src = String(md || "").replace(/```[\s\S]*?```|`[^`\n]+`/g, (m) => { code.push(m); return `CODETOKEN${code.length - 1}X`; });
   src = src.replace(/\$\$([\s\S]+?)\$\$/g, (_, t) => { math.push([t, true]); return `MATHTOKEN${math.length - 1}X`; });
-  src = src.replace(/(^|[^\\$])\$([^\s$](?:[^$\n]*?[^\s$])?)\$(?!\d)/g,
-    (_, pre, t) => { math.push([t, false]); return `${pre}MATHTOKEN${math.length - 1}X`; });
+  src = src.replace(/(^|[^\\$])\$([^\s$](?:[^$\n]*?[^\s$])?)\$(?!\d)/g, (_, pre, t) => { math.push([t, false]); return `${pre}MATHTOKEN${math.length - 1}X`; });
   src = src.replace(/CODETOKEN(\d+)X/g, (_, i) => code[+i]);
-
   const box = document.createElement("div");
-  box.innerHTML = marked.parse(src, { gfm: true });
-
-  const used = new Set();
-  box.querySelectorAll("h1,h2,h3,h4").forEach((h) => {
-    let id = slug(h.textContent) || "section";
-    while (used.has(id)) id += "-";
-    used.add(id);
-    h.id = id;
-  });
-
+  box.innerHTML = marked.parse(src, { gfm: true, breaks: false });
   box.innerHTML = box.innerHTML.replace(/MATHTOKEN(\d+)X/g, (_, i) => {
     const [tex, display] = math[+i];
-    try { return katex.renderToString(tex, { displayMode: display, throwOnError: false }); }
-    catch { return tex; }
+    try { return katex.renderToString(tex, { displayMode: display, throwOnError: false }); } catch { return esc(tex); }
   });
-
-  // ```mermaid blocks become diagrams; they're drawn once the box is in the page (drawDiagrams).
-  box.querySelectorAll("pre > code.language-mermaid").forEach((c) => {
-    const d = document.createElement("div");
-    d.className = "mermaid";
-    d.textContent = c.textContent;
-    c.parentElement.replaceWith(d);
-  });
-
-  if (course) linkCitations(box, course);
   box.querySelectorAll("a[href]").forEach((a) => {
-    if (/^https?:/.test(a.getAttribute("href"))) { a.target = "_blank"; a.rel = "noopener"; }
+    if (/^https?:/.test(a.getAttribute("href"))) {
+      a.target = "_blank"; a.rel = "noopener";
+      try { if (a.textContent.trim() === a.href || /^https?:/.test(a.textContent)) a.textContent = new URL(a.href).hostname.replace(/^www\./, ""); } catch { /* keep */ }
+    }
   });
+  if (courseId) linkCitations(box, courseId);
   return box;
 }
 
-let mermaidReady = false;
-async function drawDiagrams(root) {
-  const nodes = [...root.querySelectorAll("div.mermaid:not([data-processed])")];
-  if (!nodes.length || typeof mermaid === "undefined") return;
-  if (!mermaidReady) {
-    const dark = matchMedia("(prefers-color-scheme: dark)").matches;
-    mermaid.initialize({ startOnLoad: false, theme: dark ? "dark" : "neutral", securityLevel: "strict" });
-    mermaidReady = true;
-  }
-  try { await mermaid.run({ nodes }); }
-  catch (e) { console.warn("diagram failed", e); }
+function courseTags(courseId) {
+  const c = APP.courses[courseId];
+  return c ? c.topics.flatMap((t) => t.decks.map((d) => d.tag)) : [];
 }
 
-// Slide images sit in collapsed boxes; load them only when scrolled to.
-function lazyImages(root) {
-  root.querySelectorAll("img").forEach((img) => { img.loading = "lazy"; });
-}
-
-// [S&D-2 s14], [Ch1 s3–5], [U1-2 s4] become links to that PDF page.
-function linkCitations(root, course) {
-  const tags = course.tags || {};
-  const names = Object.keys(tags).sort((a, b) => b.length - a.length).map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  if (!names.length) return;
-  const re = new RegExp(`\\[(${names.join("|")}) s(\\d+)([^\\]]*)\\]`, "g");
+// [S&D-2 s14] / [S&D-2 s14–s16] become chips that open the slide.
+function linkCitations(root, courseId) {
+  const tags = courseTags(courseId).sort((a, b) => b.length - a.length).map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  if (!tags.length) return;
+  const re = new RegExp(`\\[(${tags.join("|")}) s(\\d+)([^\\]]*)\\]`, "g");
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode: (n) => n.parentElement.closest("code,pre,.katex,a") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+    acceptNode: (n) => n.parentElement.closest("code,pre,.katex,a,button") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
   });
   const nodes = [];
-  while (walker.nextNode()) if (re.test(walker.currentNode.nodeValue)) nodes.push(walker.currentNode);
+  while (walker.nextNode()) { re.lastIndex = 0; if (re.test(walker.currentNode.nodeValue)) nodes.push(walker.currentNode); }
   for (const node of nodes) {
     const frag = document.createDocumentFragment();
-    let last = 0;
     const text = node.nodeValue;
+    let last = 0;
     re.lastIndex = 0;
     for (let m; (m = re.exec(text));) {
       frag.append(text.slice(last, m.index));
-      const a = document.createElement("a");
-      a.className = "cite";
-      a.href = `/api/src?path=${encodeURIComponent(tags[m[1]])}#page=${m[2]}`;
-      a.target = "_blank";
-      a.rel = "noopener";
-      a.title = `Open ${tags[m[1]].split("/").pop()} at slide ${m[2]}`;
-      a.textContent = m[0].slice(1, -1);
-      frag.append(a);
+      const [tag, n] = [m[1], +m[2]];
+      frag.append(h("button", { class: "cite", type: "button", title: `Open ${tag} slide ${n}`,
+        onclick: () => go({ c: courseId, d: tag, s: n }) }, m[0].slice(1, -1)));
       last = m.index + m[0].length;
     }
     frag.append(text.slice(last));
@@ -123,841 +103,982 @@ function linkCitations(root, course) {
   }
 }
 
-// ------------------------------------------------------------ navigation
+// ------------------------------------------------------------ routing
 
-function courseOf(path) { return state.tree.find((c) => path.startsWith(c.id + "/")) || null; }
-function weekOf(path) { const m = path.match(/\/study\/weeks\/Week(\d+)\//); return m ? +m[1] : null; }
-function docLabel(d) { return ({ guide: "Study guide", progress: "Progress & deadlines", "course-map": "Key takeaways" })[d.name] || d.title; }
-const weekTitle = (w) => (w.title || "").replace(/^Week\s*\d+\s*[·:.-]\s*/i, "");
-
-// ------------------------------------------------------------ study progress (this browser only)
-
-const store = {
-  get(key, fallback) { try { return JSON.parse(localStorage.getItem("studyhub:" + key)) ?? fallback; } catch { return fallback; } },
-  set(key, value) { localStorage.setItem("studyhub:" + key, JSON.stringify(value)); },
-};
-const doneSet = (path) => new Set(store.get("done", {})[path] || []);
-function setDone(path, id, on) {
-  const all = store.get("done", {});
-  const s = new Set(all[path] || []);
-  on ? s.add(id) : s.delete(id);
-  all[path] = [...s];
-  store.set("done", all);
+function params() { return Object.fromEntries(new URLSearchParams(location.hash.slice(1))); }
+function go(p) {
+  const hash = "#" + new URLSearchParams(Object.entries(p).filter(([, v]) => v != null && v !== "")).toString();
+  if (location.hash === hash) route(); else location.hash = hash;
 }
 
-function navButton(doc, label) {
-  const b = document.createElement("a");
-  b.className = "nav-item";
-  b.href = `#doc=${encodeURIComponent(doc.path)}`;
-  b.textContent = label;
-  b.dataset.path = doc.path;
-  return b;
+async function loadCourse(id, fresh) {
+  if (!APP.courses[id] || fresh) APP.courses[id] = await api(`/api/course?id=${encodeURIComponent(id)}`);
+  return APP.courses[id];
 }
 
-function renderNav() {
-  const nav = $("#nav");
-  nav.innerHTML = "";
-  if (!state.tree.length) {
-    nav.innerHTML = `<p class="nav-label">No courses yet. A course is any top-level folder with a <code>study/</code> folder.</p>`;
+let routeToken = 0;
+async function route() {
+  const p = params();
+  const token = ++routeToken;
+  closeMenu();
+  renderSessionBar();
+  const main = $("#main");
+  try {
+    if (p.upload) return await showUpload(p.upload);
+    if (p.chat) return await showOldChat(p.chat, token);
+    if (p.review) return await showReview(p.review, token);
+    if (p.c && p.d) return await showViewer(p.c, p.d, +p.s || 0, token);
+    if (p.c && p.notes) return await showNotes(p.c, p.notes, token);
+    if (p.c) return await showCourse(p.c, token);
+    if (p.step === "note") return showNoteStep();
+    return await showHome(token);
+  } catch (e) {
+    if (token !== routeToken) return;
+    main.replaceChildren(h("div", { class: "page" }, h("p", { class: "err" }, e.message)));
+  }
+}
+
+function setCrumbs(...parts) {
+  const nav = $("#crumbs");
+  nav.replaceChildren();
+  if (APP.session && !params().upload) {
+    const c = APP.courses[APP.session.course];
+    nav.append(h("span", { class: "here" }, `Session${c ? " · " + c.code : ""}`),
+      h("button", { class: "link quiet end-session", type: "button", onclick: endSession }, "End session"));
     return;
   }
-  for (const c of state.tree) {
-    const sec = document.createElement("section");
-    sec.className = "course";
-    sec.innerHTML = `<h3>${c.code}<small>${c.title}</small></h3>`;
-    for (const d of c.docs) sec.append(navButton(d, docLabel(d)));
-
-    if (c.weeks.length) {
-      const g = document.createElement("div");
-      g.className = "nav-group";
-      g.innerHTML = `<div class="nav-label">Weeks</div>`;
-      for (const w of c.weeks) {
-        const guide = w.docs.find((d) => d.name === "guide");
-        if (!guide) {
-          const s = document.createElement("span");
-          s.className = "nav-item week-item muted";
-          s.innerHTML = `<span class="wk-n"></span><span class="wk-t">Guide not built yet</span>`;
-          s.querySelector(".wk-n").textContent = `Week ${w.n}`;
-          g.append(s);
-          continue;
-        }
-        const a = navButton(guide, "");
-        a.classList.add("week-item");
-        const done = doneSet(guide.path).size;
-        a.innerHTML = `<span class="wk-n"></span><span class="wk-t"></span><span class="wk-bar"><i></i></span><span class="wk-c"></span>`;
-        a.querySelector(".wk-n").textContent = `Week ${w.n}`;
-        a.querySelector(".wk-t").textContent = weekTitle(w);
-        a.querySelector(".wk-bar i").style.width = `${w.topics ? Math.round(100 * done / w.topics) : 0}%`;
-        a.querySelector(".wk-c").textContent = `${done} of ${w.topics} understood`;
-        g.append(a);
-      }
-      sec.append(g);
-    }
-    for (const [label, groups] of [["Exams", c.exams], ["Labs and assignments", c.work]]) {
-      if (!groups.length) continue;
-      const g = document.createElement("div");
-      g.className = "nav-group";
-      g.innerHTML = `<div class="nav-label">${label}</div>`;
-      for (const grp of groups) for (const d of grp.docs) g.append(navButton(d, `${grp.name}: ${docLabel(d)}`));
-      sec.append(g);
-    }
-    nav.append(sec);
-  }
-  markCurrent();
-}
-
-// ------------------------------------------------------------ document structure
-
-// The six per-topic sections of a week guide, and the colour family each one gets.
-const PART_KINDS = {
-  "from the slides": "slides", "what you need to know first": "prereq", "in plain english": "plain",
-  "watch out": "watch", "sample problems": "problems", "remember": "remember",
-};
-const isGuidePath = (p) => /\/study\/weeks\/Week\d+\/guide\.md$/.test(p || "");
-const partKind = (title) => PART_KINDS[title.trim().toLowerCase()] || "other";
-
-// Wrap each '##' and everything under it in <section class="topic">, and each '###' block
-// inside it in <div class="part part-KIND">, so topics and their sections read as units.
-function structureDoc(doc) {
-  const frag = document.createDocumentFragment();
-  let topic = null, part = null;
-  for (const node of [...doc.childNodes]) {
-    if (node.tagName === "H2") {
-      part = null;
-      topic = document.createElement("section");
-      topic.className = "topic";
-      if (/^mixed review$/i.test(node.textContent.trim())) topic.classList.add("topic-review");
-      topic.append(node);
-      frag.append(topic);
-    } else if (node.tagName === "H3" && topic) {
-      part = document.createElement("div");
-      part.className = `part part-${partKind(node.textContent)}`;
-      part.append(node);
-      topic.append(part);
-    } else {
-      (part || topic || frag).append(node);
-    }
-  }
-  doc.replaceChildren(frag);
-}
-
-// Links inside a study file: '#slug' stays in this file, 'guide.md#slug' goes to another one.
-function fixLinks(root, path) {
-  const dir = path.split("/").slice(0, -1);
-  root.querySelectorAll("a[href]").forEach((a) => {
-    const href = a.getAttribute("href");
-    if (href.startsWith("#")) {
-      if (!href.startsWith("#doc=")) a.href = `#doc=${encodeURIComponent(path)}&h=${href.slice(1)}`;
-    } else if (!/^[a-z]+:|^\//i.test(href) && /\.md(#|$)/.test(href)) {
-      const [file, frag] = href.split("#");
-      const parts = [...dir];
-      for (const seg of file.split("/")) { if (seg === "..") parts.pop(); else if (seg && seg !== ".") parts.push(seg); }
-      a.href = `#doc=${encodeURIComponent(parts.join("/"))}${frag ? `&h=${frag}` : ""}`;
-    }
+  parts.filter(Boolean).forEach((p, i, arr) => {
+    if (i) nav.append(h("span", { class: "sep" }, "›"));
+    nav.append(i === arr.length - 1 ? h("span", { class: "here" }, p.label) : h("a", { href: p.href }, p.label));
   });
 }
 
-// ------------------------------------------------------------ week guides: one topic at a time
+// ------------------------------------------------------------ home
 
-// A heading's id, computed from its Markdown source the same way renderMarkdown computes it
-// from the rendered text (math and markup dropped), so ids match either way.
-const headingSlug = (t) => slug(t.replace(/\$[^$]*\$/g, "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1"));
-
-// Split a guide into its title block and its topics, and give every heading the id it would
-// have in the full document — links, search results and saved progress all use those ids.
-function parseGuide(path, md) {
-  const chunks = [{ title: null, lines: [], heads: [] }];
-  let inCode = false;
-  for (const line of md.split(/\r?\n/)) {   // guides written on Windows end lines with \r\n
-    if (/^\s*```/.test(line)) inCode = !inCode;
-    const m = !inCode && line.match(/^(#{1,4}) (.+)$/);
-    if (m && m[1] === "##") chunks.push({ title: m[2].trim(), lines: [], heads: [] });
-    const c = chunks[chunks.length - 1];
-    c.lines.push(line);
-    if (m) c.heads.push({ level: m[1].length, text: m[2].trim() });
-  }
-  const used = new Set();
-  for (const c of chunks) for (const h of c.heads) {
-    let id = headingSlug(h.text) || "section";
-    while (used.has(id)) id += "-";
-    used.add(id);
-    h.id = id;
-  }
-  const g = { path, intro: chunks[0], topics: [], idTo: {} };
-  let n = 0;
-  chunks.slice(1).forEach((c, i) => {
-    const mixed = /^mixed review$/i.test(c.title);
-    const t = { title: c.title, md: c.lines.join("\n"), heads: c.heads, id: c.heads[0].id,
-                n: mixed ? null : ++n, parts: c.heads.filter((h) => h.level === 3) };
-    g.topics.push(t);
-    for (const h of c.heads) g.idTo[h.id] = i;
-  });
-  g.total = n;
-  for (const h of g.intro.heads) g.idTo[h.id] = -1;
-  return g;
+function whenText(a) {
+  if (!a) return "";
+  if (a.days == null) return a.date_text;
+  const d = a.days === 0 ? "today" : a.days === 1 ? "tomorrow" : `${a.days} days`;
+  return (a.approx ? "~" : "") + (a.days <= 1 ? d : `in ${d}`);
 }
 
-// Give rendered headings their full-document ids (renderMarkdown only saw one topic).
-function applyIds(root, heads) {
-  [...root.querySelectorAll("h1, h2, h3, h4")].forEach((el, i) => { if (heads[i]) el.id = heads[i].id; });
+function dotsFor(course) {
+  const decks = course.topics.flatMap((t) => t.decks).filter((d) => d.slides > 1);
+  const solved = decks.filter((d) => d.state === "solved").length;
+  return h("span", { class: "dots", title: `${solved} of ${decks.length} decks solved`, "aria-label": `${solved} of ${decks.length} decks solved` },
+    course.topics.flatMap((t) => t.decks).filter((d) => d.slides > 1).map((d) => h("span", { class: `dot ${d.state}`, title: `${d.tag}: ${d.state}` })));
 }
 
-function renderGuideView(i) {
-  const g = state.guide, doc = $("#doc");
-  doc.classList.remove("wide");
-  state.view = i;
-  if (i < 0) {
-    // Overview: title, lecture slides, every topic with its number and whether it's understood.
-    const box = renderMarkdown(g.intro.lines.join("\n"), state.course, g.path);
-    applyIds(box, g.intro.heads);
-    doc.replaceChildren(...box.childNodes);
-    addSourcesLine(doc);
-    const done = doneSet(g.path);
-    const list = document.createElement("ol");
-    list.className = "topic-list";
-    for (const t of g.topics) {
-      const li = document.createElement("li");
-      if (done.has(t.id)) li.classList.add("done");
-      const a = document.createElement("a");
-      a.href = `#doc=${encodeURIComponent(g.path)}&h=${t.id}`;
-      a.innerHTML = `<span class="tl-n"></span><span class="tl-t"></span>`;
-      a.querySelector(".tl-n").textContent = t.n ?? "★";
-      a.querySelector(".tl-t").textContent = t.title;
-      li.append(a);
-      list.append(li);
+async function showHome(token) {
+  const data = await api("/api/home");
+  if (token !== routeToken) return;
+  setCrumbs();
+  APP.home = data;
+  data.courses.forEach((c) => { APP.courses[c.id] = c; });
+  const main = $("#main");
+  const sug = data.courses.find((c) => c.id === data.suggested) || data.courses[0];
+  const page = h("div", { class: "page" });
+  if (sug) {
+    const a = sug.next;
+    page.append(h("p", { class: "next-line" }, a
+      ? [h("b", {}, `${sug.code} ${a.name}`), ` · ${whenText(a)}`, a.topics.length ? ` · ${a.topics.join(", ")}` : ""]
+      : "No upcoming tests found in your deadlines."));
+    page.append(h("button", { class: "btn big", type: "button", onclick: () => startSession(sug.id) }, `Start session · ${sug.code}`));
+    page.append(h("p", { class: "under" }, reviewLine(sug)));
+  }
+  const list = h("div", { class: "courses" });
+  for (const c of data.courses) {
+    const a = c.next;
+    list.append(h("a", { class: "course-row", href: `#c=${encodeURIComponent(c.id)}` },
+      h("span", { class: "name" }, h("b", {}, `${c.code} ${c.title}`),
+        h("span", { class: "sub" }, a ? `${a.name} ${whenText(a)}` : `${c.topics.length} topics`)),
+      dotsFor(c), h("span", { class: "go-arrow", "aria-hidden": "true" }, "›")));
+  }
+  page.append(list);
+  main.replaceChildren(page);
+  main.focus({ preventScroll: true });
+}
+
+function reviewLine(c) {
+  const r = c.reviews;
+  if (r.count && r.warmup === r.count) return [`Warm-up: basic maths · ${r.count} · ~${r.minutes} min · `, h("a", { href: `#review=${encodeURIComponent(c.id)}` }, "Do them now")];
+  if (r.count) return [`${r.count} quick review${r.count === 1 ? "" : "s"} · ~${r.minutes} min first · `, h("a", { href: `#review=${encodeURIComponent(c.id)}` }, "Just the reviews")];
+  const res = c.resume;
+  return res ? ["Nothing due. ", h("a", { href: `#c=${encodeURIComponent(c.id)}&d=${encodeURIComponent(res.deck)}&s=${res.slide}` }, `Pick up at ${res.deck} →`)] : "Nothing due.";
+}
+
+// ------------------------------------------------------------ course page
+
+async function showCourse(id, token) {
+  const c = await loadCourse(id, true);
+  if (token !== routeToken) return;
+  const p = params();
+  setCrumbs({ label: "Home", href: "#" }, { label: c.code });
+  const page = h("div", { class: "page" });
+  page.append(h("h1", { class: "page-title" }, c.code), h("p", { class: "page-sub" }, c.title));
+  if (c.next) page.append(h("p", { class: "next-line", style: "text-align:left" }, h("b", {}, c.next.name), ` · ${whenText(c.next)}`,
+    c.next.topics.length ? ` · covers ${c.next.topics.join(", ")}` : "", c.next.assumed ? " (scope assumed)" : ""));
+  const res = c.resume;
+  const actions = h("div", {},
+    h("button", { class: "btn block", type: "button", onclick: () => startSession(id) }, "Start session"),
+    h("p", { class: "under", style: "text-align:left" }, reviewLine(c)),
+    res ? h("a", { class: "link", href: `#c=${encodeURIComponent(id)}&d=${encodeURIComponent(res.deck)}&s=${res.slide}` },
+      `Continue reading: ${res.deck} · slide ${res.slide} ›`) : null);
+  page.append(actions);
+  const topics = h("div", { class: "topics" });
+  const openTopic = p.t || (res && findDeck(c, res.deck)?.topic);
+  for (const t of c.topics) {
+    const solved = t.decks.filter((d) => d.state === "solved").length;
+    const box = h("section", { class: "topic" + (t.name === openTopic ? " open" : "") });
+    const btn = h("button", { type: "button", "aria-expanded": String(t.name === openTopic),
+      onclick: () => { box.classList.toggle("open"); btn.setAttribute("aria-expanded", box.classList.contains("open")); } },
+      h("span", { class: "caret", "aria-hidden": "true" }, "›"), h("b", {}, t.name),
+      h("span", { class: "muted small", title: `${solved} of ${t.decks.length} decks solved` }, `${solved}/${t.decks.length}`));
+    const decks = h("div", { class: "decks" });
+    for (const d of t.decks) {
+      decks.append(h("a", { class: "deck-row", href: `#c=${encodeURIComponent(id)}&d=${encodeURIComponent(d.tag)}&s=${d.last || 1}` },
+        h("span", { class: `dot ${d.state}`, title: stateLabel(d.state) }),
+        h("span", { class: "t" }, h("b", {}, d.tag), ` · ${d.title}`),
+        h("span", { class: "chip week" }, `W${d.week}`),
+        h("span", { class: "meta" }, d.state === "read" ? "Solve one to finish" : `${d.slides} slides`)));
     }
-    const head = document.createElement("div");
-    head.className = "overview-head";
-    head.innerHTML = `<h2 class="overview-title">Topics</h2><span class="overview-count"></span>`;
-    head.querySelector(".overview-count").textContent = `${done.size} of ${g.total} understood`;
-    const start = document.createElement("a");
-    start.className = "start-btn";
-    const next = g.topics.find((t) => t.n && !done.has(t.id)) || g.topics[0];
-    start.href = `#doc=${encodeURIComponent(g.path)}&h=${next.id}`;
-    start.textContent = done.size ? `Continue with topic ${next.n ?? ""}` : "Start with topic 1";
-    doc.append(head, start, list);
-    renderCrumbs(null);
+    if (t.read_more) decks.append(h("p", { class: "read-more" }, `Textbook: ${t.read_more}`));
+    box.append(btn, decks);
+    topics.append(box);
+  }
+  page.append(topics);
+  if (c.notes.length) {
+    page.append(h("p", { class: "notes-line" }, "Your class notes: ",
+      ...c.notes.map((n, i) => {
+        const k = c.notes.slice(0, i).filter((x) => x.week === n.week).length;
+        return h("a", { href: `#c=${encodeURIComponent(id)}&notes=${encodeURIComponent(n.path)}` }, `W${n.week}${k ? ` (${k + 1})` : ""}`);
+      })));
+  }
+  const label = { exams: "Mock tests & cheat sheets", labs: "Labs", assignments: "Assignments" };
+  for (const kind of ["exams", "labs", "assignments"]) {
+    const groups = c.docs.filter((g) => g.kind === kind);
+    if (!groups.length) continue;
+    page.append(h("p", { class: "notes-line" }, `${label[kind]}: `,
+      ...groups.flatMap((g) => [h("span", { class: "muted" }, `${g.name} `),
+        ...g.files.map((f) => h("a", { href: `#c=${encodeURIComponent(id)}&notes=${encodeURIComponent(f.path)}` }, f.name))])));
+  }
+  $("#main").replaceChildren(page);
+  if (p.t) $(".topic.open")?.scrollIntoView({ block: "center" });
+}
+
+const stateLabel = (s) => ({ new: "Not started", started: "Started", read: "Read · solve one to finish", solved: "Solved" })[s] || s;
+function findDeck(c, tag) { for (const t of c.topics) for (const d of t.decks) if (d.tag === tag) return d; return null; }
+function courseDeckOrder(c) { return c.topics.flatMap((t) => t.decks).sort((a, b) => a.week - b.week); }
+
+async function showNotes(id, path, token) {
+  const c = await loadCourse(id);
+  if (token !== routeToken) return;
+  const n = c.notes.find((x) => x.path === path);
+  const label = n ? `Class notes W${n.week}` : path.split("/").slice(-2).join(" · ").replace(/\.md$/, "");
+  setCrumbs({ label: "Home", href: "#" }, { label: c.code, href: `#c=${encodeURIComponent(id)}` }, { label });
+  const r = await fetch(`/api/note?course=${encodeURIComponent(id)}&path=${encodeURIComponent(path)}`);
+  const text = r.ok ? await r.text() : "Not found.";
+  if (token !== routeToken) return;
+  const body = path.endsWith(".txt") ? h("pre", { style: "white-space:pre-wrap" }, text) : renderMd(text, id);
+  $("#main").replaceChildren(h("article", { class: "prose" }, body));
+}
+
+// ------------------------------------------------------------ slide viewer
+
+async function showViewer(courseId, tag, n, token) {
+  const [c, deck] = await Promise.all([loadCourse(courseId), api(`/api/deck?course=${encodeURIComponent(courseId)}&tag=${encodeURIComponent(tag)}`)]);
+  if (token !== routeToken) return;
+  const same = APP.deck && APP.deck.course === courseId && APP.deck.tag === tag && $(".viewer");
+  APP.deck = deck;
+  APP.n = Math.min(Math.max(1, n || deck.state.last || 1), deck.slides + 1);
+  setCrumbs({ label: "Home", href: "#" }, { label: c.code, href: `#c=${encodeURIComponent(courseId)}` },
+    { label: deck.topic, href: `#c=${encodeURIComponent(courseId)}&t=${encodeURIComponent(deck.topic)}` }, { label: `${deck.tag} (W${deck.week})` });
+  if (!same) buildViewer();
+  showSlide();
+  if (APP.pending) { const p = APP.pending; APP.pending = null; startPracticeInPanel(p); }
+  else if (!same) renderTutor();
+}
+
+function buildViewer() {
+  const stage = h("section", { class: "stage", id: "stage" },
+    h("div", { class: "stage-main", id: "stage-main" }),
+    h("div", { class: "stage-foot" },
+      h("span", { class: "asked", id: "asked" }),
+      h("span", { class: "mob-arrows" },
+        h("button", { type: "button", "aria-label": "Previous slide", onclick: () => step(-1) }, "‹"),
+        h("span", { class: "counter", id: "counter-m" }),
+        h("button", { type: "button", "aria-label": "Next slide", onclick: () => step(1) }, "›")),
+      h("span", { class: "counter", id: "counter" }),
+      h("button", { class: "chip outline", id: "text-btn", type: "button", "aria-pressed": "false", title: "Slide text (T)", onclick: () => toggleText() }, "Text")),
+    h("button", { class: "nav-arrow prev", id: "prev", type: "button", "aria-label": "Previous slide (←)", onclick: () => step(-1) }, "‹"),
+    h("button", { class: "nav-arrow next", id: "next", type: "button", "aria-label": "Next slide (→)", onclick: () => step(1) }, "›"),
+    h("div", { class: "transcript", id: "transcript", hidden: true }, h("div", { class: "inner", id: "transcript-inner" })));
+  const tutor = h("aside", { class: "tutor", id: "tutor", "aria-label": "Tutor" });
+  $("#main").replaceChildren(h("div", { class: "viewer" }, stage, tutor));
+  const sm = $("#stage-main");
+  let x0 = null, y0 = null;
+  sm.addEventListener("touchstart", (e) => { if (e.touches.length === 1) { x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; } }, { passive: true });
+  sm.addEventListener("touchend", (e) => {
+    if (x0 == null || APP.zoom) return;
+    const dx = e.changedTouches[0].clientX - x0, dy = e.changedTouches[0].clientY - y0;
+    if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) step(dx < 0 ? 1 : -1);
+    x0 = null;
+  });
+  sm.addEventListener("dblclick", () => toggleZoom());
+  sm.addEventListener("click", (e) => { if (isPhone() && e.target.classList.contains("slide-img")) toggleZoom(); });
+  stageObserver.disconnect();
+  stageObserver.observe(sm);
+  APP.text = false; APP.zoom = false;
+  if (APP.tutor === "focus") APP.tutor = "open";
+}
+
+function slideUrl(n) { return `/api/slide?course=${encodeURIComponent(APP.deck.course)}&tag=${encodeURIComponent(APP.deck.tag)}&n=${n}`; }
+
+let seenTimer;
+function showSlide() {
+  const d = APP.deck, n = APP.n, sm = $("#stage-main");
+  if (!sm) return;
+  const end = n > d.slides;
+  sm.classList.toggle("zoomed", false); APP.zoom = false;
+  if (end) {
+    const c = APP.courses[d.course];
+    const order = c ? courseDeckOrder(c) : [];
+    const i = order.findIndex((x) => x.tag === d.tag);
+    const nextDeck = order[i + 1];
+    sm.classList.remove("portrait");
+    $("#tutor")?.classList.add("quiet-rail");
+    sm.replaceChildren(h("div", { class: "end-card" },
+      h("h2", {}, `End of ${d.tag}`),
+      h("p", {}, d.state.solved ? "You've solved a problem from this deck." : "Solve one problem from it to finish the deck."),
+      h("button", { class: "btn", type: "button", onclick: () => startPracticeInPanel({ kind: "deck" }) }, "Try one"),
+      h("br"),
+      nextDeck ? h("a", { class: "link", href: `#c=${encodeURIComponent(d.course)}&d=${encodeURIComponent(nextDeck.tag)}&s=1` }, `Next deck: ${nextDeck.tag} ›`) : null));
   } else {
-    const t = g.topics[i];
-    const box = renderMarkdown(t.md, state.course, g.path);
-    applyIds(box, t.heads);
-    structureDoc(box);
-    const sec = box.querySelector("section.topic");
-    if (t.n) {
-      sec.dataset.n = t.n;
-      const no = document.createElement("div");
-      no.className = "topic-no";
-      no.textContent = `Topic ${t.n} of ${g.total}`;
-      sec.prepend(no);
-    }
-    sec.append(topicFooter(i));
-    if (t.n && doneSet(g.path).has(t.id)) sec.classList.add("is-done");
-    doc.replaceChildren(...box.childNodes);
-    renderCrumbs(t);
-    store.set("last", { path: g.path, id: t.id, topic: t.title, n: t.n ?? "",
-                        course: state.course?.code, week: state.week });
+    $("#tutor")?.classList.remove("quiet-rail");
+    let img = $(".slide-img", sm);
+    if (!img) { img = h("img", { class: "slide-img", alt: "", draggable: "false" }); sm.replaceChildren(img); }
+    img.style.opacity = ".001";
+    img.onload = () => { fitSlide(); img.style.opacity = "1"; };
+    const s = d.slides_text[n - 1];
+    img.alt = s && s.title ? `Slide ${n}: ${s.title}` : `Slide ${n}`;
+    img.src = slideUrl(n);
+    if (n < d.slides) { const pre = new Image(); pre.src = slideUrl(n + 1); }
   }
-  lazyImages(doc);
-  fixLinks(doc, g.path);
-  drawDiagrams(doc);
+  const label = end ? `${d.slides} / ${d.slides}` : `${n} / ${d.slides}`;
+  $("#counter").textContent = label; $("#counter-m").textContent = label;
+  $("#prev").disabled = n <= 1; $("#next").disabled = end;
+  $("#text-btn").hidden = end;
+  if (APP.text) fillTranscript();
+  requestAnimationFrame(fitSlide);
+  const hash = `#c=${encodeURIComponent(d.course)}&d=${encodeURIComponent(d.tag)}&s=${n}`;
+  if (location.hash !== hash) history.replaceState(null, "", hash);
+  clearTimeout(seenTimer);
+  if (!end) seenTimer = setTimeout(async () => {
+    try { const r = await api("/api/seen", { course: d.course, tag: d.tag, n }); d.state = r.state; } catch { /* offline */ }
+  }, 500);
 }
 
-// End of a topic: previous · mark understood · next (the overview sits before topic 1).
-function topicFooter(i) {
-  const g = state.guide, t = g.topics[i];
-  const foot = document.createElement("div");
-  foot.className = "topic-foot";
-  const step = (j, cls, label) => {
-    const target = j < 0 ? { id: g.intro.heads[0]?.id, title: "Week overview" } : g.topics[j];
-    if (!target || !target.id) return document.createElement("span");
-    const a = document.createElement("a");
-    a.className = `step ${cls}`;
-    a.href = `#doc=${encodeURIComponent(g.path)}&h=${target.id}`;
-    a.innerHTML = `<small></small><span></span>`;
-    a.querySelector("small").textContent = label;
-    a.querySelector("span").textContent = target.title;
-    return a;
+// Contain the slide in the stage, allowing up to 1.5x its native size; portrait pages (as in
+// web lessons) fill a readable column and scroll instead of shrinking to fit the height.
+function fitSlide() {
+  const sm = $("#stage-main"), img = sm && $(".slide-img", sm);
+  if (!img || !img.naturalWidth || APP.zoom) return;
+  const portrait = img.naturalHeight > img.naturalWidth * 1.1;
+  sm.classList.toggle("portrait", portrait);
+  const cs = getComputedStyle(sm);
+  const w = sm.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  const hgt = sm.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+  const k = portrait ? Math.min(w / img.naturalWidth, 760 / img.naturalWidth, 1.5)
+                     : Math.min(w / img.naturalWidth, hgt / img.naturalHeight, isPhone() ? 9 : 1.5);
+  img.style.width = Math.floor(img.naturalWidth * k) + "px";
+  img.style.height = "auto";
+}
+window.addEventListener("resize", () => fitSlide());
+const stageObserver = new ResizeObserver(() => fitSlide());
+
+function step(k) {
+  if (!APP.deck) return;
+  const n = Math.min(Math.max(1, APP.n + k), APP.deck.slides + 1);
+  if (n === APP.n) return;
+  APP.n = n;
+  showSlide();
+  if (APP.tutor === "open") updateTutorWhere();
+}
+
+function toggleText(on = !APP.text) {
+  APP.text = on;
+  $("#transcript").hidden = !on;
+  $("#text-btn").setAttribute("aria-pressed", String(on));
+  if (on) fillTranscript();
+  requestAnimationFrame(fitSlide);
+}
+
+function fillTranscript() {
+  const s = APP.deck.slides_text[APP.n - 1];
+  const inner = $("#transcript-inner");
+  if (!s) { inner.replaceChildren(); return; }
+  inner.replaceChildren(h("h3", {}, `Slide ${s.n}${s.title ? " · " + s.title : ""}`),
+    s.raw ? h("p", { class: "muted small" }, "Text layer only; equations and diagrams may be missing.") : null,
+    s.raw ? h("pre", { style: "white-space:pre-wrap;font-family:inherit;background:none;padding:0" }, s.md) : renderMd(s.md, APP.deck.course));
+}
+
+function toggleZoom() {
+  const sm = $("#stage-main");
+  if (!sm || !$(".slide-img", sm)) return;
+  APP.zoom = !APP.zoom;
+  sm.classList.toggle("zoomed", APP.zoom);
+  const img = $(".slide-img", sm);
+  if (APP.zoom) { img.style.width = img.naturalWidth * 2 + "px"; } else fitSlide();
+}
+
+// ------------------------------------------------------------ tutor panel
+
+function setTutor(mode) {
+  APP.tutor = mode;
+  const t = $("#tutor");
+  if (!t) return;
+  t.classList.toggle("open", mode === "open");
+  t.classList.toggle("focus", mode === "focus");
+  $("#stage")?.classList.toggle("shrunk", mode === "focus");
+  if (mode !== "focus") restoreStage();
+}
+
+function renderTutor() {
+  const t = $("#tutor");
+  if (!t) return;
+  if (APP.tutor === "closed") {
+    setTutor("closed");
+    t.replaceChildren(h("div", { class: "rail" },
+      h("button", { class: "primary", type: "button", onclick: () => startPracticeInPanel({ kind: "try" }), title: "A problem on this slide" },
+        h("span", { class: "go", "aria-hidden": "true" }, "✎"), "Try one"),
+      h("button", { type: "button", onclick: () => { APP.tutor = "open"; renderTutor(); $("#ask-input")?.focus(); } },
+        h("span", { class: "glyph", "aria-hidden": "true" }, "💬"), "Ask"),
+      h("button", { type: "button", onclick: () => { APP.tutor = "open"; renderTutor(); tutorAsk("example"); } },
+        h("span", { class: "glyph", "aria-hidden": "true" }, "▤"), "Example")));
+    return;
+  }
+  setTutor("open");
+  const thread = h("div", { class: "thread", id: "thread", "aria-live": "polite" });
+  t.replaceChildren(h("div", { class: "panel" },
+    h("div", { class: "panel-head" }, h("h2", {}, "Tutor"), h("span", { class: "muted small", id: "tutor-where" }),
+      h("button", { class: "icon-btn", type: "button", "aria-label": "Close the tutor", onclick: () => { APP.tutor = "closed"; renderTutor(); } }, "×")),
+    h("div", { class: "panel-actions" },
+      h("button", { class: "btn block", type: "button", onclick: () => startPracticeInPanel({ kind: "try" }) }, "Try one"),
+      h("div", { class: "links" },
+        h("button", { class: "link", type: "button", onclick: () => tutorAsk("example") }, "Worked example"),
+        h("button", { class: "link", type: "button", onclick: () => tutorAsk("explain") }, "Explain simply"))),
+    thread,
+    composeBox("Ask anything about this slide", (q) => tutorAsk("ask", q))));
+  updateTutorWhere();
+  drawThread();
+}
+
+function updateTutorWhere() {
+  const w = $("#tutor-where");
+  if (w && APP.deck) w.textContent = APP.n > APP.deck.slides ? APP.deck.tag : `${APP.deck.tag} s${APP.n}`;
+}
+
+function composeBox(placeholder, onSend) {
+  const ta = h("textarea", { id: "ask-input", rows: "1", placeholder, "aria-label": placeholder });
+  const send = h("button", { class: "btn ghost", type: "submit" }, "Ask");
+  const form = h("form", { class: "compose", onsubmit: (e) => { e.preventDefault(); const q = ta.value.trim(); if (!q) return; ta.value = ""; autosize(); onSend(q); } }, ta, send);
+  const autosize = () => { ta.style.height = "auto"; ta.style.height = Math.min(160, ta.scrollHeight + 2) + "px"; };
+  ta.addEventListener("input", () => { autosize(); send.classList.toggle("ghost", !ta.value.trim()); });
+  ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
+  return form;
+}
+
+const MODE_LABEL = { explain: "Explain simply", example: "Worked example", deeper: "Go deeper" };
+
+function drawThread() {
+  const th = $("#thread");
+  if (!th) return;
+  th.replaceChildren();
+  const msgs = APP.deck.chat ? APP.deck.chat.messages : [];
+  if (!msgs.length) th.append(h("p", { class: "empty" }, "Ask anything about this slide, or tap Try one to practise it."));
+  msgs.forEach((m, i) => {
+    if (m.role === "q") th.append(h("p", { class: "msg-q" }, m.text, h("span", { class: "where" }, m.slide ? ` · s${m.slide}` : "")));
+    else th.append(answerEl(m, i === msgs.length - 1));
+  });
+  th.scrollTop = th.scrollHeight;
+}
+
+function answerEl(m, isLast) {
+  const body = renderMd(m.text, APP.deck.course);
+  body.className = "msg-a";
+  // "**Needs:** percentage change, slope of a line" becomes tappable brush-up chips.
+  const raw = (m.text.match(/^\s*\**Needs:\**\s*(.+)$/im) || [])[1];
+  const needsP = $$("p", body).find((p) => /^Needs:/i.test(p.textContent.trim()));
+  if (raw && needsP) {
+    const items = splitOutsideMath(raw).map((x) => x.replace(/\.$/, "").trim()).filter(Boolean);
+    needsP.replaceWith(h("div", { class: "needs" }, "Needs:",
+      ...items.map((it) => h("button", { class: "chip wrap", type: "button", title: "Brush up on this", onclick: () => tutorAsk("brush", it) }, plain(it)))));
+  }
+  const wrap = h("div", {}, body);
+  if (isLast) {
+    const next = m.mode === "example"
+      ? h("button", { class: "link", type: "button", onclick: () => startPracticeInPanel({ kind: "yourturn", example_md: m.text }) }, "Your turn: finish from here ›")
+      : h("button", { class: "link", type: "button", onclick: () => startPracticeInPanel({ kind: "try" }) }, "Try one on this ›");
+    wrap.append(h("div", { class: "msg-foot" }, next,
+      m.mode !== "deeper" ? h("button", { class: "link quiet", type: "button", onclick: () => tutorAsk("deeper") }, "Go deeper") : null));
+  }
+  return wrap;
+}
+
+// Split "a, b ($x, y$), c" on commas/semicolons that aren't inside $...$ or brackets.
+function splitOutsideMath(t) {
+  const out = [];
+  let cur = "", math = false, depth = 0;
+  for (const ch of t) {
+    if (ch === "$") math = !math;
+    if (!math && "([".includes(ch)) depth++;
+    if (!math && ")]".includes(ch)) depth = Math.max(0, depth - 1);
+    if (!math && !depth && (ch === "," || ch === ";")) { out.push(cur); cur = ""; } else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+function inlineMd(t, courseId) {
+  const box = renderMd(t, courseId);
+  const p = box.firstElementChild;
+  return p && p.tagName === "P" && box.children.length === 1 ? [...p.childNodes] : [...box.childNodes];
+}
+
+function metaText(m) {
+  const who = APP.models.find((x) => x.id === m.model);
+  return [who ? who.label.split(" — ")[0] : "", m.ms ? `${(m.ms / 1000).toFixed(0)} s` : "", m.cost != null ? `$${(+m.cost).toFixed(2)}` : ""].filter(Boolean).join(" · ");
+}
+
+async function tutorAsk(mode, question = "") {
+  if (APP.tutor !== "open") { APP.tutor = "open"; renderTutor(); }
+  const th = $("#thread");
+  const d = APP.deck;
+  const n = Math.min(APP.n, d.slides);
+  $(".empty", th)?.remove();
+  th.append(h("p", { class: "msg-q" }, mode === "ask" ? question : mode === "brush" ? `Brush up: ${question}` : MODE_LABEL[mode], h("span", { class: "where" }, ` · s${n}`)));
+  const wait = h("p", { class: "waiting" }, mode === "example" ? "Writing a worked example…" : "Thinking…");
+  th.append(wait);
+  th.scrollTop = th.scrollHeight;
+  $$("#thread .msg-foot").forEach((f) => f.remove());
+  try {
+    const r = await api("/api/tutor", { course: d.course, tag: d.tag, n, mode, question, model: APP.model, slides_only: slidesOnly(d.course) });
+    const chat = d.chat || { messages: [] };
+    chat.messages.push({ role: "q", mode, slide: n, text: mode === "ask" ? question : mode === "brush" ? `Brush up: ${question}` : MODE_LABEL[mode] }, r.message);
+    d.chat = chat;
+    if (!d.asked.includes(n)) d.asked.push(n);
+    if (APP.deck === d) { drawThread(); showAskedMark(); }
+  } catch (e) {
+    wait.replaceWith(h("p", { class: "err" }, e.message));
+  }
+}
+
+function showAskedMark() { /* deliberately no marker on the slide */ }
+
+// ------------------------------------------------------------ practice
+
+function openPractice(courseId, p) {
+  APP.pending = p;
+  const c = APP.courses[courseId];
+  const res = c && c.resume;
+  if (!res) { APP.pending = null; return; }
+  if (APP.deck && APP.deck.course === courseId && $(".viewer")) { APP.pending = null; startPracticeInPanel(p); return; }
+  go({ c: courseId, d: res.deck, s: res.slide });
+}
+
+function mixedTopics(courseId) {
+  const c = APP.courses[courseId];
+  if (!c) return null;
+  if (c.next && c.next.topics.length) return c.next.topics;
+  const touched = c.topics.filter((t) => t.decks.some((d) => d.state !== "new")).map((t) => t.name);
+  return touched.length ? touched : null;
+}
+
+function restoreStage() {
+  const sm = $("#stage-main");
+  if (sm && $(".thumb", sm)) { sm.replaceChildren(); showSlide(); }
+}
+
+function startPracticeInPanel(p) {
+  const d = APP.deck;
+  if (!d) return;
+  if (APP.session && APP.session.course === d.course && APP.session.step === 1 && ["try", "deck", "yourturn"].includes(p.kind)) {
+    setSessionStep(2);
+  }
+  setTutor("focus");
+  const sm = $("#stage-main");
+  const n = Math.min(APP.n, d.slides);
+  sm.classList.remove("portrait", "zoomed");
+  sm.replaceChildren(h("img", { class: "thumb", src: slideUrl(n), alt: `Slide ${n}`, onclick: () => closePractice() }),
+    h("span", { class: "muted small" }, `${d.tag} s${n}`),
+    h("button", { class: "link", type: "button", onclick: () => closePractice() }, "‹ Back to slide"));
+  const t = $("#tutor");
+  const head = h("div", { class: "panel-head" }, h("h2", {}, p.kind === "mixed" ? "Mixed problem" : "Practise"),
+    h("button", { class: "icon-btn", type: "button", "aria-label": "Back to the slide", onclick: () => closePractice() }, "×"));
+  const area = h("div", { class: "practice" });
+  t.replaceChildren(h("div", { class: "panel" }, head, area));
+  const req = { course: d.course, kind: p.kind, tag: d.tag, n, example_md: p.example_md || "",
+    topics: p.kind === "mixed" ? mixedTopics(d.course) : null };
+  runPractice(area, req, practiceNext(p.kind));
+}
+
+function closePractice() {
+  APP.tutor = "open";
+  renderTutor();
+}
+
+// What the one button after marking does.
+function practiceNext(kind) {
+  return (result) => {
+    const s = APP.session;
+    const d = APP.deck;
+    if (s && d && s.course === d.course) {
+      if (s.step === 2 && kind !== "mixed") {
+        s.practised = (s.practised || 0) + 1; saveSession();
+        if (s.practised < 3) return { label: "Try another", run: () => startPracticeInPanel({ kind: kind === "yourturn" ? "try" : kind }) };
+        return { label: "Next: one mixed problem", run: () => { setSessionStep(3); startPracticeInPanel({ kind: "mixed" }); } };
+      }
+      if (s.step === 3 || kind === "mixed") {
+        if (s.step === 3) return { label: "Next: one line to remember", run: () => { setSessionStep(4); go({ step: "note" }); } };
+      }
+    }
+    return { label: "Try another", run: () => startPracticeInPanel({ kind: kind === "yourturn" ? "try" : kind }) };
   };
-  let mark = document.createElement("span");
-  if (t.n) {
-    mark = document.createElement("button");
-    mark.type = "button";
-    mark.className = "mark";
-    const paint = (on) => {
-      mark.classList.toggle("on", on);
-      mark.textContent = on ? "✓ Understood" : "Mark as understood";
-      mark.setAttribute("aria-pressed", on);
-      foot.parentElement?.classList.toggle("is-done", on);
+}
+
+// The practice flow: write a problem → the student works (text and/or photos, hints on request) → mark.
+async function runPractice(area, req, nextFor, opts = {}) {
+  area.replaceChildren(h("p", { class: "waiting" }, opts.waitText || (req.kind === "yourturn" ? "Setting up your turn…" : "Writing a problem for you…")));
+  let prob;
+  try {
+    prob = await api("/api/practice/new", { ...req, model: APP.model, slides_only: slidesOnly(req.course) });
+  } catch (e) {
+    area.replaceChildren(h("p", { class: "err" }, e.message), h("button", { class: "link", type: "button", onclick: () => runPractice(area, req, nextFor, opts) }, "Try again"));
+    return;
+  }
+  if (opts.onProblem) opts.onProblem(prob);
+  const from = prob.warmup ? "Warm-up" : prob.slides ? `From ${prob.slides}` : "";
+  const answer = h("textarea", { class: "answer", placeholder: "Your working… (or add a photo of it)", "aria-label": "Your working" });
+  const photoCount = h("span", { class: "count" });
+  const hints = h("div", {});
+  let hintsUsed = 0;
+  const hintBtn = h("button", { class: "link quiet", type: "button" }, "Hint");
+  const check = h("button", { class: "btn", type: "button" }, "Check");
+  const result = h("div", {});
+  const setPhotos = (k) => { photoCount.textContent = k ? `${k} photo${k === 1 ? "" : "s"} added` : ""; };
+  hintBtn.onclick = async () => {
+    hintBtn.disabled = true;
+    try {
+      const r = await api("/api/practice/hint", { id: prob.id });
+      hintsUsed = r.n;
+      if (r.hint) {
+        hints.append(h("div", { class: "hint-box" }, h("b", {}, `Hint ${r.n}`), renderMd(r.hint, req.course)));
+        hintBtn.textContent = r.more && r.n < prob.hints_total ? "Another hint" : "Show worked example";
+      } else {
+        hints.append(h("div", { class: "hint-box" }, h("b", {}, "Worked solution"), renderMd(r.solution_md, req.course)));
+        hintBtn.hidden = true;
+      }
+    } catch (e) { hints.append(h("p", { class: "err" }, e.message)); }
+    hintBtn.disabled = false;
+  };
+  const phoneLink = APP.phoneUrl && !isPhone()
+    ? h("button", { class: "link", type: "button", onclick: () => sendFromPhone(prob, setPhotos) }, "Send from phone") : null;
+  check.onclick = async () => {
+    check.disabled = true;
+    result.replaceChildren(h("p", { class: "waiting" }, "Marking your work…"));
+    try {
+      const s = APP.session;
+      const r = await api("/api/practice/check", { id: prob.id, answer: answer.value, model: APP.model,
+        slides_only: slidesOnly(req.course), prefetch: ["try", "deck", "mixed"].includes(req.kind), topics: req.topics });
+      if (s && r.saved && r.review_id) { s.lastMistake = r.review_id; saveSession(); }
+      result.replaceChildren(resultEl(r, prob, req, nextFor, opts));
+      check.hidden = true; hintBtn.hidden = true;
+      const sc = result.closest(".practice, main");
+      if (sc) sc.scrollTo({ top: Math.max(0, result.offsetTop - sc.offsetTop - 16), behavior: "smooth" });
+      if (APP.deck) refreshDeckState();
+    } catch (e) {
+      result.replaceChildren(h("p", { class: "err" }, e.message));
+      check.disabled = false;
+    }
+  };
+  area.replaceChildren(
+    from ? h("p", { class: "from" }, from) : null,
+    h("div", { class: "problem" }, renderMd(prob.problem_md, req.course)),
+    answer,
+    h("div", { class: "photo-row" },
+      h("button", { class: "link", type: "button", onclick: () => pickPhoto(prob, setPhotos) }, "📷 Add photo"),
+      phoneLink, photoCount),
+    hints,
+    h("div", { class: "check-row" }, hintBtn, check),
+    result);
+  if (!isPhone()) answer.focus({ preventScroll: true });
+}
+
+function resultEl(r, prob, req, nextFor, opts) {
+  const box = h("div", { class: "result" });
+  if (r.unreadable) {
+    box.append(h("p", { class: "verdict" }, r.verdict || "I couldn't read that photo."),
+      h("p", { class: "muted" }, "Try a clearer photo (flat, good light), or type the key steps."));
+    const again = h("button", { class: "btn", type: "button", onclick: () => { box.remove(); $$(".check-row .btn").forEach((b) => { b.hidden = false; b.disabled = false; }); } }, "Check again");
+    box.append(again);
+    return box;
+  }
+  box.append(h("p", { class: "verdict" }, r.correct ? h("span", { class: "ok" }, "✓ ") : null, ...inlineMd(r.verdict, req.course)));
+  if (r.mistake) box.append(h("span", { class: "chip mistake" }, r.mistake));
+  if (r.feedback_md) box.append(h("div", { class: "msg-a", style: "margin-top:8px" }, renderMd(r.feedback_md, req.course)));
+  if (r.saved) box.append(h("p", { class: "saved" }, prob.review_id ? "It'll come back tomorrow." : r.hinted && r.correct ? "Solved with a hint · saved to review · back tomorrow" : "Saved to review · back tomorrow"));
+  if (r.solution_md) box.append(h("details", {}, h("summary", {}, "See the full solution"), h("div", { class: "msg-a" }, renderMd(r.solution_md, req.course))));
+  if (opts.afterResult) opts.afterResult(box, r);
+  const nx = nextFor(r);
+  if (nx) box.append(h("div", { class: "next-row" }, h("button", { class: "btn", type: "button", onclick: nx.run }, nx.label),
+    nx.alt ? h("button", { class: "link quiet", type: "button", onclick: nx.alt.run }, nx.alt.label) : null));
+  return box;
+}
+
+async function refreshDeckState() {
+  const d = APP.deck;
+  try {
+    const fresh = await api(`/api/deck?course=${encodeURIComponent(d.course)}&tag=${encodeURIComponent(d.tag)}`);
+    d.state = fresh.state;
+    APP.courses[d.course] = await api(`/api/course?id=${encodeURIComponent(d.course)}`);
+  } catch { /* keep the old state */ }
+}
+
+// ---------- photos
+
+function pickPhoto(prob, setPhotos) {
+  const input = $("#photo-input");
+  input.value = "";
+  input.onchange = async () => {
+    const f = input.files[0];
+    if (!f) return;
+    setPhotos(0);
+    try {
+      const data = await shrinkImage(f);
+      const r = await api("/api/practice/photo", { id: prob.id, data });
+      setPhotos(r.photos);
+    } catch (e) { alert(e.message); }
+  };
+  input.click();
+}
+
+// Phones take 12-megapixel photos; 2000 px on the long side is plenty to read handwriting.
+function shrinkImage(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, 2000 / Math.max(img.naturalWidth, img.naturalHeight));
+      const cv = document.createElement("canvas");
+      cv.width = Math.round(img.naturalWidth * k); cv.height = Math.round(img.naturalHeight * k);
+      cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
+      URL.revokeObjectURL(img.src);
+      resolve(cv.toDataURL("image/jpeg", 0.85));
     };
-    paint(doneSet(g.path).has(t.id));
-    mark.addEventListener("click", () => {
-      const on = !mark.classList.contains("on");
-      setDone(g.path, t.id, on);
-      paint(on);
-      document.querySelector(`.ol-topic[data-id="${CSS.escape(t.id)}"]`)?.classList.toggle("done", on);
-      refreshWeekProgress();
+    img.onerror = () => reject(new Error("That file isn't an image the browser can open."));
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+function sendFromPhone(prob, setPhotos) {
+  const url = `${APP.phoneUrl}#upload=${prob.id}`;
+  const qr = qrcode(0, "M"); qr.addData(url); qr.make();
+  $("#qr-title").textContent = "Send a photo from your phone";
+  $("#qr-text").textContent = "Scan this with your phone's camera, take a photo of your working, and it appears here.";
+  $("#qr").innerHTML = qr.createSvgTag({ cellSize: 6, margin: 2, scalable: true });
+  $("#qr-url").textContent = "";
+  const dlg = $("#qr-dlg");
+  dlg.showModal();
+  const timer = setInterval(async () => {
+    try { const r = await api(`/api/practice?id=${prob.id}`); setPhotos(r.photos); if (r.photos) dlg.close(); } catch { /* keep polling */ }
+  }, 2500);
+  dlg.addEventListener("close", () => clearInterval(timer), { once: true });
+}
+
+async function showUpload(pid) {
+  setCrumbs({ label: "Send a photo" });
+  $("#session-bar").hidden = true;
+  const main = $("#main");
+  let prob;
+  try { prob = await api(`/api/practice?id=${encodeURIComponent(pid)}`); }
+  catch (e) { main.replaceChildren(h("div", { class: "upload-page" }, h("p", { class: "err" }, e.message))); return; }
+  const status = h("p", { class: "muted" }, prob.photos ? `${prob.photos} photo${prob.photos === 1 ? "" : "s"} sent so far.` : "");
+  const btn = h("button", { class: "btn big", type: "button" }, "Take a photo of your working");
+  btn.onclick = () => {
+    const input = $("#photo-input");
+    input.value = "";
+    input.onchange = async () => {
+      const f = input.files[0];
+      if (!f) return;
+      status.textContent = "Sending…";
+      try {
+        const r = await api("/api/practice/photo", { id: pid, data: await shrinkImage(f) });
+        status.textContent = `Sent ✓ (${r.photos} photo${r.photos === 1 ? "" : "s"}). Check your laptop, or add another.`;
+        btn.textContent = "Add another photo";
+      } catch (e) { status.textContent = e.message; }
+    };
+    input.click();
+  };
+  main.replaceChildren(h("div", { class: "upload-page" }, h("p", { class: "from" }, prob.slides || ""),
+    h("div", { class: "problem msg-a" }, renderMd(prob.problem_md)), btn, status));
+}
+
+// Chats from the earlier Ask panel (before decks) open as a read-only page.
+async function showOldChat(id, token) {
+  const c = await api(`/api/chat?id=${encodeURIComponent(id)}`);
+  if (token !== routeToken) return;
+  setCrumbs({ label: "Home", href: "#" }, { label: "Earlier chat" });
+  const art = h("article", { class: "prose" }, h("h1", {}, c.title));
+  for (const m of c.messages || []) {
+    if (m.role === "q") art.append(h("p", { class: "msg-q" }, m.text));
+    else { const b = renderMd(m.text, c.course); b.className = "msg-a"; art.append(b); }
+  }
+  $("#main").replaceChildren(art);
+}
+
+// ------------------------------------------------------------ reviews
+
+async function showReview(courseId, token) {
+  const c = await loadCourse(courseId, true);
+  setCrumbs({ label: "Home", href: "#" }, { label: c.code, href: `#c=${encodeURIComponent(courseId)}` }, { label: "Reviews" });
+  const items = await api(`/api/reviews?course=${encodeURIComponent(courseId)}`);
+  if (token !== routeToken) return;
+  const main = $("#main");
+  const page = h("div", { class: "review" });
+  main.replaceChildren(page);
+  let i = 0;
+  const total = items.length;
+  const finish = () => {
+    const s = APP.session;
+    const res = c.resume;
+    page.replaceChildren(h("div", { class: "done-card" }, h("h1", {}, total ? "Reviews done" : "Nothing due"),
+      h("p", {}, total ? `${total} item${total === 1 ? "" : "s"} reviewed.` : "Nothing to review today."),
+      s && s.course === courseId
+        ? h("button", { class: "btn", type: "button", onclick: () => { setSessionStep(1); go({ c: courseId, d: res.deck, s: res.slide }); } }, "Continue: new slides")
+        : res ? h("a", { class: "btn", href: `#c=${encodeURIComponent(courseId)}&d=${encodeURIComponent(res.deck)}&s=${res.slide}` }, `Back to ${res.deck} · slide ${res.slide}`) : null));
+  };
+  const next = () => {
+    if (i >= items.length) return finish();
+    const it = items[i];
+    const area = h("div", { class: "practice" });
+    page.replaceChildren(h("p", { class: "count" }, `${i + 1} of ${total}${it.warmup ? " · Warm-up: basic maths" : ""}`), area);
+    i += 1;
+    runPractice(area, { course: courseId, kind: it.warmup ? "warmup" : "review", review_id: it.id }, () =>
+      ({ label: i < items.length ? "Next review" : "Finish", run: next }), {
+      waitText: "Writing a fresh variation…",
+      afterResult: (box) => {
+        if (it.note) box.append(h("p", { class: "hint-box" }, h("b", {}, "Your note from last time"), it.note));
+      },
     });
-  }
-  const next = i + 1 < g.topics.length ? step(i + 1, "next", "Next topic") : step(-1, "next", "Back to");
-  foot.append(step(i - 1, "prev", i === 0 ? "Back to" : "Previous topic"), mark, next);
-  return foot;
+  };
+  next();
 }
 
-function refreshWeekProgress() {
-  for (const c of state.tree) for (const w of c.weeks) {
-    const guide = w.docs.find((d) => d.name === "guide");
-    const a = guide && document.querySelector(`.week-item[data-path="${CSS.escape(guide.path)}"]`);
-    if (!a) continue;
-    const done = doneSet(guide.path).size;
-    a.querySelector(".wk-bar i").style.width = `${w.topics ? Math.round(100 * done / w.topics) : 0}%`;
-    a.querySelector(".wk-c").textContent = `${done} of ${w.topics} understood`;
-  }
+// ------------------------------------------------------------ study session
+
+function saveSession() { store.set("session", APP.session); }
+function endSession() { APP.session = null; saveSession(); renderSessionBar(); go({}); }
+
+function startSession(courseId) {
+  APP.session = { course: courseId, step: 0, practised: 0, lastMistake: null, started: Date.now() };
+  saveSession();
+  runStep(0);
 }
 
-// Under the guide's metadata line: links to the original lecture PDFs.
-function addSourcesLine(doc) {
-  const w = state.course?.weeks.find((x) => x.n === state.week);
-  if (!w || !w.sources.length) return;
-  const p = document.createElement("p");
-  p.className = "sources-line";
-  p.append("Lecture slides: ");
-  w.sources.forEach((s, i) => {
-    const a = document.createElement("a");
-    a.href = `/api/src?path=${encodeURIComponent(s.path)}`;
-    a.target = "_blank";
-    a.rel = "noopener";
-    a.textContent = s.name.replace(/[-_]/g, " ");
-    if (i) p.append(" · ");
-    p.append(a);
-  });
-  const h1 = doc.querySelector("h1");
-  const meta = h1?.nextElementSibling;
-  (meta && meta.tagName === "P" ? meta : h1)?.after(p);
+async function runStep(i) {
+  const s = APP.session;
+  if (!s) return;
+  setSessionStep(i);
+  const c = await loadCourse(s.course, true);
+  const res = c.resume;
+  if (i === 0) {
+    if (c.reviews.count) return go({ review: s.course });
+    return runStep(1);
+  }
+  if (i === 1) return go({ c: s.course, d: res.deck, s: res.slide });
+  if (i === 2) return openPractice(s.course, { kind: "try" });
+  if (i === 3) return openPractice(s.course, { kind: "mixed" });
+  if (i === 4) return go({ step: "note" });
 }
 
-// ------------------------------------------------------------ sidebar: numbered topic tree
-
-function markCurrent() {
-  document.querySelectorAll(".nav-item[aria-current]").forEach((e) => e.removeAttribute("aria-current"));
-  document.querySelectorAll(".outline").forEach((e) => e.remove());
-  spy.part = null;
-  if (!state.path) return;
-  const item = document.querySelector(`.nav-item[data-path="${CSS.escape(state.path)}"]`);
-  if (!item) return;
-  item.setAttribute("aria-current", "page");
-  const g = state.guide && state.guide.path === state.path ? state.guide : null;
-  if (!g) return;
-  const link = (id) => `#doc=${encodeURIComponent(g.path)}&h=${id}`;
-  const done = doneSet(g.path);
-  const ol = document.createElement("ol");
-  ol.className = "outline";
-  g.topics.forEach((t, i) => {
-    const li = document.createElement("li");
-    li.className = "ol-topic";
-    li.dataset.id = t.id;
-    if (done.has(t.id)) li.classList.add("done");
-    if (i === state.view) li.classList.add("current", "open");
-    const row = document.createElement("div");
-    row.className = "ol-row";
-    const a = document.createElement("a");
-    a.className = "ol-link";
-    a.href = link(t.id);
-    a.innerHTML = `<span class="ol-n"></span><span class="ol-t"></span>`;
-    a.querySelector(".ol-n").textContent = t.n ?? "★";
-    a.querySelector(".ol-t").textContent = t.title;
-    row.append(a);
-    li.append(row);
-    if (t.parts.length) {
-      const tog = document.createElement("button");
-      tog.type = "button";
-      tog.className = "ol-toggle";
-      tog.setAttribute("aria-label", `Show sections of ${t.title}`);
-      tog.addEventListener("click", () => li.classList.toggle("open"));
-      row.append(tog);
-      const ul = document.createElement("ul");
-      ul.className = "ol-parts";
-      for (const p of t.parts) {
-        const sli = document.createElement("li");
-        const sa = document.createElement("a");
-        sa.className = `ol-part k-${partKind(p.text)}`;
-        sa.href = link(p.id);
-        sa.dataset.id = p.id;
-        sa.textContent = p.text;
-        sli.append(sa);
-        ul.append(sli);
-      }
-      li.append(ul);
-    }
-    ol.append(li);
-  });
-  item.after(ol);
-  ol.querySelector(".ol-topic.current")?.scrollIntoView({ block: "nearest" });
+function setSessionStep(i) {
+  if (!APP.session) return;
+  APP.session.step = i;
+  saveSession();
+  renderSessionBar();
 }
 
-// ------------------------------------------------------------ where am I in this topic
-
-function spy() {
-  spy.raf = 0;
-  const line = $("#reader").getBoundingClientRect().top + 90;
-  let part = null;
-  for (const h of document.querySelectorAll("#doc .part > h3")) {
-    if (h.getBoundingClientRect().top <= line) part = h; else break;
-  }
-  const pId = part ? part.id : null;
-  if (pId !== spy.part) {
-    document.querySelectorAll(".ol-part.active").forEach((e) => e.classList.remove("active"));
-    if (pId) document.querySelector(`.ol-part[data-id="${CSS.escape(pId)}"]`)?.classList.add("active");
-    spy.part = pId;
-  }
-}
-$("#reader").addEventListener("scroll", () => { if (!spy.raf) spy.raf = requestAnimationFrame(spy); });
-
-async function openDoc(path, anchor) {
-  const doc = $("#doc");
-  const fresh = path !== state.path;
-  if (fresh) {
-    const r = await fetch(`/api/doc?path=${encodeURIComponent(path)}`);
-    if (!r.ok) {
-      doc.innerHTML = `<div class="empty"><h1>That file isn't available</h1><p>It may have been moved or deleted. Pick another file from the list.</p></div>`;
-      return;
-    }
-    const md = await r.text();
-    doc.classList.remove("wide");
-    state.path = path;
-    state.course = courseOf(path);
-    state.week = weekOf(path);
-    state.view = null;
-    if (isGuidePath(path)) {
-      state.guide = parseGuide(path, md);
-    } else {
-      state.guide = null;
-      doc.replaceChildren(...renderMarkdown(md, state.course, path).childNodes);
-      structureDoc(doc);
-      lazyImages(doc);
-      fixLinks(doc, path);
-      drawDiagrams(doc);
-      renderCrumbs(null);
-    }
-    syncAskScope();
-  }
-  let moved = fresh;
-  if (state.guide) {
-    // Which page holds the anchor: -1 = the week overview, otherwise a topic.
-    const i = anchor && anchor in state.guide.idTo ? state.guide.idTo[anchor] : -1;
-    if (i !== state.view) {
-      renderGuideView(i);
-      markCurrent();
-      moved = true;
-    }
-  } else if (fresh) {
-    markCurrent();
-  }
-  const el = anchor && document.getElementById(anchor);
-  const isTop = !el || el.tagName === "H1" || (el.tagName === "H2" && state.guide);
-  if (isTop) {
-    $("#reader").scrollTo({ top: 0, behavior: "instant" });
-  } else {
-    const det = el.closest("details");
-    if (det) det.open = true;
-    el.scrollIntoView({ behavior: moved ? "instant" : "smooth" });
-  }
-  setTimeout(spy, moved ? 50 : 450);
+function renderSessionBar() {
+  const bar = $("#session-bar");
+  const s = APP.session;
+  const on = !!s && !params().upload;
+  bar.hidden = !on;
+  document.body.classList.toggle("session-on", on);
+  if (!on) return;
+  bar.replaceChildren(...STEPS.map(([, label], i) => h("button", {
+    type: "button", class: i < s.step ? "done" : i === s.step ? "current" : "", "aria-current": i === s.step ? "step" : null,
+    "aria-label": `Session step ${i + 1}: ${label}`, onclick: () => runStep(i),
+  }, h("span", { class: "seg" }), h("span", { class: "lbl" }, label))));
 }
 
-function renderCrumbs(topic) {
-  const c = state.course;
-  const box = $("#crumbs");
-  box.replaceChildren();
-  const where = document.createElement("span");
-  where.className = "where";
-  const bits = [c ? c.code : ""];
-  if (state.week) bits.push(`Week ${state.week}`);
-  if (!isGuidePath(state.path)) {
-    const d = c?.docs.find((x) => x.path === state.path);
-    bits.push(d ? docLabel(d) : (state.path || "").split("/").pop().replace(/\.md$/, ""));
-  }
-  where.textContent = bits.filter(Boolean).join(" · ");
-  box.append(where);
-  if (state.guide) {
-    const t = document.createElement("span");
-    t.className = "here";
-    t.textContent = !topic ? "Overview" : topic.n ? `Topic ${topic.n} of ${state.guide.total} — ${topic.title}` : topic.title;
-    box.append(t);
-  }
+function showNoteStep() {
+  const s = APP.session;
+  setCrumbs({ label: "Home", href: "#" }, { label: "Session" });
+  const main = $("#main");
+  if (!s) return go({});
+  const input = h("input", { type: "text", placeholder: "The clue I missed was…", "aria-label": "The clue I missed was", maxlength: "300" });
+  const finish = async () => {
+    const note = input.value.trim();
+    if (note && s.lastMistake) {
+      try { await api("/api/review/note", { course: s.course, id: s.lastMistake, note }); } catch { /* not critical */ }
+    }
+    APP.session = null; saveSession(); renderSessionBar();
+    main.replaceChildren(h("div", { class: "page" }, h("div", { class: "done-card" }, h("h1", {}, "Session done"),
+      h("p", {}, note ? "Your note will show up next time this comes back." : "Nice work."), h("a", { class: "btn", href: "#" }, "Home"))));
+  };
+  main.replaceChildren(h("div", { class: "page" },
+    h("h1", { class: "page-title" }, "One line to remember"),
+    h("p", { class: "page-sub" }, s.lastMistake ? "Shown next time this comes back." : "Nothing was missed today; a line still helps."),
+    h("form", { class: "clue", onsubmit: (e) => { e.preventDefault(); finish(); } }, input, h("button", { class: "btn", type: "submit" }, "Finish")),
+    h("button", { class: "link quiet", type: "button", onclick: () => { input.value = ""; finish(); } }, "Skip")));
+  input.focus();
 }
 
-async function showHome() {
-  state.path = null;
-  state.course = null;
-  state.guide = null;
-  state.view = null;
-  $("#crumbs").replaceChildren();
-  markCurrent();
-  const doc = $("#doc");
-  doc.classList.add("wide");
-  doc.innerHTML = `<div class="home"><h1>What to study next</h1><div class="home-grid" id="home-grid"></div></div>`;
-  let dash = [];
-  try { dash = await (await fetch("/api/dashboard")).json(); } catch { /* shown as empty below */ }
-  const grid = $("#home-grid");
-  if (!grid) return;
+// ------------------------------------------------------------ menu, search, history, settings
 
-  const last = store.get("last", null);
-  if (last && state.tree.some((c) => c.weeks.some((w) => w.docs.some((d) => d.path === last.path)))) {
-    const a = document.createElement("a");
-    a.className = "card continue";
-    a.href = `#doc=${encodeURIComponent(last.path)}&h=${last.id}`;
-    a.innerHTML = `<small>Continue where you left off</small><strong></strong><span></span>`;
-    a.querySelector("strong").textContent = last.topic;
-    a.querySelector("span").textContent = `${last.course} · Week ${last.week}${last.n ? ` · Topic ${last.n}` : ""}`;
-    grid.append(a);
-  }
+function slidesOnly(courseId) { return !!store.get(`slidesOnly:${courseId}`, false); }
 
-  for (const c of state.tree) {
-    const info = dash.find((x) => x.id === c.id) || { deadlines: [], due: [], weak: [] };
-    const card = document.createElement("section");
-    card.className = "card course-card";
-    const h = document.createElement("h2");
-    h.innerHTML = `<span class="code"></span><span class="title"></span>`;
-    h.querySelector(".code").textContent = c.code;
-    h.querySelector(".title").textContent = c.title;
-    card.append(h);
-
-    const plain = (s) => (s || "").replace(/\*\*/g, "");
-    if (info.deadlines.length) {
-      const ul = document.createElement("ul");
-      ul.className = "deadlines";
-      for (const d of info.deadlines) {
-        const li = document.createElement("li");
-        li.innerHTML = `<b></b><span></span>`;
-        li.querySelector("b").textContent = plain(d.Date);
-        li.querySelector("span").textContent = plain(d.Item);
-        ul.append(li);
-      }
-      const lab = document.createElement("div");
-      lab.className = "card-label";
-      lab.textContent = "Coming up";
-      card.append(lab, ul);
-    }
-
-    const prog = c.docs.find((d) => d.name === "progress");
-    const rev = document.createElement(prog ? "a" : "div");
-    rev.className = "reviews" + (info.due.length ? " has-due" : "");
-    if (prog) rev.href = `#doc=${encodeURIComponent(prog.path)}&h=review-queue`;
-    rev.textContent = info.due.length
-      ? `${info.due.length} review item${info.due.length > 1 ? "s" : ""} due today`
-      : "No reviews due today";
-    card.append(rev);
-    if (info.weak.length) {
-      const wk = document.createElement("p");
-      wk.className = "weak";
-      wk.textContent = `Working on: ${info.weak.map(plain).join("; ")}`;
-      card.append(wk);
-    }
-
-    const weeks = document.createElement("div");
-    weeks.className = "card-weeks";
-    for (const w of c.weeks) {
-      const guide = w.docs.find((d) => d.name === "guide");
-      const row = document.createElement(guide ? "a" : "div");
-      row.className = "wk-row";
-      if (guide) row.href = `#doc=${encodeURIComponent(guide.path)}`;
-      const done = guide ? doneSet(guide.path).size : 0;
-      row.innerHTML = `<span class="wk-n"></span><span class="wk-t"></span><span class="wk-bar"><i></i></span><span class="wk-c"></span>`;
-      row.querySelector(".wk-n").textContent = `Week ${w.n}`;
-      row.querySelector(".wk-t").textContent = guide ? weekTitle(w) : "Guide not built yet";
-      row.title = guide ? `Week ${w.n}: ${weekTitle(w)}` : "";
-      row.querySelector(".wk-bar i").style.width = `${w.topics ? Math.round(100 * done / w.topics) : 0}%`;
-      row.querySelector(".wk-c").textContent = guide ? `${done}/${w.topics}` : "";
-      weeks.append(row);
-    }
-    card.append(weeks);
-
-    const links = document.createElement("div");
-    links.className = "card-links";
-    for (const d of c.docs) {
-      const a = document.createElement("a");
-      a.href = `#doc=${encodeURIComponent(d.path)}`;
-      a.textContent = docLabel(d);
-      links.append(a);
-    }
-    card.append(links);
-    grid.append(card);
-  }
+function currentCourseId() {
+  const p = params();
+  return p.c || p.review || (APP.session && APP.session.course) || (APP.home && APP.home.suggested) || null;
 }
 
-function route() {
-  const h = new URLSearchParams(location.hash.slice(1));
-  if (h.get("doc")) openDoc(h.get("doc"), h.get("h"));
-  else showHome();
+function openMenu() {
+  const m = $("#menu");
+  const cid = currentCourseId();
+  const c = cid && APP.courses[cid];
+  $("#slides-only-row").hidden = !c;
+  if (c) { $("#slides-only").checked = slidesOnly(cid); $("#slides-only-course").textContent = c.code; }
+  m.hidden = false;
+  $("#menu-btn").setAttribute("aria-expanded", "true");
 }
-
-// ------------------------------------------------------------ search
-
-let searchTimer;
-$("#search").addEventListener("input", (e) => {
-  clearTimeout(searchTimer);
-  const q = e.target.value.trim();
-  searchTimer = setTimeout(async () => {
-    const box = $("#results");
-    if (q.length < 2) { box.hidden = true; $("#nav").hidden = false; return; }
-    const hits = await (await fetch(`/api/search?q=${encodeURIComponent(q)}`)).json();
-    box.innerHTML = hits.length ? "" : `<p class="nav-label">Nothing matches "${q.replace(/</g, "&lt;")}".</p>`;
-    for (const hit of hits) {
-      const a = document.createElement("a");
-      a.className = "result";
-      a.href = `#doc=${encodeURIComponent(hit.path)}&h=${headingSlug(hit.topic || hit.heading)}`;
-      const where = hit.path.split("/").slice(-2).join("/");
-      a.innerHTML = `<b></b><span></span>`;
-      a.querySelector("b").textContent = `${hit.course} · ${where}${hit.heading ? " · " + hit.heading : ""}`;
-      a.querySelector("span").textContent = hit.text;
-      box.append(a);
-    }
-    box.hidden = false;
-    $("#nav").hidden = true;
-  }, 180);
-});
-$("#search").addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { e.target.value = ""; e.target.dispatchEvent(new Event("input")); }
-});
-document.addEventListener("keydown", (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); $("#search").focus(); }
+function closeMenu() { $("#menu").hidden = true; $("#menu-btn").setAttribute("aria-expanded", "false"); }
+$("#menu-btn").addEventListener("click", (e) => { e.stopPropagation(); $("#menu").hidden ? openMenu() : closeMenu(); });
+document.addEventListener("click", (e) => { if (!$("#menu").hidden && !e.target.closest("#menu")) closeMenu(); });
+$("#slides-only").addEventListener("change", (e) => { const cid = currentCourseId(); if (cid) store.set(`slidesOnly:${cid}`, e.target.checked); });
+$("#model-pick").addEventListener("change", (e) => { APP.model = e.target.value; store.set("model", APP.model); });
+$("#menu").addEventListener("click", (e) => {
+  const act = e.target.closest("[data-act]")?.dataset.act;
+  if (act === "history") { closeMenu(); showHistory(); }
+  if (act === "phone") { closeMenu(); showPhoneQr(); }
 });
 
-// ------------------------------------------------------------ ask panel
-
-// One choice: which course Claude answers from. It can open any of that course's material.
-// It follows the page you're reading, unless a saved chat is open (a chat keeps its course).
-function fillAskScope() {
-  const sel = $("#ask-scope");
-  sel.innerHTML = "";
-  for (const c of state.tree) sel.add(new Option(`${c.code} ${c.title}`, c.id));
-}
-
-// Which Claude model answers. Remembered in this browser; each answer shows the model used.
-const modelNames = {};
-async function fillModels() {
-  let data = { default: "", models: [] };
-  try { data = await (await fetch("/api/models")).json(); } catch { /* keep the server default */ }
-  const sel = $("#ask-model");
-  sel.innerHTML = "";
-  for (const m of data.models) {
-    sel.add(new Option(m.label, m.id));
-    modelNames[m.id] = m.label.split(" — ")[0];
-  }
-  const saved = store.get("askModel", data.default);
-  sel.value = data.models.some((m) => m.id === saved) ? saved : data.default;
-}
-$("#ask-model").addEventListener("change", (e) => store.set("askModel", e.target.value));
-
-function askCourse() {
-  return $("#ask-scope").value || "";
-}
-
-function syncAskScope() {
-  if (!state.course || state.chat) return;
-  const want = state.course.id;
-  if ($("#ask-scope").value !== want && [...$("#ask-scope").options].some((o) => o.value === want)) {
-    $("#ask-scope").value = want;
-    newThread();
-  }
-}
-
-function newThread() {
-  state.chat = null;
-  $("#ask-scope").disabled = false;
-  $("#chat-title").textContent = "";
-  $("#thread").innerHTML = `<p class="hint">Claude looks through all of this course's guides, slides and handouts and opens what your question needs, with slide citations. Your chats are saved — reopen them from <b>Chats</b>.</p>`;
-  showChats(false);
-}
-
-function addMsg(cls, content) {
-  const m = document.createElement("div");
-  m.className = `msg ${cls}`;
-  if (typeof content === "string") m.textContent = content; else m.append(content);
-  $("#thread").append(m);
-  m.scrollIntoView({ block: "end" });
-  return m;
-}
-
-function answerBody(text, course, ms, cost, model) {
-  const body = renderMarkdown(text, course);
-  if (ms != null) {
-    const meta = document.createElement("div");
-    meta.className = "meta";
-    const who = model ? `${modelNames[model] || model} · ` : "";
-    meta.textContent = `${who}${(ms / 1000).toFixed(1)} s${cost != null ? ` · $${cost.toFixed(3)}` : ""}`;
-    body.append(meta);
-  }
-  return body;
-}
-
-// ----- saved chats
-
-async function showChats(open) {
-  const list = $("#chat-list");
-  $("#app").classList.toggle("chats-open", open);
-  $("#chats-btn").setAttribute("aria-expanded", open);
-  if (!open) return;
-  list.innerHTML = `<p class="hint">Loading your chats…</p>`;
-  let chats = [];
-  try { chats = await (await fetch("/api/chats")).json(); } catch { /* shown as empty */ }
-  list.innerHTML = chats.length ? "" : `<p class="hint">No saved chats yet. Ask a question and it's saved here automatically.</p>`;
+async function showHistory() {
+  const list = $("#history-list");
+  list.replaceChildren(h("p", { class: "waiting" }, "Loading…"));
+  $("#history-dlg").showModal();
+  const chats = await api("/api/chats").catch(() => []);
+  list.replaceChildren();
+  if (!chats.length) list.append(h("p", { class: "muted" }, "No tutor chats yet."));
   for (const c of chats) {
-    const row = document.createElement("div");
-    row.className = "chat-row" + (c.id === state.chat ? " current" : "");
-    const open = document.createElement("button");
-    open.type = "button";
-    open.className = "chat-open";
-    open.innerHTML = `<strong></strong><span></span>`;
-    open.querySelector("strong").textContent = c.title;
-    open.querySelector("span").textContent =
-      `${c.code || ""} · ${c.count} question${c.count === 1 ? "" : "s"} · ${c.updated}`;
-    open.addEventListener("click", () => openChat(c.id));
-    const del = document.createElement("button");
-    del.type = "button";
-    del.className = "chat-del";
-    del.textContent = "Delete";
-    del.setAttribute("aria-label", `Delete chat: ${c.title}`);
-    del.addEventListener("click", async () => {
-      if (!confirm(`Delete this chat?\n\n${c.title}`)) return;
-      await fetch("/api/chat/delete", { method: "POST", headers: { "Content-Type": "application/json" },
-                                         body: JSON.stringify({ id: c.id }) });
-      if (state.chat === c.id) newThread();
-      showChats(true);
-    });
-    row.append(open, del);
+    const row = h("div", { class: "hist-row" },
+      h("button", { class: "open", type: "button", onclick: () => { $("#history-dlg").close(); if (!c.deck) return go({ chat: c.id }); APP.tutor = "open"; go({ c: c.course, d: c.deck, s: "" }); } },
+        h("b", {}, c.title), h("span", {}, `${c.code} · ${c.count} question${c.count === 1 ? "" : "s"} · ${c.updated || c.created}`)),
+      h("button", { class: "link quiet", type: "button", onclick: async () => {
+        if (!confirm(`Delete this chat?\n\n${c.title}`)) return;
+        await api("/api/chat/delete", { id: c.id }).catch(() => {});
+        row.remove();
+        if (APP.deck && APP.deck.chat && APP.deck.chat.id === c.id) { APP.deck.chat = null; drawThread(); }
+      } }, "Delete"));
     list.append(row);
   }
 }
 
-async function openChat(id) {
-  const r = await fetch(`/api/chat?id=${encodeURIComponent(id)}`);
-  if (!r.ok) { showChats(true); return; }
-  const c = await r.json();
-  const course = state.tree.find((x) => x.id === c.course);
-  state.chat = c.id;
-  if ([...$("#ask-scope").options].some((o) => o.value === c.course)) $("#ask-scope").value = c.course;
-  $("#ask-scope").disabled = true;   // a chat keeps the course it started with
-  $("#chat-title").textContent = c.title;
-  $("#thread").innerHTML = "";
-  for (const m of c.messages) {
-    if (m.role === "q") addMsg("q", m.text);
-    else drawDiagrams(addMsg("a", answerBody(m.text, course, m.ms, m.cost, m.model)));
-  }
-  showChats(false);
-  $("#question").focus();
+function showPhoneQr() {
+  const qr = qrcode(0, "M"); qr.addData(APP.phoneUrl); qr.make();
+  $("#qr-title").textContent = "Open on your phone";
+  $("#qr-text").textContent = "Connect your phone to the same Wi-Fi, then scan this with its camera. Keep this computer on while you use it.";
+  $("#qr").innerHTML = qr.createSvgTag({ cellSize: 6, margin: 2, scalable: true });
+  $("#qr-url").textContent = APP.phoneUrl;
+  $("#qr-dlg").showModal();
 }
 
-$("#chats-btn").addEventListener("click", () => showChats(!$("#app").classList.contains("chats-open")));
-$("#ask-scope").addEventListener("change", newThread);
-$("#new-thread").addEventListener("click", newThread);
-$("#question").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#compose").requestSubmit(); }
+// ---------- search (Ctrl K)
+
+// Search snippets are raw transcript text; strip Markdown and the commonest LaTeX so they read cleanly.
+const TEX = { Theta: "Θ", Omega: "Ω", omega: "ω", sum: "Σ", le: "≤", leq: "≤", ge: "≥", geq: "≥", cdot: "·", times: "×",
+  infty: "∞", log: "log", lg: "lg", ln: "ln", sqrt: "√", ldots: "…", dots: "…", in: "∈", to: "→", rightarrow: "→", neq: "≠", approx: "≈" };
+function plain(t) {
+  return t.replace(/\*\*|__|`/g, "").replace(/\$\$?/g, "").replace(/\\(left|right|,|;|!|quad|qquad|displaystyle|text|mathrm|mathbf)/g, "")
+    .replace(/\\frac\{([^{}]*)\}\{([^{}]*)\}/g, "($1)/($2)").replace(/\\([A-Za-z]+)/g, (m, w) => TEX[w] ?? w).replace(/[{}]/g, "");
+}
+let searchTimer, searchSel = -1;
+function openSearch() {
+  $("#search").hidden = false;
+  const input = $("#search-input");
+  input.value = ""; $("#search-results").replaceChildren();
+  input.focus();
+}
+function closeSearch() { $("#search").hidden = true; }
+$("#search-btn").addEventListener("click", openSearch);
+$("#search").addEventListener("click", (e) => { if (e.target.id === "search") closeSearch(); });
+$("#search-input").addEventListener("input", (e) => {
+  clearTimeout(searchTimer);
+  const q = e.target.value.trim();
+  searchTimer = setTimeout(async () => {
+    const box = $("#search-results");
+    if (q.length < 2) { box.replaceChildren(); return; }
+    const hits = await api(`/api/search?q=${encodeURIComponent(q)}`).catch(() => []);
+    searchSel = -1;
+    box.replaceChildren(...(hits.length ? hits.map((x) => h("a", { href: `#c=${encodeURIComponent(x.course)}&d=${encodeURIComponent(x.deck)}&s=${x.slide}`, onclick: closeSearch },
+      h("b", {}, `${x.code} · ${x.topic} · ${x.deck} s${x.slide}`), h("span", {}, plain(x.text)))) : [h("p", {}, `Nothing matches "${q}".`)]));
+  }, 160);
+});
+$("#search-input").addEventListener("keydown", (e) => {
+  const links = $$("#search-results a");
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    searchSel = Math.max(0, Math.min(links.length - 1, searchSel + (e.key === "ArrowDown" ? 1 : -1)));
+    links.forEach((a, i) => a.classList.toggle("sel", i === searchSel));
+    links[searchSel]?.scrollIntoView({ block: "nearest" });
+  }
+  if (e.key === "Enter" && links.length) { (links[searchSel] || links[0]).click(); }
+  if (e.key === "Escape") closeSearch();
 });
 
-// ----- full-screen chat
+// ---------- keys
 
-function setAskFull(on) {
-  $("#app").classList.toggle("ask-full", on);
-  $("#expand-ask").setAttribute("aria-pressed", on);
-  $("#expand-ask").title = on ? "Back to the side panel (Esc)" : "Fill the screen";
-  $("#expand-ask").textContent = on ? "⤡" : "⤢";
-}
-$("#expand-ask").addEventListener("click", () => setAskFull(!$("#app").classList.contains("ask-full")));
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && $("#app").classList.contains("ask-full")) setAskFull(false);
-});
-
-$("#compose").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const q = $("#question").value.trim();
-  if (!q) return;
-  const courseId = askCourse();
-  const course = state.tree.find((x) => x.id === courseId);
-  if (!course) return;
-  // The topic on screen (if it's in the chosen course) is sent along, so "explain this" works.
-  const g = state.guide;
-  const here = g && state.view >= 0 && state.course?.id === courseId;
-  const onScreen = here ? g.topics[state.view].title : "";
-  const week = here ? state.week : 0;
-  $("#question").value = "";
-  $("#thread .hint")?.remove();
-  showChats(false);
-  addMsg("q", q);
-  const wait = addMsg("wait", "Reading the material…");
-  const t0 = Date.now();
-  const tick = setInterval(() => { wait.textContent = `Reading the material… ${Math.round((Date.now() - t0) / 1000)} s`; }, 1000);
-  $("#send").disabled = true;
-  try {
-    const r = await fetch("/api/ask", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat: state.chat, course: courseId, week, question: q, topic: onScreen,
-                             model: $("#ask-model").value }),
-    });
-    const data = await r.json();
-    wait.remove();
-    if (!r.ok || data.error) { addMsg("err", data.error || "The hub couldn't get an answer. Check that it's still running."); return; }
-    if (!state.chat) {
-      state.chat = data.chat;
-      $("#ask-scope").disabled = true;
-      $("#chat-title").textContent = q.replace(/\s+/g, " ").slice(0, 80);
-    }
-    drawDiagrams(addMsg("a", answerBody(data.answer, course, data.ms, data.cost, data.model)));
-  } catch {
-    wait.remove();
-    addMsg("err", "The hub isn't responding. Start it again with start.bat, then retry.");
-  } finally {
-    clearInterval(tick);
-    $("#send").disabled = false;
+  const typing = e.target.closest("input, textarea, select, [contenteditable]");
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openSearch(); return; }
+  if (e.key === "Escape") {
+    if (!$("#search").hidden) return closeSearch();
+    if (!$("#menu").hidden) return closeMenu();
+    if (APP.zoom) return toggleZoom();
+    if (APP.text) return toggleText(false);
+    if (APP.tutor === "focus" && !typing) return closePractice();
   }
+  if (typing || !$(".viewer") || APP.tutor === "focus") return;
+  if (e.key === "ArrowRight" || e.key === "PageDown") { e.preventDefault(); step(1); }
+  else if (e.key === "ArrowLeft" || e.key === "PageUp") { e.preventDefault(); step(-1); }
+  else if (e.key.toLowerCase() === "t") toggleText();
+  else if (e.key.toLowerCase() === "z") toggleZoom();
 });
-
-// The Ask panel is a drawer: closed by default so the reading column gets the room.
-function setAsk(open) {
-  $("#app").classList.toggle("ask-hidden", !open);
-  $("#open-ask").hidden = open;
-  store.set("askOpen", open);
-  if (open) $("#question").focus();
-}
-$("#close-ask").addEventListener("click", () => setAsk(false));
-$("#open-ask").addEventListener("click", () => setAsk(true));
-setAsk(store.get("askOpen", false));
-$("#home").addEventListener("click", (e) => { e.preventDefault(); location.hash = ""; });
-
-// Phones: the course list is a slide-over menu, closed whenever you pick something.
-function setNav(open) {
-  $("#app").classList.toggle("nav-open", open);
-  $("#menu-btn").setAttribute("aria-expanded", open);
-  $("#menu-btn").textContent = open ? "✕ Close" : "☰ Topics";
-}
-$("#menu-btn").addEventListener("click", () => setNav(!$("#app").classList.contains("nav-open")));
-window.addEventListener("hashchange", () => setNav(false));
-
-// Network mode: this computer can show a QR code with the phone's private link.
-async function setupPhoneLink() {
-  let url = null;
-  try { url = (await (await fetch("/api/phone")).json()).url; } catch { /* hub is local-only */ }
-  if (!url || typeof qrcode === "undefined") return;
-  $("#phone-btn").hidden = false;
-  $("#phone-btn").addEventListener("click", () => {
-    const qr = qrcode(0, "M");
-    qr.addData(url);
-    qr.make();
-    $("#qr").innerHTML = qr.createSvgTag({ cellSize: 6, margin: 2, scalable: true });
-    $("#phone-url").textContent = url;
-    $("#phone-dlg").showModal();
-  });
-}
 
 // ------------------------------------------------------------ start
 
 (async function init() {
-  state.tree = await (await fetch("/api/tree")).json();
-  renderNav();
-  fillAskScope();
-  fillModels();
-  setupPhoneLink();
   window.addEventListener("hashchange", route);
+  try {
+    const m = await api("/api/models");
+    APP.models = m.models;
+    const saved = store.get("model", m.default);
+    APP.model = m.models.some((x) => x.id === saved) ? saved : m.default;
+    $("#model-pick").replaceChildren(...m.models.map((x) => h("option", { value: x.id }, x.label.split(" — ")[0])));
+    $("#model-pick").value = APP.model;
+  } catch { /* the server default applies */ }
+  try {
+    APP.phoneUrl = (await api("/api/phone")).url;
+    $("#phone-item").hidden = !APP.phoneUrl;
+  } catch { /* local only */ }
   route();
 })();

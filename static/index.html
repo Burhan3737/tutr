@@ -2,65 +2,57 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
 <title>Study Hub</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%228%22 fill=%22%232f5bb7%22/%3E%3Cpath d=%22M9 22V10h8a4 4 0 010 8h-8%22 stroke=%22white%22 stroke-width=%223%22 fill=%22none%22/%3E%3C/svg%3E">
 <link rel="stylesheet" href="vendor/katex.min.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<div class="app" id="app">
-  <nav class="side" aria-label="Courses">
-    <div class="side-head">
-      <a class="brand" href="#" id="home">Study Hub</a>
-      <input id="search" type="search" placeholder="Search your notes  (Ctrl K)" aria-label="Search your notes" autocomplete="off">
-      <button class="phone-btn" id="phone-btn" type="button" hidden>Open on your phone</button>
-    </div>
-    <div class="side-body" id="nav"></div>
-    <div class="side-body" id="results" hidden></div>
-  </nav>
+<div class="session-bar" id="session-bar" hidden></div>
+<header class="top">
+  <a class="brand" href="#" aria-label="Study Hub home">Study Hub</a>
+  <nav class="crumbs" id="crumbs" aria-label="Where you are"></nav>
+  <button class="icon-btn" id="search-btn" type="button" aria-label="Search all slides (Ctrl K)" title="Search all slides (Ctrl K)">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+  </button>
+  <button class="icon-btn" id="menu-btn" type="button" aria-label="More" aria-haspopup="menu" aria-expanded="false">⋯</button>
+</header>
 
-  <main class="reader" id="reader" tabindex="-1">
-    <header class="crumbs" id="crumbs"></header>
-    <article class="doc" id="doc"></article>
-  </main>
+<main id="main" tabindex="-1"></main>
 
-  <aside class="ask" id="ask" aria-label="Ask about the material">
-    <div class="ask-head">
-      <h2>Ask</h2>
-      <button class="ghost" id="chats-btn" type="button" aria-expanded="false" aria-controls="chat-list">Chats</button>
-      <button class="ghost" id="new-thread" type="button">New chat</button>
-      <button class="ghost icon" id="expand-ask" type="button" aria-pressed="false" title="Fill the screen" aria-label="Fill the screen">⤢</button>
-      <button class="ghost icon" id="close-ask" type="button" aria-label="Hide the Ask panel">×</button>
-    </div>
-    <div class="scope">
-      <label>Course <select id="ask-scope"></select></label>
-      <label class="model-pick">Model <select id="ask-model"></select></label>
-      <p class="chat-title" id="chat-title"></p>
-    </div>
-    <div class="chat-list" id="chat-list" aria-label="Saved chats"></div>
-    <div class="thread" id="thread" aria-live="polite">
-      <p class="hint">Claude looks through all of this course's guides, slides and handouts and opens what your question needs, with slide citations.</p>
-    </div>
-    <form class="compose" id="compose">
-      <textarea id="question" rows="3" placeholder="e.g. Why does demand slope down?" aria-label="Your question"></textarea>
-      <button id="send" type="submit">Ask</button>
-    </form>
-  </aside>
-  <button class="ask-open" id="open-ask" type="button" hidden>Ask a question</button>
-  <button class="menu-btn" id="menu-btn" type="button" aria-controls="nav" aria-expanded="false">☰ Topics</button>
+<div class="menu" id="menu" role="menu" hidden>
+  <button role="menuitem" type="button" data-act="history">History</button>
+  <label class="menu-row">Model <select id="model-pick"></select></label>
+  <label class="menu-row" id="slides-only-row"><input type="checkbox" id="slides-only"> Stick to slides <span class="muted" id="slides-only-course"></span></label>
+  <button role="menuitem" type="button" data-act="phone" id="phone-item" hidden>Open on your phone</button>
 </div>
-<dialog class="phone-dlg" id="phone-dlg">
-  <h2>Open on your phone</h2>
-  <p>Connect your phone to the same Wi-Fi as this computer, then scan this with its camera.</p>
-  <div class="qr" id="qr"></div>
-  <p class="phone-url"><span id="phone-url"></span></p>
-  <p class="fine">Keep this computer on and the Study Hub window open while you use it on your phone.</p>
-  <form method="dialog"><button>Done</button></form>
+
+<div class="overlay" id="search" hidden>
+  <div class="search-box" role="dialog" aria-label="Search all slides">
+    <input id="search-input" type="search" placeholder="Search all slides" autocomplete="off" aria-label="Search all slides">
+    <div class="search-results" id="search-results"></div>
+  </div>
+</div>
+
+<dialog class="dlg" id="history-dlg">
+  <div class="dlg-head"><h2>History</h2><form method="dialog"><button class="icon-btn" aria-label="Close">×</button></form></div>
+  <div id="history-list"></div>
 </dialog>
+
+<dialog class="dlg" id="qr-dlg">
+  <div class="dlg-head"><h2 id="qr-title">Open on your phone</h2><form method="dialog"><button class="icon-btn" aria-label="Close">×</button></form></div>
+  <p id="qr-text">Connect your phone to the same Wi-Fi, then scan this with its camera.</p>
+  <div class="qr" id="qr"></div>
+  <p class="muted small" id="qr-url"></p>
+</dialog>
+
+<input type="file" id="photo-input" accept="image/*" capture="environment" hidden>
+
 <script src="vendor/qrcode.js"></script>
 <script src="vendor/marked.min.js"></script>
 <script src="vendor/katex.min.js"></script>
-<script src="vendor/mermaid.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
