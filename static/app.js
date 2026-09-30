@@ -40,6 +40,42 @@ async function api(path, body) {
   return data;
 }
 
+// POST that streams: the server sends "status" lines and "text" deltas as Server-Sent Events, then
+// "done" with the final result (or "error"). on = { status(text), text(delta) }.
+async function apiStream(path, body, on = {}) {
+  let r;
+  try {
+    r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, stream: true }) });
+  } catch { throw new Error("The hub isn't responding. Start it again with start.bat, then retry."); }
+  if (!r.ok || !(r.headers.get("content-type") || "").includes("event-stream")) {
+    const data = await r.json().catch(() => ({}));
+    throw new Error(data.error || "Something went wrong. Try again.");
+  }
+  const reader = r.body.getReader(), dec = new TextDecoder();
+  let buf = "", final = null;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf("\n\n")) >= 0) {
+      const chunk = buf.slice(0, i);
+      buf = buf.slice(i + 2);
+      let ev = "message", data = "";
+      for (const line of chunk.split("\n")) {
+        if (line.startsWith("event: ")) ev = line.slice(7);
+        else if (line.startsWith("data: ")) data += line.slice(6);
+      }
+      const val = data ? JSON.parse(data) : null;
+      if (ev === "done") final = val;
+      else if (ev === "error") throw new Error((val && val.error) || "Something went wrong. Try again.");
+      else if (on[ev]) on[ev](val);
+    }
+  }
+  if (!final) throw new Error("The answer was cut off. Try again.");
+  return final;
+}
+
 const APP = {
   home: null, courses: {}, deck: null, n: 1, tutor: "closed", pending: null, text: false, zoom: false,
   model: null, models: [], phoneUrl: null,
@@ -481,7 +517,7 @@ function updateTutorWhere() {
 function composeBox(placeholder, onSend) {
   const ta = h("textarea", { id: "ask-input", rows: "1", placeholder, "aria-label": placeholder });
   const send = h("button", { class: "btn ghost", type: "submit" }, "Ask");
-  const form = h("form", { class: "compose", onsubmit: (e) => { e.preventDefault(); const q = ta.value.trim(); if (!q) return; ta.value = ""; autosize(); onSend(q); } }, ta, send);
+  const form = h("form", { class: "compose", onsubmit: (e) => { e.preventDefault(); const q = ta.value.trim(); if (!q) return; ta.value = ""; autosize(); send.classList.add("ghost"); onSend(q); } }, ta, send);
   const autosize = () => { ta.style.height = "auto"; ta.style.height = Math.min(160, ta.scrollHeight + 2) + "px"; };
   ta.addEventListener("input", () => { autosize(); send.classList.toggle("ghost", !ta.value.trim()); });
   ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
@@ -561,14 +597,29 @@ async function tutorAsk(mode, question = "") {
   th.append(wait);
   th.scrollTop = th.scrollHeight;
   $$("#thread .msg-foot").forEach((f) => f.remove());
+  const live = h("div", { class: "msg-a" });
+  let acc = "", queued = false;
+  const paint = () => {
+    queued = false;
+    live.replaceChildren(...renderMd(acc, d.course).childNodes);
+    if (th.scrollHeight - th.scrollTop - th.clientHeight < 160) th.scrollTop = th.scrollHeight;
+  };
   try {
-    const r = await api("/api/tutor", { course: d.course, tag: d.tag, n, mode, question, model: APP.model, slides_only: slidesOnly(d.course) });
-    const chat = d.chat || { messages: [] };
+    const r = await apiStream("/api/tutor", { course: d.course, tag: d.tag, n, mode, question, model: APP.model, slides_only: slidesOnly(d.course) }, {
+      status: (t) => { wait.textContent = `${t}…`; },
+      text: (t) => {
+        if (!acc) { wait.before(live); wait.textContent = "Writing…"; }
+        acc += t;
+        if (!queued) { queued = true; requestAnimationFrame(paint); }
+      },
+    });
+    const chat = d.chat || { id: r.chat, title: mode === "ask" ? question : MODE_LABEL[mode] || question, updated: "", messages: [] };
     chat.messages.push({ role: "q", mode, slide: n, text: mode === "ask" ? question : mode === "brush" ? `Brush up: ${question}` : MODE_LABEL[mode] }, r.message);
     d.chat = chat;
     if (!d.asked.includes(n)) d.asked.push(n);
     if (APP.deck === d) { drawThread(); showAskedMark(); }
   } catch (e) {
+    live.remove();
     wait.replaceWith(h("p", { class: "err" }, e.message));
   }
 }
@@ -648,10 +699,12 @@ function practiceNext(kind) {
 
 // The practice flow: write a problem → the student works (text and/or photos, hints on request) → mark.
 async function runPractice(area, req, nextFor, opts = {}) {
-  area.replaceChildren(h("p", { class: "waiting" }, opts.waitText || (req.kind === "yourturn" ? "Setting up your turn…" : "Writing a problem for you…")));
+  const waitEl = h("p", { class: "waiting" }, opts.waitText || (req.kind === "yourturn" ? "Setting up your turn…" : "Writing a problem for you…"));
+  area.replaceChildren(waitEl);
   let prob;
   try {
-    prob = await api("/api/practice/new", { ...req, model: APP.model, slides_only: slidesOnly(req.course) });
+    prob = await apiStream("/api/practice/new", { ...req, model: APP.model, slides_only: slidesOnly(req.course) },
+      { status: (t) => { waitEl.textContent = `${t}…`; } });
   } catch (e) {
     area.replaceChildren(h("p", { class: "err" }, e.message), h("button", { class: "link", type: "button", onclick: () => runPractice(area, req, nextFor, opts) }, "Try again"));
     return;
@@ -685,11 +738,13 @@ async function runPractice(area, req, nextFor, opts = {}) {
     ? h("button", { class: "link", type: "button", onclick: () => sendFromPhone(prob, setPhotos) }, "Send from phone") : null;
   check.onclick = async () => {
     check.disabled = true;
-    result.replaceChildren(h("p", { class: "waiting" }, "Marking your work…"));
+    const markEl = h("p", { class: "waiting" }, "Marking your work…");
+    result.replaceChildren(markEl);
     try {
       const s = APP.session;
-      const r = await api("/api/practice/check", { id: prob.id, answer: answer.value, model: APP.model,
-        slides_only: slidesOnly(req.course), prefetch: ["try", "deck", "mixed"].includes(req.kind), topics: req.topics });
+      const r = await apiStream("/api/practice/check", { id: prob.id, answer: answer.value, model: APP.model,
+        slides_only: slidesOnly(req.course), prefetch: ["try", "deck", "mixed"].includes(req.kind), topics: req.topics },
+        { status: (t) => { markEl.textContent = t === "Writing it up" ? "Writing your feedback…" : `${t}…`; } });
       if (s && r.saved && r.review_id) { s.lastMistake = r.review_id; saveSession(); }
       result.replaceChildren(resultEl(r, prob, req, nextFor, opts));
       check.hidden = true; hintBtn.hidden = true;

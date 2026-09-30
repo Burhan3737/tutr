@@ -1,27 +1,28 @@
-"""The tutor: every Claude call the Study Hub makes.
+"""The tutor: what the Study Hub asks Claude, and what it does with the answers.
 
-Each call runs the `claude` CLI (the Claude Code login on this machine; no API key) inside the
-course folder with read-only tools. With default permissions and the course folder as the working
-directory, reads outside the course are refused; only WebSearch/WebFetch are pre-approved, and
-those can't read local files. (Tested: an outside file read is denied while web search works.)
-Never pre-approve Read/Grep/Glob with --allowedTools: that would allow reads anywhere.
+How the calls are made (the Claude Agent SDK on the Claude Code login, one open conversation per
+deck, streaming, the course-folder check) lives in engine.py. This file holds the prompts and the
+study logic.
 
 Modes
-- chat (explain / example / ask / deeper): Markdown answers in one resumable Claude session per deck
+- chat (explain / example / ask / deeper / brush): Markdown answers streamed into the deck's chat
 - practice: a problem written and solved by Claude (structured output); the solution and hints stay
   on the server until the student has tried
 - check: marks the student's work (typed and/or photographed), method first
+
+Every entry point takes `emit(kind, data)`: "status" lines (what Claude is looking at) and, for
+chats, "text" deltas as the answer is written. The server relays them to the browser.
 """
-import hashlib, json, re, subprocess, threading, time, uuid
+import json, re, threading, time, uuid
 from pathlib import Path
 
+import engine
 import library as L
 import state as S
 
 HERE = Path(__file__).resolve().parent
 WORK = HERE / ".cache"
-MAX_TURNS = 25
-TIMEOUT = 420
+TIMEOUT = engine.TIMEOUT
 MODELS = {
     "claude-opus-5-5": "Opus 5.5 — best answers, highest cost",
     "claude-sonnet-5-5": "Sonnet 5.5 — balanced",
@@ -37,56 +38,13 @@ def log(msg):
         f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
 
 
-class TutorError(Exception):
-    def __init__(self, msg, status=502):
-        super().__init__(msg)
-        self.status = status
+TutorError = engine.EngineError
 
 
-def run_claude(cdir, system, prompt, *, model, session=None, schema=None, web=True, label=""):
-    WORK.mkdir(exist_ok=True)
-    key = hashlib.sha1(system.encode("utf-8")).hexdigest()[:12]
-    pfile = WORK / f"prompt-{key}-{threading.get_ident()}.md"
-    pfile.write_text(system, encoding="utf-8")
-    tools = "Read,Grep,Glob" + (",WebSearch,WebFetch" if web else "")
-    cmd = ["claude", "-p", "--output-format", "json", "--model", model if model in MODELS else DEFAULT_MODEL,
-           "--tools", tools, "--max-turns", str(MAX_TURNS),
-           "--strict-mcp-config", "--disable-slash-commands", "--setting-sources", "local",
-           "--system-prompt-file", str(pfile)]
-    if web:
-        cmd += ["--allowedTools", "WebSearch", "WebFetch"]
-    if session:
-        cmd += ["--resume", session]
-    if schema:
-        cmd += ["--json-schema", json.dumps(schema)]
-    t0 = time.time()
-    try:
-        proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, encoding="utf-8",
-                              timeout=TIMEOUT, cwd=str(cdir))
-    except FileNotFoundError:
-        raise TutorError("The claude command isn't on PATH. Install Claude Code, then restart the hub.", 500)
-    except subprocess.TimeoutExpired:
-        raise TutorError("That took too long. Try again.", 504)
-    finally:
-        pfile.unlink(missing_ok=True)
-    ms = int((time.time() - t0) * 1000)
-    try:
-        data = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        log(f"{label} failed: {(proc.stderr or proc.stdout)[-300:]!r}")
-        raise TutorError("Claude didn't answer. Check that Claude Code is signed in, then try again.")
-    if data.get("subtype") == "error_max_turns":
-        raise TutorError("Claude ran out of look-up steps. Try a narrower question.")
-    if data.get("is_error"):
-        log(f"{label} error: {str(data.get('result'))[:300]!r}")
-        raise TutorError("Claude reported an error. Try again in a moment.")
-    if schema and not isinstance(data.get("structured_output"), dict):
-        raise TutorError("Claude's answer came back in the wrong shape. Try again.")
-    cost = data.get("total_cost_usd") or 0
-    log(f"{label} course={L.course_meta(cdir)[0]} model={model} turns={data.get('num_turns')} "
-        f"denied={len(data.get('permission_denials') or [])} ms={ms} cost={cost:.4f}")
-    return {"text": data.get("result", ""), "json": data.get("structured_output"), "session": data.get("session_id"),
-            "ms": ms, "cost": cost}
+def run_claude(cdir, system, prompt, *, model, session=None, schema=None, web=True, label="", chat_key=None, emit=None):
+    return engine.run(cdir, system, prompt, model=model if model in MODELS else DEFAULT_MODEL, web=web, schema=schema,
+                      chat_key=chat_key, session=session, emit=emit, log=log,
+                      label=f"{label} course={L.course_meta(cdir)[0]}")
 
 
 # ---------------------------------------------------------------- the system prompt
@@ -178,26 +136,26 @@ one tiny example each, and how it shows up on slide {where}. About 150 words."""
 }
 
 
-def chat_turn(cdir, tag, n, mode, question, model, web):
+def chat_turn(cdir, tag, n, mode, question, model, web, emit=None):
     """One tutor answer inside the deck's chat. Returns the saved message and the chat id."""
     if mode not in CHAT_PROMPTS:
         raise TutorError("Unknown request.", 400)
     chat_id = S.chat_for(cdir, tag)
     chat = load_chat(chat_id) if chat_id else None
-    prompt = CHAT_PROMPTS[mode].format(where=where(cdir, tag, n), question=question.strip())
-    r = run_claude(cdir, system_prompt(cdir, tag, web), prompt, model=model,
-                   session=chat.get("session") if chat else None, web=web, label=f"chat:{mode}")
+    label = {"explain": "Explain simply", "example": "Worked example", "deeper": "Go deeper",
+             "brush": f"Brush up: {question.strip()}"}.get(mode, question.strip())
     now = time.strftime("%Y-%m-%d %H:%M")
-    if not chat:
-        code, _ = L.course_meta(cdir)
-        d = L.deck(cdir, tag)
-        chat = {"id": uuid.uuid4().hex[:12], "course": cdir.name, "code": code, "deck": tag,
-                "title": f"{d['title']} [{tag}]", "created": now, "messages": []}
+    new = chat is None
+    if new:     # saved only once Claude has answered
+        chat = {"id": uuid.uuid4().hex[:12], "course": cdir.name, "code": L.course_meta(cdir)[0], "deck": tag,
+                "title": f"{label[:70]} · s{n}", "created": now, "messages": []}
+    prompt = CHAT_PROMPTS[mode].format(where=where(cdir, tag, n), question=question.strip())
+    r = run_claude(cdir, system_prompt(cdir, tag, web), prompt, model=model, chat_key=(cdir.name, tag, chat["id"]),
+                   session=chat.get("session"), web=web, label=f"chat:{mode}", emit=emit)
+    if new:
         S.set_chat(cdir, tag, chat["id"])
     chat["session"] = r["session"]
     chat["updated"] = now
-    label = {"explain": "Explain simply", "example": "Worked example", "deeper": "Go deeper",
-             "brush": f"Brush up: {question.strip()}"}.get(mode, question.strip())
     msg = {"role": "a", "mode": mode, "slide": n, "text": r["text"], "ms": r["ms"], "cost": r["cost"], "model": model}
     chat["messages"] += [{"role": "q", "mode": mode, "slide": n, "text": label}, msg]
     save_chat(chat)
@@ -338,7 +296,7 @@ def public_problem(rec):
             "cost": rec.get("cost")}
 
 
-def _generate(cdir, req, model, web):
+def _generate(cdir, req, model, web, emit=None):
     kind = req["kind"]
     info = L.course_info(cdir)
     tag = req.get("tag") or ""
@@ -365,7 +323,7 @@ def _generate(cdir, req, model, web):
                                   surface=SURFACE_NEW if kind != "yourturn" else "same structure as the example.",
                                   task=task)
     r = run_claude(cdir, system_prompt(cdir, scope_tag, web), prompt, model=model, schema=PROBLEM_SCHEMA, web=web,
-                   label=f"practice:{kind}")
+                   label=f"practice:{kind}", emit=emit)
     j = r["json"]
     deck_tag = j.get("deck") if L.deck(cdir, j.get("deck") or "") else (tag if kind in ("try", "deck", "yourturn") else
                                                                       (review or {}).get("deck"))
@@ -386,17 +344,19 @@ def _prefetch_key(cdir, req, model, web):
     return (cdir.name, req.get("kind"), req.get("tag") or "", model, web, tuple(req.get("topics") or ()))
 
 
-def new_problem(cdir, req, model, web):
+def new_problem(cdir, req, model, web, emit=None):
     """A new problem; takes a prefetched one when it's ready (or waits for it) instead of starting over."""
     key = _prefetch_key(cdir, req, model, web)
     if req.get("kind") in ("try", "deck", "mixed"):
         with _P_LOCK:
             pf = _PREFETCH.pop(key, None)
         if pf:
+            if not pf["event"].is_set() and emit:
+                emit("status", "Finishing the problem that's already being written")
             pf["event"].wait(TIMEOUT)
             if pf.get("rec") and (req.get("kind") != "try" or pf["rec"]["n"] == int(req.get("n") or 1)):
                 return pf["rec"]
-    return _generate(cdir, req, model, web)
+    return _generate(cdir, req, model, web, emit)
 
 
 def prefetch(cdir, req, model, web):
@@ -479,7 +439,7 @@ How to mark:
    the course's notation. Be warm and direct; no grades."""
 
 
-def check(cdir, pid, answer, model, web):
+def check(cdir, pid, answer, model, web, emit=None):
     rec = get_practice(pid)
     if not rec:
         raise TutorError("That problem has expired. Start a new one.", 404)
@@ -493,7 +453,7 @@ def check(cdir, pid, answer, model, web):
     tag = rec["deck"] if L.deck(cdir, rec["deck"] or "") else (rec["tag"] if L.deck(cdir, rec["tag"] or "") else
                                                                L.deck_order(cdir)[0]["tag"])
     r = run_claude(cdir, system_prompt(cdir, tag, False), prompt, model=model, schema=MARK_SCHEMA, web=False,
-                   label="check")
+                   label="check", emit=emit)
     j = r["json"]
     hinted = rec["hints_used"] > 0
     correct = bool(j["correct"]) and not j.get("unreadable")
