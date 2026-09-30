@@ -257,6 +257,8 @@ h1.page-title { font-size: 28px; line-height: 34px; font-weight: 600; margin: 0 
 .hist-row .hist-title { font-size: 15px; flex: none; }
 .hist-meta { border: 0; background: none; text-align: left; cursor: pointer; font-size: 13px; color: var(--text-2); padding: 2px 6px; }
 .hist-meta:hover { color: var(--accent); }
+/* Off-screen messages skip layout and paint, so long chats scroll and resize smoothly. */
+.thread > .ans, .thread > .msg-q { content-visibility: auto; contain-intrinsic-size: auto 240px; }
 .copy-one { display: block; margin: 0 0 0 auto; border: 0; background: none; color: var(--text-2);
   font-size: 12px; padding: 2px 8px; border-radius: 6px; cursor: pointer; opacity: 0; transition: opacity .15s; }
 .ans:hover .copy-one, .copy-one:focus-visible { opacity: 1; }

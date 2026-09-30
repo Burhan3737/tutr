@@ -131,12 +131,31 @@ function linkCitations(root, courseId) {
       frag.append(text.slice(last, m.index));
       const [tag, n] = [m[1], +m[2]];
       frag.append(h("button", { class: "cite", type: "button", title: `Open ${tag} slide ${n}`,
-        onclick: () => go({ c: courseId, d: tag, s: n }) }, m[0].slice(1, -1)));
+        "data-c": courseId, "data-d": tag, "data-s": String(n) }, m[0].slice(1, -1)));
       last = m.index + m[0].length;
     }
     frag.append(text.slice(last));
     node.replaceWith(frag);
   }
+}
+
+document.addEventListener("click", (e) => {
+  const c = e.target.closest(".cite[data-d]");
+  if (c && !c.closest("#print-root")) go({ c: c.dataset.c, d: c.dataset.d, s: +c.dataset.s });
+});
+
+// Rendering Markdown with many formulas is the expensive part of a long chat, so finished answers
+// are rendered once and reused (as HTML) whenever the thread is drawn again.
+const MD_CACHE = new Map();
+function renderMdCached(text, courseId) {
+  const key = `${courseId}\u0000${text}`;
+  const hit = MD_CACHE.get(key);
+  const box = document.createElement("div");
+  if (hit != null) { box.innerHTML = hit; return box; }
+  const fresh = renderMd(text, courseId);
+  MD_CACHE.set(key, fresh.innerHTML);
+  if (MD_CACHE.size > 300) MD_CACHE.delete(MD_CACHE.keys().next().value);
+  return fresh;
 }
 
 // ------------------------------------------------------------ routing
@@ -656,7 +675,7 @@ function drawThread() {
 }
 
 function answerEl(m, isLast) {
-  const body = renderMd(m.text, APP.deck.course);
+  const body = renderMdCached(m.text, APP.deck.course);
   body.className = "msg-a";
   // "**Needs:** percentage change, slope of a line" becomes tappable brush-up chips.
   const raw = (m.text.match(/^\s*\**Needs:\**\s*(.+)$/im) || [])[1];
@@ -774,11 +793,27 @@ async function tutorAsk(mode, question = "") {
   th.scrollTop = th.scrollHeight;
   $$("#thread .msg-foot").forEach((f) => f.remove());
   const live = h("div", { class: "msg-a" });
-  let acc = "", queued = false;
+  const doneBlocks = h("div"), tailBlock = h("div");
+  live.append(doneBlocks, tailBlock);
+  let acc = "", done = 0, queued = false, cost = 0, follow = true;
+  const onScroll = () => { follow = th.scrollHeight - th.scrollTop - th.clientHeight < 80; };
+  th.addEventListener("scroll", onScroll, { passive: true });
+  // Everything before the last blank line that isn't inside $$…$$ or a ``` block is finished text.
+  const cutPoint = (text) => {
+    for (let i = text.lastIndexOf("\n\n"); i > done; i = text.lastIndexOf("\n\n", i - 1)) {
+      const head = text.slice(0, i);
+      if ((head.split("$$").length - 1) % 2 === 0 && (head.split("```").length - 1) % 2 === 0) return i + 2;
+    }
+    return done;
+  };
   const paint = () => {
     queued = false;
-    live.replaceChildren(...renderMd(acc, d.course).childNodes);
-    if (th.scrollHeight - th.scrollTop - th.clientHeight < 160) th.scrollTop = th.scrollHeight;
+    const t0 = performance.now();
+    const cut = cutPoint(acc);
+    if (cut > done) { doneBlocks.append(...renderMd(acc.slice(done, cut), d.course).childNodes); done = cut; }
+    tailBlock.replaceChildren(...renderMd(acc.slice(done), d.course).childNodes);
+    cost = performance.now() - t0;
+    if (follow) th.scrollTop = th.scrollHeight;
   };
   try {
     const r = await apiStream("/api/tutor", { course: d.course, tag: d.tag, n, mode, question, model: APP.model, slides_only: slidesOnly(d.course) }, {
@@ -786,7 +821,7 @@ async function tutorAsk(mode, question = "") {
       text: (t) => {
         if (!acc) { wait.before(live); wait.textContent = "Writing…"; }
         acc += t;
-        if (!queued) { queued = true; requestAnimationFrame(paint); }
+        if (!queued) { queued = true; setTimeout(() => requestAnimationFrame(paint), Math.max(50, cost * 4)); }
       },
     });
     const chat = d.chat || { id: r.chat, title: mode === "ask" ? question : MODE_LABEL[mode] || question, updated: "", messages: [] };
@@ -794,8 +829,15 @@ async function tutorAsk(mode, question = "") {
     chat.updated = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
     d.chat = chat;
     if (!d.asked.includes(n)) d.asked.push(n);
-    if (APP.deck === d) { drawThread(); showAskedMark(); }
+    th.removeEventListener("scroll", onScroll);
+    if (APP.deck !== d) return;
+    if (chat.messages.length <= 2) { drawThread(); return; }     // first answer: also adds the chat bar
+    // Swap in just the finished answer; the rest of the thread stays as it is.
+    wait.remove();
+    live.replaceWith(answerEl(r.message, true));
+    if (follow) th.scrollTop = th.scrollHeight;
   } catch (e) {
+    th.removeEventListener("scroll", onScroll);
     live.remove();
     wait.replaceWith(h("p", { class: "err" }, e.message));
   }
