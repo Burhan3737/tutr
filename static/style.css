@@ -261,7 +261,7 @@ h1.page-title { font-size: 28px; line-height: 34px; font-weight: 600; margin: 0 
 .end-card h2 { font-size: 20px; line-height: 28px; font-weight: 600; margin: 0 0 6px; }
 .end-card p { color: var(--text-2); margin: 0 0 20px; }
 .end-card .btn { min-width: 200px; }
-.end-card .link { margin-top: 8px; }
+.end-card .deck-links { display: flex; justify-content: center; gap: 20px; flex-wrap: wrap; margin-top: 8px; }
 
 /* ---------- tutor panel */
 .tutor { width: var(--rail); flex: none; background: var(--surface); border-left: 1px solid var(--line); display: flex;

@@ -48,7 +48,7 @@ def course_summary(cdir):
 
 
 def _deck_public(d):
-    return {k: d[k] for k in ("tag", "title", "week", "slides", "topic")} | {"prepared": bool(d["transcript"])}
+    return {k: d[k] for k in ("tag", "title", "week", "slides", "topic", "order")} | {"prepared": bool(d["transcript"])}
 
 
 def home():

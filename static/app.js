@@ -409,7 +409,8 @@ async function showCourse(id, token) {
 
 const stateLabel = (s) => ({ new: "Not started", started: "Started", read: "Read · solve one to finish", solved: "Solved" })[s] || s;
 function findDeck(c, tag) { for (const t of c.topics) for (const d of t.decks) if (d.tag === tag) return d; return null; }
-function courseDeckOrder(c) { return c.topics.flatMap((t) => t.decks).sort((a, b) => a.week - b.week); }
+// Lecture order (week, then the deck table's order), not topic order: topics can interleave within a week.
+function courseDeckOrder(c) { return c.topics.flatMap((t) => t.decks).sort((a, b) => a.week - b.week || (a.order ?? 0) - (b.order ?? 0)); }
 
 async function showNotes(id, path, token) {
   const c = await loadCourse(id);
@@ -484,19 +485,17 @@ function showSlide() {
   if (!sm) return;
   const end = n > d.slides;
   sm.classList.toggle("zoomed", false); APP.zoom = false;
+  const { prev: prevDeck, next: nextDeck } = neighbourDecks(d);
   if (end) {
-    const c = APP.courses[d.course];
-    const order = c ? courseDeckOrder(c) : [];
-    const i = order.findIndex((x) => x.tag === d.tag);
-    const nextDeck = order[i + 1];
     sm.classList.remove("portrait");
     $("#tutor")?.classList.add("quiet-rail");
     sm.replaceChildren(h("div", { class: "end-card" },
       h("h2", {}, `End of ${d.tag}`),
       h("p", {}, d.state.solved ? "You've solved a problem from this deck." : "Solve one problem from it to finish the deck."),
       h("button", { class: "btn", type: "button", onclick: () => startPracticeInPanel({ kind: "deck" }) }, "Try one"),
-      h("br"),
-      nextDeck ? h("a", { class: "link", href: `#c=${encodeURIComponent(d.course)}&d=${encodeURIComponent(nextDeck.tag)}&s=1` }, `Next deck: ${nextDeck.tag} ›`) : null));
+      h("div", { class: "deck-links" },
+        prevDeck ? h("a", { class: "link quiet", href: `#c=${encodeURIComponent(d.course)}&d=${encodeURIComponent(prevDeck.tag)}&s=${prevDeck.slides}` }, `‹ Previous deck: ${prevDeck.tag}`) : null,
+        nextDeck ? h("a", { class: "link", href: `#c=${encodeURIComponent(d.course)}&d=${encodeURIComponent(nextDeck.tag)}&s=1` }, `Next deck: ${nextDeck.tag} ›`) : null)));
   } else {
     $("#tutor")?.classList.remove("quiet-rail");
     let img = $(".slide-img", sm);
@@ -511,7 +510,10 @@ function showSlide() {
   markSidenavSlide(n);
   const label = end ? `${d.slides} / ${d.slides}` : `${n} / ${d.slides}`;
   $("#counter").textContent = label; $("#counter-m").textContent = label;
-  $("#prev").disabled = n <= 1; $("#next").disabled = end;
+  // At the edges of a deck the arrows carry on into the previous / next deck.
+  $("#prev").disabled = n <= 1 && !prevDeck; $("#next").disabled = end && !nextDeck;
+  $("#prev").title = n <= 1 && prevDeck ? `Previous deck: ${prevDeck.tag} (←)` : "Previous slide (←)";
+  $("#next").title = end && nextDeck ? `Next deck: ${nextDeck.tag} (→)` : "Next slide (→)";
   $("#text-btn").hidden = end;
   if (APP.text) fillTranscript();
   requestAnimationFrame(fitSlide);
@@ -541,8 +543,19 @@ function fitSlide() {
 window.addEventListener("resize", () => fitSlide());
 const stageObserver = new ResizeObserver(() => fitSlide());
 
+// The decks either side of this one, in lecture order across the whole course.
+function neighbourDecks(d) {
+  const c = APP.courses[d.course];
+  const order = c ? courseDeckOrder(c) : [];
+  const i = order.findIndex((x) => x.tag === d.tag);
+  return { prev: i > 0 ? order[i - 1] : null, next: i >= 0 ? order[i + 1] || null : null };
+}
+
 function step(k) {
   if (!APP.deck) return;
+  const d = APP.deck, { prev, next } = neighbourDecks(d);
+  if (k < 0 && APP.n <= 1 && prev) return go({ c: d.course, d: prev.tag, s: prev.slides });
+  if (k > 0 && APP.n > d.slides && next) return go({ c: d.course, d: next.tag, s: 1 });
   const n = Math.min(Math.max(1, APP.n + k), APP.deck.slides + 1);
   if (n === APP.n) return;
   APP.n = n;
