@@ -78,7 +78,7 @@ async function apiStream(path, body, on = {}) {
 
 const APP = {
   home: null, courses: {}, deck: null, n: 1, tutor: "closed", pending: null, text: false, zoom: false,
-  model: null, models: [], phoneUrl: null,
+  model: null, models: [], phoneUrl: null, scope: store.get("scope", "slide"),
   session: store.get("session", null),
 };
 const STEPS = [["review", "Review"], ["new", "New slides"], ["practise", "Practise"], ["mix", "Mixed"], ["note", "Note"]];
@@ -90,6 +90,8 @@ function renderMd(md, courseId) {
   let src = String(md || "").replace(/```[\s\S]*?```|`[^`\n]+`/g, (m) => { code.push(m); return `CODETOKEN${code.length - 1}X`; });
   src = src.replace(/\$\$([\s\S]+?)\$\$/g, (_, t) => { math.push([t, true]); return `MATHTOKEN${math.length - 1}X`; });
   src = src.replace(/(^|[^\\$])\$([^\s$](?:[^$\n]*?[^\s$])?)\$(?!\d)/g, (_, pre, t) => { math.push([t, false]); return `${pre}MATHTOKEN${math.length - 1}X`; });
+  // ||hidden answer|| becomes a blurred span you click to reveal (works inside lists and around maths).
+  src = src.replace(/\|\|([^|\n][^\n]*?)\|\|/g, '<span class="spoiler" tabindex="0" role="button" title="Click to show the answer">$1</span>');
   src = src.replace(/CODETOKEN(\d+)X/g, (_, i) => code[+i]);
   const box = document.createElement("div");
   box.innerHTML = marked.parse(src, { gfm: true, breaks: false });
@@ -140,8 +142,14 @@ function linkCitations(root, courseId) {
 }
 
 document.addEventListener("click", (e) => {
+  const sp = e.target.closest(".spoiler");
+  if (sp) { sp.classList.add("shown"); return; }
   const c = e.target.closest(".cite[data-d]");
   if (c && !c.closest("#print-root")) go({ c: c.dataset.c, d: c.dataset.d, s: +c.dataset.s });
+});
+
+document.addEventListener("keydown", (e) => {
+  if ((e.key === "Enter" || e.key === " ") && e.target.classList?.contains("spoiler")) { e.preventDefault(); e.target.classList.add("shown"); }
 });
 
 // Rendering Markdown with many formulas is the expensive part of a long chat, so finished answers
@@ -611,7 +619,7 @@ function renderTutor() {
   if (APP.tutor === "closed") {
     setTutor("closed");
     t.replaceChildren(h("div", { class: "rail" },
-      h("button", { class: "primary", type: "button", onclick: () => startPracticeInPanel({ kind: "try" }), title: "A problem on this slide" },
+      h("button", { class: "primary", type: "button", onclick: () => startPracticeInPanel({ kind: tryKind() }), title: "A problem on this slide (or the whole deck, if chosen in the panel)" },
         h("span", { class: "go", "aria-hidden": "true" }, "✎"), "Try one"),
       h("button", { type: "button", onclick: () => { APP.tutor = "open"; renderTutor(); $("#ask-input")?.focus(); } },
         h("span", { class: "glyph", "aria-hidden": "true" }, "💬"), "Ask"),
@@ -628,10 +636,12 @@ function renderTutor() {
       h("button", { class: "link quiet new-chat", type: "button", title: "Start a new chat on this deck", onclick: newChat }, "New chat"),
       h("button", { class: "icon-btn", type: "button", "aria-label": "Close the tutor", onclick: () => { APP.tutor = "closed"; renderTutor(); } }, "×")),
     h("div", { class: "panel-actions" },
-      h("button", { class: "btn block", type: "button", onclick: () => startPracticeInPanel({ kind: "try" }) }, "Try one"),
+      scopeSwitch(),
+      h("button", { class: "btn block", type: "button", onclick: () => startPracticeInPanel({ kind: tryKind() }) }, "Try one"),
       h("div", { class: "links" },
         h("button", { class: "link", type: "button", onclick: () => tutorAsk("example") }, "Worked example"),
-        h("button", { class: "link", type: "button", onclick: () => tutorAsk("explain") }, "Explain simply"))),
+        h("button", { class: "link", type: "button", onclick: () => tutorAsk("explain") }, "Explain simply"),
+        h("button", { class: "link", type: "button", onclick: () => tutorAsk("quiz") }, "Quiz prep"))),
     thread,
     composeBox("Ask anything about this slide", (q) => tutorAsk("ask", q))));
   updateTutorWhere();
@@ -640,7 +650,15 @@ function renderTutor() {
 
 function updateTutorWhere() {
   const w = $("#tutor-where");
-  if (w && APP.deck) w.textContent = APP.n > APP.deck.slides ? APP.deck.tag : `${APP.deck.tag} s${APP.n}`;
+  if (w && APP.deck) w.textContent = APP.scope === "deck" || APP.n > APP.deck.slides ? `${APP.deck.tag} · whole deck` : `${APP.deck.tag} s${APP.n}`;
+}
+
+// What Try one / Worked example / Explain simply / Quiz prep work on: the current slide or the whole deck.
+const tryKind = () => (APP.scope === "deck" ? "deck" : "try");
+function scopeSwitch() {
+  const mk = (value, label) => h("button", { type: "button", role: "radio", "aria-checked": String(APP.scope === value),
+    class: APP.scope === value ? "on" : "", onclick: () => { APP.scope = value; store.set("scope", value); renderTutor(); } }, label);
+  return h("div", { class: "scope-switch", role: "radiogroup", "aria-label": "Work on" }, mk("slide", "This slide"), mk("deck", "Whole deck"));
 }
 
 function composeBox(placeholder, onSend) {
@@ -653,7 +671,9 @@ function composeBox(placeholder, onSend) {
   return form;
 }
 
-const MODE_LABEL = { explain: "Explain simply", example: "Worked example", deeper: "Go deeper" };
+const MODE_LABEL = { explain: "Explain simply", example: "Worked example", deeper: "Go deeper", quiz: "Quiz prep",
+  explain_deck: "Explain simply · whole deck", example_deck: "Worked example · whole deck", quiz_deck: "Quiz prep · whole deck" };
+const DECK_MODES = ["explain", "example", "quiz"];
 
 function drawThread() {
   const th = $("#thread");
@@ -688,9 +708,10 @@ function answerEl(m, isLast) {
   const wrap = h("div", { class: "ans" }, body,
     h("button", { class: "copy-one", type: "button", title: "Copy this answer", onclick: (e) => copyText(m.text, e.currentTarget) }, "Copy"));
   if (isLast) {
-    const next = m.mode === "example"
+    const deckWide = (m.mode || "").endsWith("_deck");
+    const next = (m.mode || "").startsWith("example")
       ? h("button", { class: "link", type: "button", onclick: () => startPracticeInPanel({ kind: "yourturn", example_md: m.text }) }, "Your turn: finish from here ›")
-      : h("button", { class: "link", type: "button", onclick: () => startPracticeInPanel({ kind: "try" }) }, "Try one on this ›");
+      : h("button", { class: "link", type: "button", onclick: () => startPracticeInPanel({ kind: deckWide ? "deck" : "try" }) }, deckWide ? "Try one on this deck ›" : "Try one on this ›");
     wrap.append(h("div", { class: "msg-foot" }, next,
       m.mode !== "deeper" ? h("button", { class: "link quiet", type: "button", onclick: () => tutorAsk("deeper") }, "Go deeper") : null));
   }
@@ -782,13 +803,14 @@ function metaText(m) {
 }
 
 async function tutorAsk(mode, question = "") {
+  if (APP.scope === "deck" && DECK_MODES.includes(mode)) mode += "_deck";
   if (APP.tutor !== "open") { APP.tutor = "open"; renderTutor(); }
   const th = $("#thread");
   const d = APP.deck;
   const n = Math.min(APP.n, d.slides);
   $(".empty", th)?.remove();
-  th.append(h("p", { class: "msg-q" }, mode === "ask" ? question : mode === "brush" ? `Brush up: ${question}` : MODE_LABEL[mode], h("span", { class: "where" }, ` · s${n}`)));
-  const wait = h("p", { class: "waiting" }, mode === "example" ? "Writing a worked example…" : "Thinking…");
+  th.append(h("p", { class: "msg-q" }, mode === "ask" ? question : mode === "brush" ? `Brush up: ${question}` : MODE_LABEL[mode], h("span", { class: "where" }, mode.endsWith("_deck") ? ` · ${d.tag}` : ` · s${n}`)));
+  const wait = h("p", { class: "waiting" }, mode.startsWith("example") ? "Writing a worked example…" : mode.endsWith("_deck") ? "Reading the whole deck…" : "Thinking…");
   th.append(wait);
   th.scrollTop = th.scrollHeight;
   $$("#thread .msg-foot").forEach((f) => f.remove());

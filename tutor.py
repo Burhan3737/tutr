@@ -133,7 +133,52 @@ answer in bold. At most about 200 words.""",
 example if it helps. Up to about 250 words; if more is needed, stop and offer to continue.""",
     "brush": """The student wants to brush up on a prerequisite: {question}. Teach just that, briefly: the rule(s),
 one tiny example each, and how it shows up on slide {where}. About 150 words.""",
+    "quiz": """Quiz prep for slide {where}, for this course's assessments ({style}). If it's a title or admin slide,
+use the slides around it. About 150 words, this shape:
+
+**Could be asked:** <2–3 likely question types on this slide, each with the method in one line>
+
+**Memorise:** <the key fact, definition or formula, in KaTeX, with its slide>
+
+**Trap:** <the one mistake that costs marks here>""",
+    "explain_deck": """Explain the whole deck {deck} simply, in the order its slides teach it. Skip title, outline and
+admin slides. Group it into at most 6 main ideas (merge small ones). For each idea:
+
+**<idea name>** [{tag} sA–sB]
+<2–3 plain-English sentences: what it is and why it works>
+*Use it when:* <one line: the clue in a problem>
+
+End with **How it fits together:** <2 sentences linking the ideas>. About 50 words per idea; HARD LIMIT 400 words
+in total — the student is overwhelmed by long text, and can ask "Go deeper" for more.""",
+    "example_deck": """Show ONE worked example that uses the central method of the whole deck {deck} from start to finish (the
+kind of problem the deck builds up to). The problem in one or two lines, then numbered steps, each naming
+the rule or reason and citing the slide it comes from, then the answer in bold. At most about 250 words.""",
+    "quiz_deck": """Make a quiz-prep sheet for the whole deck {deck}, shaped by this course's assessments ({style}; see
+CLAUDE.md for the format and aids). Cite slides. HARD LIMIT 400 words — terse bullets, no filler. This shape:
+
+#### Must know
+<at most 8 bullets: the definitions, formulas (KaTeX) and facts a question could hinge on>
+
+#### Likely questions
+<3–4 question types, each: the type in bold, then the method in one line>
+
+#### Traps
+<3 one-line traps that cost marks>
+
+#### Check yourself
+<3 short questions of the likely types, as a numbered list; end each item with its answer hidden in double
+bars on the same line, e.g. "1. What is …? ||Answer: … (one or two sentences)||">""",
 }
+
+DECK_MODES = {"explain_deck", "example_deck", "quiz_deck"}
+MODE_LABELS = {"explain": "Explain simply", "example": "Worked example", "deeper": "Go deeper", "quiz": "Quiz prep",
+               "explain_deck": "Explain simply · whole deck", "example_deck": "Worked example · whole deck",
+               "quiz_deck": "Quiz prep · whole deck"}
+
+
+def deck_where(cdir, tag):
+    d = L.deck(cdir, tag)
+    return f"[{tag}] \"{d['title']}\" (slides 1–{d['slides']})" if d else f"[{tag}]"
 
 
 def chat_turn(cdir, tag, n, mode, question, model, web, emit=None):
@@ -142,14 +187,15 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None):
         raise TutorError("Unknown request.", 400)
     chat_id = S.chat_for(cdir, tag)
     chat = load_chat(chat_id) if chat_id else None
-    label = {"explain": "Explain simply", "example": "Worked example", "deeper": "Go deeper",
-             "brush": f"Brush up: {question.strip()}"}.get(mode, question.strip())
+    label = MODE_LABELS.get(mode) or (f"Brush up: {question.strip()}" if mode == "brush" else question.strip())
     now = time.strftime("%Y-%m-%d %H:%M")
     new = chat is None
     if new:     # saved only once Claude has answered
         chat = {"id": uuid.uuid4().hex[:12], "course": cdir.name, "code": L.course_meta(cdir)[0], "deck": tag,
-                "title": f"{label[:70]} · s{n}", "created": now, "messages": []}
-    prompt = CHAT_PROMPTS[mode].format(where=where(cdir, tag, n), question=question.strip())
+                "title": f"{label[:70]} · " + (tag if mode in DECK_MODES else f"s{n}"), "created": now, "messages": []}
+    prompt = CHAT_PROMPTS[mode].format(where=where(cdir, tag, n), question=question.strip(), tag=tag,
+                                       deck=deck_where(cdir, tag),
+                                       style=STYLE.get(L.course_meta(cdir)[0], "this course's quizzes and exams"))
     r = run_claude(cdir, system_prompt(cdir, tag, web), prompt, model=model, chat_key=(cdir.name, tag, chat["id"]),
                    session=chat.get("session"), web=web, label=f"chat:{mode}", emit=emit)
     if new:
