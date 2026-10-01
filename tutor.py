@@ -69,6 +69,19 @@ Style:
   don't narrate which files you opened.
 - In algebra or derivations, show every step and name the rule, e.g. "(solving a linear equation: same step on both sides)".
 - Markdown. Math in KaTeX: $...$ inline, $$...$$ display. No headings bigger than ####.
+- Drawings: draw whenever a picture genuinely helps understanding, and whenever the student asks for a
+  visual — then use as many as the explanation needs (e.g. one per step of a process). Never draw for
+  decoration. Keep each drawing focused on one idea. The hub renders three fenced blocks:
+  ```mermaid — flowcharts, trees (e.g. a hierarchy's shape), sequence or state diagrams. Short labels,
+    no styling or colours; aim for about 15 nodes or fewer per diagram.
+  ```svg — a custom drawing (a labelled diagram, a step-by-step process, a labelled tree, a two-way
+    split): one complete <svg xmlns="http://www.w3.org/2000/svg" viewBox="…">, aiming for about 60 lines, dark
+    strokes on a white background, text 12–14px, no scripts, no external images or fonts.
+  ```plot — exact function plots; the hub computes the curves, so never invent data points. Lines:
+    f: 100 - 2*x, 3*x      (up to 6, comma-separated; n or x; + - * / ^; log2 ln log10 sqrt exp fact)
+    x: 1..64
+    y: log                      (optional: log scale, or a range such as 0..5000)
+    title: Demand and supply
 - If the student says a question is from a live graded quiz or exam, add one short line noting the course's
   rule on AI use during assessments (CLAUDE.md), then help fully.
 

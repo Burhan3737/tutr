@@ -276,6 +276,20 @@ h1.page-title { font-size: 28px; line-height: 34px; font-weight: 600; margin: 0 
 .scope-switch button { flex: 1; border: 0; background: none; border-radius: 8px; min-height: 32px; font-size: 13px; font-weight: 600;
   color: var(--text-2); cursor: pointer; }
 .scope-switch button.on { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgba(20,18,26,.12); }
+/* Drawings in answers (visuals.js) */
+.diagram { margin: 10px 0 14px; padding: 12px; background: #fff; border: 1px solid var(--line); border-radius: var(--r);
+  overflow-x: auto; text-align: center; color: #1f1d24; }
+.diagram svg, .diagram img { max-width: 100%; height: auto; }
+.mermaid-box { font-size: 13px; color: var(--text-2); min-height: 40px; }
+.mermaid-box svg { color: initial; }
+.plot { width: 100%; max-width: 560px; font-family: var(--font); }
+.plot-grid { stroke: #ecebe7; stroke-width: 1; }
+.plot-axis { stroke: #8d8a94; stroke-width: 1; }
+.plot-tick { font-size: 11px; fill: #5e5a66; }
+.plot-title { font-size: 14px; font-weight: 600; fill: #1f1d24; }
+.plot-legend { font-size: 12px; fill: #1f1d24; }
+.vis-note { font-size: 12px; color: var(--text-2); margin: 6px 0 2px; }
+@media print { .diagram { break-inside: avoid; border-color: #ccc; } }
 .spoiler { border-radius: 4px; padding: 0 3px; background: var(--sunken); transition: filter .15s; }
 .spoiler:not(.shown) { filter: blur(5px); cursor: pointer; user-select: none; }
 .spoiler:not(.shown):hover { filter: blur(3px); }

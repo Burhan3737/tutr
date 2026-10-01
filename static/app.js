@@ -99,6 +99,7 @@ function renderMd(md, courseId) {
     const [tex, display] = math[+i];
     try { return katex.renderToString(tex, { displayMode: display, throwOnError: false }); } catch { return esc(tex); }
   });
+  enhanceVisuals(box);       // ```mermaid / ```svg / ```plot become drawings (visuals.js)
   box.querySelectorAll("a[href]").forEach((a) => {
     if (/^https?:/.test(a.getAttribute("href"))) {
       a.target = "_blank"; a.rel = "noopener";
@@ -886,7 +887,8 @@ function printChat(chat, deck) {
   document.body.classList.add("printing");
   const done = () => { document.body.classList.remove("printing"); root.remove(); };
   window.addEventListener("afterprint", done, { once: true });
-  setTimeout(() => window.print(), 50);
+  // Diagrams are drawn asynchronously; wait for them so they appear in the PDF.
+  setTimeout(() => drawMermaid().finally(() => setTimeout(() => window.print(), 80)), 80);
 }
 
 function metaText(m) {
