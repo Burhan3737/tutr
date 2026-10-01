@@ -187,19 +187,97 @@ async function route() {
   renderSessionBar();
   const main = $("#main");
   try {
-    if (p.upload) return await showUpload(p.upload);
-    if (p.chat) return await showOldChat(p.chat, token);
-    if (p.review) return await showReview(p.review, token);
-    if (p.c && p.d) return await showViewer(p.c, p.d, +p.s || 0, token);
-    if (p.c && p.notes) return await showNotes(p.c, p.notes, token);
-    if (p.c) return await showCourse(p.c, token);
-    if (p.step === "note") return showNoteStep();
-    return await showHome(token);
+    if (p.upload) await showUpload(p.upload);
+    else if (p.chat) await showOldChat(p.chat, token);
+    else if (p.review) await showReview(p.review, token);
+    else if (p.c && p.d) await showViewer(p.c, p.d, +p.s || 0, token);
+    else if (p.c && p.notes) await showNotes(p.c, p.notes, token);
+    else if (p.c) await showCourse(p.c, token);
+    else if (p.step === "note") showNoteStep();
+    else await showHome(token);
   } catch (e) {
     if (token !== routeToken) return;
     main.replaceChildren(h("div", { class: "page" }, h("p", { class: "err" }, e.message)));
   }
+  if (token === routeToken) renderSidenav();
 }
+
+// ------------------------------------------------------------ topics sidebar
+// Course → topics → decks (with state dots); the open deck lists its slides. Toggle with ☰ or "[".
+
+APP.navOpen = store.get("navOpen", false) && !matchMedia("(max-width: 760px)").matches;
+
+function toggleNav(open = !APP.navOpen) {
+  APP.navOpen = open;
+  if (!isPhone()) store.set("navOpen", open);
+  renderSidenav();
+}
+
+function sidenavCourseIds() {
+  const p = params();
+  const cid = p.c || p.review || (APP.session && APP.session.course);
+  if (cid) return [cid];
+  return (APP.home ? APP.home.courses : Object.values(APP.courses)).map((c) => c.id);
+}
+
+async function renderSidenav() {
+  const nav = $("#sidenav");
+  $("#nav-btn").setAttribute("aria-expanded", String(APP.navOpen));
+  document.body.classList.toggle("nav-open", APP.navOpen);
+  $("#nav-scrim").hidden = !(APP.navOpen && isPhone());
+  nav.hidden = !APP.navOpen || !!params().upload;
+  if (nav.hidden) return;
+  const p = params();
+  const ids = sidenavCourseIds();
+  let courses;
+  try { courses = await Promise.all(ids.map((id) => loadCourse(id))); } catch { return; }
+  const here = APP.deck && p.c === APP.deck.course && p.d === APP.deck.tag ? APP.deck : null;
+  const parts = [];
+  for (const c of courses) {
+    parts.push(h("a", { class: "sn-course" + (p.c === c.id && !p.d ? " here" : ""), href: `#c=${encodeURIComponent(c.id)}` },
+      h("b", {}, c.code), h("span", {}, c.title)));
+    for (const t of c.topics) {
+      const hasHere = here && t.decks.some((d) => d.tag === here.tag && c.id === here.course);
+      const solved = t.decks.filter((d) => d.state === "solved").length;
+      const box = h("details", { class: "sn-topic", open: hasHere || courses.length === 1 && !here ? true : hasHere },
+        h("summary", {}, h("span", {}, t.name), h("span", { class: "sn-count" }, `${solved}/${t.decks.length}`)));
+      for (const d of t.decks) {
+        const isHere = here && here.tag === d.tag && here.course === c.id;
+        box.append(h("a", { class: "sn-deck" + (isHere ? " here" : ""), href: `#c=${encodeURIComponent(c.id)}&d=${encodeURIComponent(d.tag)}&s=${d.last || 1}`,
+          title: `${d.title} · ${stateLabel(d.state)}` },
+          h("span", { class: `dot ${d.state}` }), h("span", { class: "sn-tag" }, d.tag), h("span", { class: "sn-title" }, d.title),
+          h("span", { class: "chip week" }, `W${d.week}`)));
+        if (isHere) {
+          const list = h("ol", { class: "sn-slides" });
+          for (const s of here.slides_text) {
+            list.append(h("li", {}, h("a", { class: "sn-slide" + (s.n === APP.n ? " here" : ""), "data-n": String(s.n),
+              href: `#c=${encodeURIComponent(c.id)}&d=${encodeURIComponent(d.tag)}&s=${s.n}`,
+              onclick: (e) => { if (APP.deck === here) { e.preventDefault(); APP.n = s.n; showSlide(); if (APP.tutor === "open") updateTutorWhere(); if (isPhone()) toggleNav(false); } } },
+              h("span", { class: "sn-n" }, String(s.n)), s.title || `Slide ${s.n}`)));
+          }
+          box.append(list);
+        }
+      }
+      parts.push(box);
+    }
+  }
+  nav.replaceChildren(...parts);
+  const cur = $(".sn-slide.here", nav) || $(".sn-deck.here", nav);
+  if (cur) cur.scrollIntoView({ block: "center" });
+}
+
+// Keep the highlighted slide in step with the viewer without rebuilding the sidebar.
+function markSidenavSlide(n) {
+  const nav = $("#sidenav");
+  if (!nav || nav.hidden) return;
+  let cur = null;
+  $$(".sn-slide", nav).forEach((a) => { const on = +a.dataset.n === n; a.classList.toggle("here", on); if (on) cur = a; });
+  if (cur) cur.scrollIntoView({ block: "nearest" });
+}
+
+$("#nav-btn").addEventListener("click", () => toggleNav());
+$("#nav-scrim").addEventListener("click", () => toggleNav(false));
+$("#sidenav").addEventListener("click", (e) => { if (isPhone() && e.target.closest("a")) toggleNav(false); });
 
 function setCrumbs(...parts) {
   const nav = $("#crumbs");
@@ -430,6 +508,7 @@ function showSlide() {
     img.src = slideUrl(n);
     if (n < d.slides) { const pre = new Image(); pre.src = slideUrl(n + 1); }
   }
+  markSidenavSlide(n);
   const label = end ? `${d.slides} / ${d.slides}` : `${n} / ${d.slides}`;
   $("#counter").textContent = label; $("#counter-m").textContent = label;
   $("#prev").disabled = n <= 1; $("#next").disabled = end;
@@ -1358,7 +1437,9 @@ document.addEventListener("keydown", (e) => {
     if (APP.zoom) return toggleZoom();
     if (APP.text) return toggleText(false);
     if (APP.tutor === "focus" && !typing) return closePractice();
+    if (APP.navOpen && isPhone()) return toggleNav(false);
   }
+  if (!typing && e.key === "[" && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); toggleNav(); return; }
   if (typing || !$(".viewer") || APP.tutor === "focus") return;
   if (e.key === "ArrowRight" || e.key === "PageDown") { e.preventDefault(); step(1); }
   else if (e.key === "ArrowLeft" || e.key === "PageUp") { e.preventDefault(); step(-1); }

@@ -12,6 +12,9 @@
 <body>
 <div class="session-bar" id="session-bar" hidden></div>
 <header class="top">
+  <button class="icon-btn nav-btn" id="nav-btn" type="button" aria-controls="sidenav" aria-expanded="false" title="Topics sidebar ( [ )" aria-label="Show or hide the topics sidebar">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+  </button>
   <a class="brand" href="#" aria-label="Study Hub home">Study Hub</a>
   <nav class="crumbs" id="crumbs" aria-label="Where you are"></nav>
   <button class="icon-btn" id="search-btn" type="button" aria-label="Search all slides (Ctrl K)" title="Search all slides (Ctrl K)">
@@ -20,7 +23,11 @@
   <button class="icon-btn" id="menu-btn" type="button" aria-label="More" aria-haspopup="menu" aria-expanded="false">⋯</button>
 </header>
 
-<main id="main" tabindex="-1"></main>
+<div class="body-row">
+  <aside class="sidenav" id="sidenav" aria-label="Topics" hidden></aside>
+  <main id="main" tabindex="-1"></main>
+</div>
+<div class="nav-scrim" id="nav-scrim" hidden></div>
 
 <div class="menu" id="menu" role="menu" hidden>
   <button role="menuitem" type="button" data-act="history">History</button>
