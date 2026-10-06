@@ -732,6 +732,7 @@ function renderTutor() {
       scopeSwitch(),
       h("button", { class: "btn block", type: "button", onclick: () => startPracticeInPanel({ kind: tryKind() }) }, "Try one"),
       h("div", { class: "links" },
+        h("button", { class: "link", type: "button", title: "Every concept in this deck at a glance (always the whole deck)", onclick: () => tutorAsk("map_deck") }, "Big picture"),
         h("button", { class: "link", type: "button", onclick: () => tutorAsk("example") }, "Worked example"),
         h("button", { class: "link", type: "button", onclick: () => tutorAsk("explain") }, "Explain simply"),
         h("button", { class: "link", type: "button", onclick: () => tutorAsk("quiz") }, "Quiz prep"))),
@@ -747,6 +748,7 @@ function updateTutorWhere() {
 }
 
 // What Try one / Worked example / Explain simply / Quiz prep work on: the current slide or the whole deck.
+// (Big picture is always the whole deck.)
 const tryKind = () => (APP.scope === "deck" ? "deck" : "try");
 function scopeSwitch() {
   const mk = (value, label) => h("button", { type: "button", role: "radio", "aria-checked": String(APP.scope === value),
@@ -765,7 +767,8 @@ function composeBox(placeholder, onSend) {
 }
 
 const MODE_LABEL = { explain: "Explain simply", example: "Worked example", deeper: "Go deeper", quiz: "Quiz prep",
-  explain_deck: "Explain simply · whole deck", example_deck: "Worked example · whole deck", quiz_deck: "Quiz prep · whole deck" };
+  explain_deck: "Explain simply · whole deck", example_deck: "Worked example · whole deck", quiz_deck: "Quiz prep · whole deck",
+  map_deck: "Big picture · whole deck" };
 const DECK_MODES = ["explain", "example", "quiz"];
 
 function drawThread() {

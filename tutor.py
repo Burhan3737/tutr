@@ -5,7 +5,7 @@ deck, streaming, the course-folder check) lives in engine.py. This file holds th
 study logic.
 
 Modes
-- chat (explain / example / ask / deeper / brush): Markdown answers streamed into the deck's chat
+- chat (explain / example / quiz / map / ask / deeper / brush): Markdown answers streamed into the deck's chat
 - practice: a problem written and solved by Claude (structured output); the solution and hints stay
   on the server until the student has tried
 - check: marks the student's work (typed and/or photographed), method first
@@ -163,6 +163,23 @@ admin slides. Group it into at most 6 main ideas (merge small ones). For each id
 
 End with **How it fits together:** <2 sentences linking the ideas>. About 50 words per idea; HARD LIMIT 400 words
 in total — the student is overwhelmed by long text, and can ask "Go deeper" for more.""",
+    "map_deck": """Give the big picture of the whole deck {deck}: every concept it teaches, laid out at a glance, without
+explaining any of them. Skip title, outline and admin slides. The student wants the map, not the territory —
+no derivations, no examples, no "why". This shape:
+
+#### Concepts
+<one line per concept, in the order the slides teach it, at most 10 (merge small ones):
+"- **<name>** — <what it is, 12 words at most> [{tag} sA–sB]">
+
+#### How they connect
+<one ```mermaid flowchart (graph TD or LR), one node per concept above using the same short names, edges
+labelled with a word or two such as "solved by", "special case of", "used in"; nothing else in this section>
+
+#### You'll be asked to
+<2–3 bullets, each a verb phrase naming a task an assessment could set ({style}), e.g. "find an equilibrium
+price from two equations">
+
+HARD LIMIT 180 words outside the diagram. Bold names and tags only; no other prose.""",
     "example_deck": """Show ONE worked example that uses the central method of the whole deck {deck} from start to finish (the
 kind of problem the deck builds up to). The problem in one or two lines, then numbered steps, each naming
 the rule or reason and citing the slide it comes from, then the answer in bold. At most about 250 words.""",
@@ -183,8 +200,9 @@ CLAUDE.md for the format and aids). Cite slides. HARD LIMIT 400 words — terse 
 bars on the same line, e.g. "1. What is …? ||Answer: … (one or two sentences)||">""",
 }
 
-DECK_MODES = {"explain_deck", "example_deck", "quiz_deck"}
+DECK_MODES = {"explain_deck", "example_deck", "quiz_deck", "map_deck"}
 MODE_LABELS = {"explain": "Explain simply", "example": "Worked example", "deeper": "Go deeper", "quiz": "Quiz prep",
+               "map_deck": "Big picture · whole deck",
                "explain_deck": "Explain simply · whole deck", "example_deck": "Worked example · whole deck",
                "quiz_deck": "Quiz prep · whole deck"}
 
