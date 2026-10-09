@@ -125,7 +125,11 @@ def main():
         # content changed since the last run (by hash; file times change on copy/checkout and mean nothing).
         sha = hashlib.sha1(pdf.read_bytes()).hexdigest()
         old = next((x for x in prev.get("decks", []) if x.get("stem") == pdf.stem), {})
-        fresh = a.force or not tr.exists() or (old.get("sha1") not in (None, sha))
+        # A deck whose tag changed (e.g. a row was just added to CLAUDE.md) is rebuilt too, but only while no
+        # page of it has been transcribed yet — so adding a row never needs --force, which hits every deck.
+        untouched = tr.exists() and tr.read_text(encoding="utf-8").count("VISUAL-PENDING") >= len(visual)
+        fresh = (a.force or not tr.exists() or (old.get("sha1") not in (None, sha))
+                 or (untouched and old.get("tag") not in (None, tag)))
         if fresh:
             tr.write_text(f"# Transcript: {pdf.stem} ({tag})\n\nSource: `{pdf.relative_to(course).as_posix()}` · {doc.page_count} pages\n\n"
                           + "\n".join(sections), encoding="utf-8")
@@ -152,7 +156,8 @@ def main():
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     if manifest["missing_tags"]:
         print("\nNo deck tag in CLAUDE.md for: " + ", ".join(manifest["missing_tags"])
-              + "\nAdd rows to the course CLAUDE.md deck table (Week | Deck | Tag | Topic), then re-run with --force.")
+              + "\nAdd rows to the course CLAUDE.md deck table (Week | Deck | Tag | Topic), then re-run (without --force:\n"
+              "it would overwrite every finished transcript in this week).")
 
 
 if __name__ == "__main__":

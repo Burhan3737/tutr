@@ -26,7 +26,9 @@ writes files with the Write/Edit tools, never shell heredocs (they mangle `\\` i
 
 1. **Extract.** `python S/scripts/extract.py <course> N`. It lists decks with no row in the course CLAUDE.md
    deck table: add them now, in lecture order, with a tag (short, e.g. `S&D-5`, `Ch3`, `U3-2`) and leave
-   Topic for step 4. Re-run with `--force` if you added rows. Existing transcripts are kept unless the PDF changed.
+   Topic for step 4. Re-run (no `--force`) if you added rows: untranscribed decks pick up the new tag; existing
+   transcripts are kept unless the PDF changed. `--force` rewrites every deck in the week — never use it
+   to apply a tag.
 2. **Transcribe** every VISUAL-PENDING page from its PNG (prompt 1 in `reference/agent-prompts.md`;
    ≤ 45 pages per agent, in parallel). Text layers lose superscripts, equations, diagrams and handwriting —
    never judge a page "clean enough" to skip. `python S/scripts/check.py <course> N transcripts` → OK.
