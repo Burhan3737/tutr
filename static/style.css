@@ -296,6 +296,14 @@ h1.page-title { font-size: 28px; line-height: 34px; font-weight: 600; margin: 0 
 @media print { .spoiler { filter: none !important; background: none; } }
 .msg-a details { margin: 4px 0 10px; }
 .msg-a summary { cursor: pointer; color: var(--accent); font-weight: 600; font-size: 14px; }
+/* "Need to know" sections: a quiet row when closed, a small card when open. */
+.msg-a details.ntk { margin: 6px 0; padding: 6px 10px; border-radius: 8px; background: var(--sunken); }
+.msg-a details.ntk > summary { font-size: 13px; line-height: 1.4; }
+.msg-a details.ntk[open] { padding-bottom: 8px; }
+.msg-a details.ntk > :not(summary) { font-size: 14px; }
+.msg-a details.ntk p { margin: 6px 0; }
+.ntk-more { font-size: 13px; }
+@media print { .ntk-more { display: none; } }
 .chat-bar { position: sticky; top: -8px; z-index: 1; display: flex; align-items: center; gap: 4px; margin: 0 -20px; padding: 6px 12px;
   background: var(--surface); border-bottom: 1px solid var(--line); }
 .star { border: 0; background: none; cursor: pointer; font-size: 18px; line-height: 1; width: 32px; height: 32px; border-radius: 6px;
@@ -367,7 +375,6 @@ h1.page-title { font-size: 28px; line-height: 34px; font-weight: 600; margin: 0 
 .msg-a td, .msg-a th { border: 1px solid var(--line); padding: 4px 8px; }
 .msg-foot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 2px; }
 .msg-foot .meta { font-size: 12px; color: var(--text-2); margin-left: auto; }
-.needs { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 4px 0 8px; font-size: 13px; color: var(--text-2); }
 .waiting { color: var(--text-2); font-size: 15px; padding: 12px 0; display: flex; align-items: center; gap: 10px; }
 .waiting::before { content: ""; width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line-strong);
   border-top-color: var(--accent); animation: spin .9s linear infinite; }

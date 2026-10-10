@@ -736,7 +736,9 @@ function renderTutor() {
         h("button", { class: "link", type: "button", title: "Every concept in this deck at a glance (always the whole deck)", onclick: () => tutorAsk("map_deck") }, "Big picture"),
         h("button", { class: "link", type: "button", onclick: () => tutorAsk("example") }, "Worked example"),
         h("button", { class: "link", type: "button", onclick: () => tutorAsk("explain") }, "Explain simply"),
-        h("button", { class: "link", type: "button", onclick: () => tutorAsk("quiz") }, "Quiz prep"))),
+        h("button", { class: "link", type: "button", onclick: () => tutorAsk("quiz") }, "Quiz prep"),
+        h("button", { class: "link", type: "button", title: "What to know first: prerequisites, rules and symbols", onclick: () => tutorAsk("before") }, "Before you start"),
+        h("button", { class: "link", type: "button", title: "Methods, formulas and shortcuts to copy onto your sheet (always the whole deck)", onclick: () => tutorAsk("cheatsheet_deck") }, "Cheat sheet"))),
     thread,
     composeBox("Ask anything about this slide", (q) => tutorAsk("ask", q))));
   updateTutorWhere();
@@ -748,8 +750,8 @@ function updateTutorWhere() {
   if (w && APP.deck) w.textContent = APP.scope === "deck" || APP.n > APP.deck.slides ? `${APP.deck.tag} · whole deck` : `${APP.deck.tag} s${APP.n}`;
 }
 
-// What Try one / Worked example / Explain simply / Quiz prep work on: the current slide or the whole deck.
-// (Big picture is always the whole deck.)
+// What Try one / Worked example / Explain simply / Quiz prep / Before you start work on: the current slide or
+// the whole deck. (Big picture and Cheat sheet are always the whole deck.)
 const tryKind = () => (APP.scope === "deck" ? "deck" : "try");
 function scopeSwitch() {
   const mk = (value, label) => h("button", { type: "button", role: "radio", "aria-checked": String(APP.scope === value),
@@ -769,8 +771,9 @@ function composeBox(placeholder, onSend) {
 
 const MODE_LABEL = { explain: "Explain simply", example: "Worked example", deeper: "Go deeper", quiz: "Quiz prep",
   explain_deck: "Explain simply · whole deck", example_deck: "Worked example · whole deck", quiz_deck: "Quiz prep · whole deck",
-  map_deck: "Big picture · whole deck" };
-const DECK_MODES = ["explain", "example", "quiz"];
+  map_deck: "Big picture · whole deck", before: "Before you start", before_deck: "Before you start · whole deck",
+  cheatsheet_deck: "Cheat sheet · whole deck" };
+const DECK_MODES = ["explain", "example", "quiz", "before"];
 
 function drawThread() {
   const th = $("#thread");
@@ -794,14 +797,12 @@ function drawThread() {
 function answerEl(m, isLast) {
   const body = renderMdCached(m.text, APP.deck.course);
   body.className = "msg-a";
-  // "**Needs:** percentage change, slope of a line" becomes tappable brush-up chips.
-  const raw = (m.text.match(/^\s*\**Needs:\**\s*(.+)$/im) || [])[1];
-  const needsP = $$("p", body).find((p) => /^Needs:/i.test(p.textContent.trim()));
-  if (raw && needsP) {
-    const items = splitOutsideMath(raw).map((x) => x.replace(/\.$/, "").trim()).filter(Boolean);
-    needsP.replaceWith(h("div", { class: "needs" }, "Needs:",
-      ...items.map((it) => h("button", { class: "chip wrap", type: "button", title: "Brush up on this", onclick: () => tutorAsk("brush", it) }, plain(it)))));
-  }
+  // Each "Need to know" section ends with "Explain more ›", which asks for a fuller explanation in the chat.
+  $$("details.ntk", body).forEach((det) => {
+    const sum = det.querySelector("summary");
+    const name = sum ? sum.textContent.replace(/^\s*Need to know:\s*/i, "").split(/\s+[—–-]\s+|\s*\[/)[0].trim() : "";
+    if (name) det.append(h("button", { class: "link ntk-more", type: "button", onclick: () => tutorAsk("brush", name) }, "Explain more ›"));
+  });
   const wrap = h("div", { class: "ans" }, body,
     h("button", { class: "copy-one", type: "button", title: "Copy this answer", onclick: (e) => copyText(m.text, e.currentTarget) }, "Copy"));
   if (isLast) {
@@ -815,19 +816,6 @@ function answerEl(m, isLast) {
   return wrap;
 }
 
-// Split "a, b ($x, y$), c" on commas/semicolons that aren't inside $...$ or brackets.
-function splitOutsideMath(t) {
-  const out = [];
-  let cur = "", math = false, depth = 0;
-  for (const ch of t) {
-    if (ch === "$") math = !math;
-    if (!math && "([".includes(ch)) depth++;
-    if (!math && ")]".includes(ch)) depth = Math.max(0, depth - 1);
-    if (!math && !depth && (ch === "," || ch === ";")) { out.push(cur); cur = ""; } else cur += ch;
-  }
-  out.push(cur);
-  return out;
-}
 
 function inlineMd(t, courseId) {
   const box = renderMd(t, courseId);
@@ -884,7 +872,7 @@ function printChat(chat, deck) {
     h("h1", {}, chat.title || "Tutor chat"), h("p", { class: "print-meta" }, chatMeta(chat, deck)));
   for (const m of chat.messages) {
     if (m.role === "q") root.append(h("p", { class: "print-q" }, h("b", {}, "You"), m.slide ? ` (slide ${m.slide})` : "", ": ", m.text));
-    else { const b = renderMd(m.text, courseId); b.className = "print-a"; root.append(b); }
+    else { const b = renderMd(m.text, courseId); b.className = "print-a"; $$("details", b).forEach((x) => { x.open = true; }); root.append(b); }
   }
   $("#print-root")?.remove();
   document.body.append(root);
@@ -907,7 +895,7 @@ async function tutorAsk(mode, question = "") {
   const d = APP.deck;
   const n = Math.min(APP.n, d.slides);
   $(".empty", th)?.remove();
-  th.append(h("p", { class: "msg-q" }, mode === "ask" ? question : mode === "brush" ? `Brush up: ${question}` : MODE_LABEL[mode], h("span", { class: "where" }, mode.endsWith("_deck") ? ` · ${d.tag}` : ` · s${n}`)));
+  th.append(h("p", { class: "msg-q" }, mode === "ask" ? question : mode === "brush" ? `Explain more: ${question}` : MODE_LABEL[mode], h("span", { class: "where" }, mode.endsWith("_deck") ? ` · ${d.tag}` : ` · s${n}`)));
   const wait = h("p", { class: "waiting" }, mode.startsWith("example") ? "Writing a worked example…" : mode.endsWith("_deck") ? "Reading the whole deck…" : "Thinking…");
   th.append(wait);
   th.scrollTop = th.scrollHeight;
@@ -918,11 +906,12 @@ async function tutorAsk(mode, question = "") {
   let acc = "", done = 0, queued = false, cost = 0, follow = true;
   const onScroll = () => { follow = th.scrollHeight - th.scrollTop - th.clientHeight < 80; };
   th.addEventListener("scroll", onScroll, { passive: true });
-  // Everything before the last blank line that isn't inside $$…$$ or a ``` block is finished text.
+  // Everything before the last blank line that isn't inside $$…$$, a ``` block or a <details> section is finished text.
   const cutPoint = (text) => {
     for (let i = text.lastIndexOf("\n\n"); i > done; i = text.lastIndexOf("\n\n", i - 1)) {
       const head = text.slice(0, i);
-      if ((head.split("$$").length - 1) % 2 === 0 && (head.split("```").length - 1) % 2 === 0) return i + 2;
+      if ((head.split("$$").length - 1) % 2 === 0 && (head.split("```").length - 1) % 2 === 0
+        && head.split("<details").length === head.split("</details>").length) return i + 2;
     }
     return done;
   };
@@ -945,7 +934,7 @@ async function tutorAsk(mode, question = "") {
       },
     });
     const chat = d.chat || { id: r.chat, title: mode === "ask" ? question : MODE_LABEL[mode] || question, updated: "", messages: [] };
-    chat.messages.push({ role: "q", mode, slide: n, text: mode === "ask" ? question : mode === "brush" ? `Brush up: ${question}` : MODE_LABEL[mode] }, r.message);
+    chat.messages.push({ role: "q", mode, slide: n, text: mode === "ask" ? question : mode === "brush" ? `Explain more: ${question}` : MODE_LABEL[mode] }, r.message);
     chat.updated = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
     d.chat = chat;
     if (!d.asked.includes(n)) d.asked.push(n);
