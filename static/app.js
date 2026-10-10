@@ -99,7 +99,8 @@ function renderMd(md, courseId) {
     const [tex, display] = math[+i];
     try { return katex.renderToString(tex, { displayMode: display, throwOnError: false }); } catch { return esc(tex); }
   });
-  enhanceVisuals(box);       // ```mermaid / ```svg / ```plot become drawings (visuals.js)
+  const openFence = (String(md || "").match(/^ {0,3}```/gm) || []).length % 2 === 1;   // still streaming in
+  enhanceVisuals(box, openFence);   // ```mermaid / ```svg / ```plot become drawings (visuals.js)
   box.querySelectorAll("a[href]").forEach((a) => {
     if (/^https?:/.test(a.getAttribute("href"))) {
       a.target = "_blank"; a.rel = "noopener";

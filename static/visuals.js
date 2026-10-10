@@ -7,8 +7,12 @@
 
 const VIS_COLORS = ["#2f5bb7", "#1f6f4a", "#b7791f", "#2b6cb0", "#8a3ffc", "#0f766e"];
 
-function enhanceVisuals(root) {
-  root.querySelectorAll("pre > code").forEach((code) => {
+// openFence: the text ends inside a ``` block that is still streaming in. That last block stays as
+// plain source until it is closed; drawing half a diagram only produces an error.
+function enhanceVisuals(root, openFence = false) {
+  const blocks = [...root.querySelectorAll("pre > code")];
+  if (openFence) blocks.pop();
+  blocks.forEach((code) => {
     const lang = (code.className.match(/language-(\w+)/) || [])[1];
     const pre = code.parentElement;
     const src = code.textContent;
@@ -26,8 +30,16 @@ function enhanceVisuals(root) {
       }
     } catch (e) {
       pre.before(visNote(`Couldn't draw this (${e.message}); here is its source.`));
+      clientLog("visual", { lang, error: e.message, src });
     }
   });
+}
+
+// Drawing failures go to .cache/hub.log on the server (and the console), so they can be debugged later.
+function clientLog(kind, detail) {
+  console.warn(`[study-hub] ${kind}`, detail);
+  fetch("/api/client-log", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind, where: location.hash, ...detail }) }).catch(() => {});
 }
 
 function visNote(text) {
@@ -48,7 +60,10 @@ function svgImage(src) {
   const img = document.createElement("img");
   img.alt = (s.match(/<title>([^<]*)<\/title>/i) || [])[1] || "Drawing";
   img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(s);
-  img.onerror = () => fig.replaceWith(visNote("This drawing couldn't be shown."));
+  img.onerror = () => {
+    fig.replaceWith(visNote("This drawing couldn't be shown."));
+    clientLog("svg", { error: "the browser couldn't load the SVG", src });
+  };
   fig.append(img);
   return fig;
 }
@@ -83,10 +98,16 @@ async function drawMermaid() {
   let m;
   try { m = await loadMermaid(); } catch (e) { boxes.forEach((b) => b.replaceWith(visNote(e.message))); return; }
   for (const b of boxes) {
+    const id = `mmd-${++mermaidSeq}`;
     try {
-      const { svg } = await m.render(`mmd-${++mermaidSeq}`, b.dataset.src);
+      await m.parse(b.dataset.src);       // syntax check first: it touches no page content
+      const { svg } = await m.render(id, b.dataset.src);
       b.innerHTML = svg;
-    } catch {
+    } catch (e) {
+      // Mermaid 10 leaves its "Syntax error in text" picture in <body> when render() fails.
+      document.getElementById(`d${id}`)?.remove();
+      document.getElementById(id)?.remove();
+      clientLog("mermaid", { error: String(e?.message || e), src: b.dataset.src });
       const pre = document.createElement("pre");
       pre.textContent = b.dataset.src;
       b.replaceChildren(visNote("Couldn't draw this diagram; here is its source."), pre);

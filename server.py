@@ -245,6 +245,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self._json({"error": "That chat can't be continued."}, 404)
             S.set_chat(c, ch["deck"], ch["id"])
             return self._json({"course": ch["course"], "deck": ch["deck"]})
+        if path == "/api/client-log":        # a drawing that failed in the browser (visuals.js)
+            clip = lambda k, n: json.dumps(str(req.get(k) or "")[:n], ensure_ascii=False)
+            kind = "".join(ch for ch in str(req.get("kind") or "") if ch.isalnum())[:20] or "?"
+            T.log(f"client:{kind} where={clip('where', 200)} "
+                  f"error={clip('error', 500)} src={clip('src', 4000)}")
+            return self._json({"ok": True})
         if path == "/api/practice/hint":
             return self._json(T.hint(str(req.get("id", ""))))
         if path == "/api/practice/photo":
