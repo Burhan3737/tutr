@@ -243,7 +243,8 @@ def class_notes(cdir):
 
 
 def other_docs(cdir):
-    """Mocks and cheat sheets (study/exams/<assessment>/) and lab/assignment guides (labs/, assignments/)."""
+    """Mocks and cheat sheets (study/exams/<assessment>/), lab/assignment guides (labs/, assignments/), and the
+    voice tutor's notes on the student (study/tutor-memory.md)."""
     groups = []
     for kind, base in (("exams", cdir / "study" / "exams"), ("labs", cdir / "labs"), ("assignments", cdir / "assignments")):
         if base.is_dir():
@@ -252,6 +253,10 @@ def other_docs(cdir):
                 if files:
                     groups.append({"kind": kind, "name": d.name,
                                    "files": [{"name": f.stem, "path": f.relative_to(cdir).as_posix()} for f in files]})
+    memory = cdir / "study" / "tutor-memory.md"      # the voice tutor's notes on the student (tutor.py)
+    if memory.is_file():
+        groups.append({"kind": "tutor", "name": "", "files": [{"name": "What your tutor remembers",
+                                                               "path": memory.relative_to(cdir).as_posix()}]})
     return groups
 
 

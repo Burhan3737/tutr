@@ -4,12 +4,17 @@ login — no API key.
 - Chats (Explain / Worked example / Ask / Go deeper) keep one ClaudeSDKClient open per deck. The
   first question starts it (about 1 s); follow-ups reuse it, so there is no start-up and the topic's
   slides stay in the prompt cache. Clients idle for IDLE_SECONDS are closed (each holds ~200 MB); the
-  next question reopens the same conversation with `resume`.
+  next question reopens the same conversation with `resume`. `open_chat` starts a deck's client ahead of the
+  first question (the Talk tab, while the student is still speaking).
 - Side questions fork the deck's chat (`fork_session`): they start from a copy of its conversation, so
   they know what was said, and nothing they say is added to the chat itself.
 - Practice problems and marking are one-off queries, each with its own JSON schema (output_format).
 - Answers stream: text arrives as it's written, and every file or web lookup becomes a status line
-  ("Reading the S&D-2 slides…"), via the `emit(kind, data)` callback.
+  ("Reading the S&D-2 slides…"), via the `emit(kind, data)` callback; so do opening a conversation and
+  thinking before the first word.
+- Where the wait goes (measured, Haiku 4.5, ~35k-token cached prompt): connecting a client ~1 s; thinking
+  before the first text 1–9 s (400–1000 thinking tokens); then output speed, so a turn with a drawing
+  (~2,000 tokens) takes 10–20 s in all. The log records first= (ms to the first text) next to ms= (total).
 - Confinement is enforced twice: a PreToolUse hook refuses any Read/Grep/Glob whose path or pattern
   leaves the course folder, and the CLI's default permissions refuse reads outside its working
   directory anyway. Only WebSearch/WebFetch are pre-approved (they can't read local files).
@@ -163,12 +168,18 @@ def describe(name, args, cdir):
     return name
 
 
-async def _consume(stream, emit, cdir, text_out=True):
-    result = None
+async def _consume(stream, emit, cdir, text_out=True, stats=None):
+    result, thinking = None, False
+    stats = stats if stats is not None else {}
     async for msg in stream:
         if isinstance(msg, StreamEvent):
             ev = msg.event or {}
+            if ev.get("type") == "content_block_start" and (ev.get("content_block") or {}).get("type") == "thinking":
+                if not thinking and "first" not in stats:
+                    emit("status", "Thinking it through")
+                thinking = True
             if text_out and ev.get("type") == "content_block_delta" and (ev.get("delta") or {}).get("type") == "text_delta":
+                stats.setdefault("first", time.time())
                 emit("text", ev["delta"]["text"])
         elif isinstance(msg, AssistantMessage):
             for b in msg.content:
@@ -192,6 +203,25 @@ class _Chat:
 
 
 _CHATS = {}
+_OPENING = {}       # key -> asyncio.Lock: two turns (or a warm-up and a turn) on one chat share one client
+
+
+async def _open(key, cdir, system, model, web, session, fork=False, emit=None):
+    """The chat's open client, started (or restarted, if its prompt, model or web setting changed) if needed."""
+    sig = (hashlib.sha1(system.encode("utf-8")).hexdigest(), model, web)
+    async with _OPENING.setdefault(key, asyncio.Lock()):
+        c = _CHATS.get(key)
+        if c and c.sig != sig:      # the slides, model or web setting changed: reopen the same conversation
+            await _close(key)
+            c = None
+        if c is None:
+            if emit:
+                emit("status", "Opening the deck's conversation")
+            client = ClaudeSDKClient(_options(cdir, system, model, web, resume=session, fork=fork))
+            await client.connect()
+            c = _CHATS[key] = _Chat(client, sig)
+        c.last = time.time()
+        return c
 
 
 async def _close(key):
@@ -209,23 +239,18 @@ async def _reaper():
         for key, c in list(_CHATS.items()):
             if time.time() - c.last > IDLE_SECONDS and not c.lock.locked():
                 await _close(key)
+        for key, lock in list(_OPENING.items()):
+            if key not in _CHATS and not lock.locked():
+                _OPENING.pop(key, None)
 
 
-async def _chat(key, cdir, system, prompt, model, web, session, emit, fork=False):
-    sig = (hashlib.sha1(system.encode("utf-8")).hexdigest(), model, web)
-    c = _CHATS.get(key)
-    if c and c.sig != sig:          # the slides, model or web setting changed: reopen the same conversation
-        await _close(key)
-        c = None
+async def _chat(key, cdir, system, prompt, model, web, session, emit, fork=False, stats=None):
     for attempt in (1, 2):
-        if c is None:
-            client = ClaudeSDKClient(_options(cdir, system, model, web, resume=session, fork=fork))
-            await client.connect()
-            c = _CHATS[key] = _Chat(client, sig)
+        c = await _open(key, cdir, system, model, web, session, fork, emit)
         try:
             async with c.lock:
                 await c.client.query(prompt)
-                res = await _consume(c.client.receive_response(), emit, cdir)
+                res = await _consume(c.client.receive_response(), emit, cdir, stats=stats)
             c.last = time.time()
             total = res.total_cost_usd or 0.0
             cost, c.seen_cost = max(0.0, total - c.seen_cost), total      # the client reports a running total
@@ -235,14 +260,13 @@ async def _chat(key, cdir, system, prompt, model, web, session, emit, fork=False
             raise
         except Exception:
             await _close(key)       # the CLI process died: start again from the saved conversation
-            c = None
             if attempt == 2:
                 raise
 
 
 async def _one_shot(cdir, system, prompt, model, web, schema, emit):
     res = await _consume(query(prompt=prompt, options=_options(cdir, system, model, web, schema=schema, partial=False)),
-                         emit, cdir, text_out=False)
+                         emit, cdir, text_out=False)       # (no partial messages: no thinking status either)
     return res, res.total_cost_usd or 0.0
 
 
@@ -258,7 +282,8 @@ def run(cdir, system, prompt, *, model, web=True, schema=None, chat_key=None, se
     if not SDK:
         return _run_cli(cdir, system, prompt, model=model, web=web, schema=schema, session=session, fork=fork, log=log,
                         label=label)
-    coro = (_chat(chat_key, cdir, system, prompt, model, web, session, emit, fork) if chat_key
+    stats = {}
+    coro = (_chat(chat_key, cdir, system, prompt, model, web, session, emit, fork, stats) if chat_key
             else _one_shot(cdir, system, prompt, model, web, schema, emit))
     fut = asyncio.run_coroutine_threadsafe(asyncio.wait_for(coro, TIMEOUT), _loop())
     try:
@@ -284,8 +309,9 @@ def run(cdir, system, prompt, *, model, web=True, schema=None, chat_key=None, se
     if schema and not isinstance(res.structured_output, dict):
         raise EngineError("Claude's answer came back in the wrong shape. Try again.")
     if log:
+        first = f" first={int((stats['first'] - t0) * 1000)}" if "first" in stats else ""
         log(f"{label} engine=sdk model={model} turns={res.num_turns} denied={len(res.permission_denials or [])} "
-            f"ms={ms} cost={cost:.4f}")
+            f"ms={ms}{first} cost={cost:.4f}")
     return {"text": res.result or "", "json": res.structured_output, "session": res.session_id, "ms": ms, "cost": cost}
 
 
@@ -299,6 +325,20 @@ def shutdown():
             asyncio.run_coroutine_threadsafe(_all(), _LOOP).result(10)
         except Exception:
             pass
+
+
+def open_chat(chat_key, cdir, system, *, model, web=True, session=None, log=None):
+    """Start a chat's client now, without sending anything (no turn, no cost), so the first question doesn't
+    wait for it. Returns at once; a failure only means the first question opens it as usual."""
+    if not SDK:
+        return
+    fut = asyncio.run_coroutine_threadsafe(_open(chat_key, cdir, system, model, web, session), _loop())
+
+    def done(f):
+        e = None if f.cancelled() else f.exception()
+        if e and log:
+            log(f"warm failed: {type(e).__name__}: {str(e)[:200]}")
+    fut.add_done_callback(done)
 
 
 def close_chat(chat_key):

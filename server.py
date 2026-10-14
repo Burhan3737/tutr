@@ -4,6 +4,7 @@ practice problems, marks your work and brings your mistakes back for review.
     python server.py            # http://127.0.0.1:8765, this machine only
     python server.py --open     # also opens the browser
     python server.py --lan      # also reachable from phones on the same network
+    python server.py --tunnel   # also reachable from anywhere, via a Cloudflare quick tunnel
 
 Nothing is configured here. Any top-level folder with a `study/` subfolder is a course; its decks,
 topics and exam dates come from its CLAUDE.md and study/progress.md (see library.py). New slides
@@ -12,17 +13,18 @@ Agent SDK on the Claude Code login (engine.py). Tutor, practice and marking requ
 "stream": true are answered as Server-Sent Events: "status" lines, "text" deltas, then "done" (or
 "error"). The log records timing and cost only, never question text.
 """
-import argparse, http.server, json, os, queue, socketserver, sys, threading, webbrowser
+import argparse, base64, binascii, http.server, json, os, queue, re, shutil, socketserver, subprocess, sys, threading, webbrowser
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 import library as L
 import state as S
 import tutor as T
+import voice as V
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
-PHONE_URL = None    # set in --lan mode: the address phones on the same network use
+PHONE_URL = None    # --lan: the address phones on the same network use; --tunnel: the public Cloudflare link
 
 
 # ---------------------------------------------------------------- views
@@ -76,6 +78,14 @@ def deck_view(cdir, tag):
 
 
 # ---------------------------------------------------------------- HTTP
+
+def _int(v, default=1):
+    """A slide number or similar from a request; garbage -> the default instead of an error."""
+    try:
+        return int(v or default)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
@@ -201,6 +211,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/chat":
             ch = T.load_chat(qs.get("id"))
             return self._json(T.public_chat(ch)) if ch else self._json({"error": "That chat no longer exists."}, 404)
+        if path == "/api/voice/status":
+            return self._json(V.status())
         return super().do_GET()
 
     def _body(self):
@@ -221,10 +233,50 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._post(path, req)
         except T.TutorError as e:
             return self._json({"error": str(e)}, e.status)
+        except V.VoiceError as e:       # 400: a bad recording or request; 503: the models aren't available
+            return self._json({"error": str(e)}, e.status)
+        except ConnectionError:         # the browser went away (e.g. stopped an answer's audio): nothing to answer
+            return
+        except Exception as e:          # answer rather than drop the connection
+            T.log(f"{path} failed: {type(e).__name__}: {str(e)[:300]}")
+            try:
+                return self._json({"error": "Something went wrong. Try again."}, 500)
+            except OSError:
+                pass
 
     def _post(self, path, req):
         model = req.get("model") if req.get("model") in T.MODELS else T.DEFAULT_MODEL
         web = not req.get("slides_only")
+        if path == "/api/voice/warm":        # the Talk tab opened: load the speech models now
+            V.warm()
+            c = self._course(req.get("course"))
+            if c and L.deck(c, str(req.get("tag") or "")):     # and open the deck's conversation, if it says which
+                T.warm_chat(c, str(req["tag"]), model, web)
+            return self._json(V.status())
+        if path == "/api/voice/speak":       # one sentence of an answer -> WAV
+            text = str(req.get("text") or "").strip()[:1200]
+            if not text:
+                return self._json({"error": "Nothing to say."}, 400)
+            data = V.speak(text, str(req.get("voice") or ""), req.get("speed"))
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if path == "/api/voice/transcribe":  # the recording, as 16 kHz mono WAV in base64 -> text
+            try:
+                audio = base64.b64decode(str(req.get("audio") or "").split(",")[-1], validate=True)
+            except (binascii.Error, ValueError):
+                return self._json({"error": "The recording didn't arrive. Try again."}, 400)
+            c = self._course(req.get("course"))
+            tag = str(req.get("tag", ""))
+            d = L.deck(c, tag) if c else None
+            hint = ""
+            if d:           # the deck's and slide's titles, so course terms are heard as course terms
+                s = next((x for x in L.slide_texts(c, tag) if x["n"] == _int(req.get("n"))), None)
+                hint = ". ".join(x for x in (d["title"], s and s["title"]) if x)
+            return self._json({"text": V.transcribe(audio, hint)})
         if path == "/api/chat/delete":
             f = T.chat_file(str(req.get("id", "")))
             if f and f.exists():
@@ -277,7 +329,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             S.set_chat(c, str(req.get("tag", "")), None)
             return self._json({"ok": True})
         if path == "/api/seen":
-            ds = S.mark_seen(c, str(req.get("tag", "")), int(req.get("n") or 1))
+            ds = S.mark_seen(c, str(req.get("tag", "")), _int(req.get("n")))
             return self._json({"state": ds} if ds else {"error": "Unknown deck."}, 200 if ds else 404)
         if path == "/api/tutor":
             tag = str(req.get("tag", ""))
@@ -285,10 +337,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self._json({"error": "Open a deck first."}, 400)
             mode = str(req.get("mode", "ask"))
             q = str(req.get("question") or "")
-            if mode in ("ask", "brush") and not q.strip():
+            if mode in ("ask", "brush", "voice") and not q.strip():
                 return self._json({"error": "Type a question first."}, 400)
             def work(emit):
-                chat, msg = T.chat_turn(c, tag, int(req.get("n") or 1), mode, q, model, web, emit)
+                chat, msg = T.chat_turn(c, tag, _int(req.get("n")), mode, q, model, web, emit)
                 return {"chat": chat["id"], "message": msg}
             return self._answer(req, work)
         if path == "/api/side":              # a side question about a term or a selection (forks the chat)
@@ -299,7 +351,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if side and not q.strip():
                 return self._json({"error": "Type a question first."}, 400)
             def work(emit):
-                sid, msg = T.side_turn(c, tag, int(req.get("n") or 1), side and str(side), str(req.get("chat") or ""),
+                sid, msg = T.side_turn(c, tag, _int(req.get("n")), side and str(side), str(req.get("chat") or ""),
                                        str(req.get("anchor") or ""), str(req.get("para") or ""), q, model, web, emit)
                 return {"side": sid, "message": msg}
             return self._answer(req, work)
@@ -345,39 +397,93 @@ def lan_ip():
         s.close()
 
 
+def start_tunnel(port, found):
+    """Run `cloudflared tunnel --url` for the hub; call found(link) once it prints its trycloudflare.com
+    link, or found(None) if it exits without one. No account or router setup; anyone with the link can
+    open the hub. Returns the process, or None when cloudflared isn't installed."""
+    exe = shutil.which("cloudflared") or next((str(p) for p in (
+        Path(os.environ.get("ProgramFiles(x86)", "")) / "cloudflared" / "cloudflared.exe",
+        Path(os.environ.get("ProgramFiles", "")) / "cloudflared" / "cloudflared.exe") if p.is_file()), None)
+    if not exe:
+        return None
+    proc = subprocess.Popen([exe, "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{port}"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                            errors="replace", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+    def watch():        # cloudflared logs to stderr; the link is in one of the first lines
+        link = None
+        for line in proc.stderr:
+            m = link is None and re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", line)
+            if m:
+                link = m.group(0) + "/"
+                found(link)
+        if link is None:
+            found(None)
+    threading.Thread(target=watch, daemon=True).start()
+    return proc
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--lan", action="store_true", help="also reachable from phones/tablets (anyone) on the same network")
+    ap.add_argument("--tunnel", action="store_true",
+                    help="also reachable from anywhere through a Cloudflare quick tunnel (anyone with the link)")
     ap.add_argument("--open", action="store_true", help="open the browser")
     args = ap.parse_args()
+    sys.stdout.reconfigure(errors="replace")    # the ⋯ and → below can't be encoded on some consoles
     global PHONE_URL
     host = "0.0.0.0" if args.lan else "127.0.0.1"
+    srv, wanted = None, args.port
+    for args.port in range(wanted, wanted + 20):     # port taken (another hub, or another app): try the next one
+        try:
+            srv = Server((host, args.port), Handler)
+            break
+        except OSError:
+            continue
+    if not srv:
+        print(f"Ports {wanted}-{wanted + 19} are all in use. Close some other Study Hub windows and try again.")
+        sys.exit(1)
     url = f"http://127.0.0.1:{args.port}/"
     if args.lan:
         PHONE_URL = f"http://{lan_ip()}:{args.port}/"
-    try:
-        srv = Server((host, args.port), Handler)
-    except OSError:
-        print(f"Port {args.port} is already in use — the Study Hub is probably already running.\n"
-              f"Open {url} in your browser, or close the other window first.")
-        if args.open:
-            webbrowser.open(url)
-        sys.exit(1)
+    if args.port != wanted:
+        print(f"Port {wanted} is already in use (another Study Hub window?), so this one uses port {args.port}.")
     print(f"Study Hub is running on this computer: {url}")
     if args.lan:
         print(f"\nOn your phone or tablet (same Wi-Fi), open:\n\n    {PHONE_URL}\n\n"
               "or scan the QR code in the Study Hub's ⋯ menu → Open on your phone.\n"
               "Anyone on this network can open it. If Windows Firewall asks, allow Python on private networks.")
+    tunnel, ready = None, threading.Event()
+    if args.tunnel:
+        def found(link):
+            global PHONE_URL
+            PHONE_URL = link
+            ready.set()
+            if link:
+                print(f"\nFrom anywhere (any Wi-Fi or mobile data), open:\n\n    {link}\n\n"
+                      "or scan the QR code in the Study Hub's ⋯ menu → Open on your phone.\n"
+                      "Anyone with this link can open the hub, so don't share it. It changes every time the hub starts.")
+            else:
+                print("\nThe Cloudflare tunnel didn't start (no internet?), so the hub works on this computer only.")
+        print("\nStarting the Cloudflare tunnel...")
+        tunnel = start_tunnel(args.port, found)
+        if not tunnel:
+            print("cloudflared isn't installed, so there's no link for other networks. Install it with\n"
+                  "    winget install --id Cloudflare.cloudflared\nthen start the hub again.")
+    if not tunnel:
+        ready.set()
     print("\nKeep this window open while you study. Close it (or press Ctrl+C) to stop the hub.")
-    T.log(f"start host={host} port={args.port}")
-    if args.open:
-        threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+    T.log(f"start host={host} port={args.port} tunnel={bool(tunnel)}")
+    if args.open:       # with a tunnel, wait for its link so the page loads with "Open on your phone" in the menu
+        threading.Thread(target=lambda: (ready.wait(30), webbrowser.open(url)), daemon=True).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if tunnel:
+            tunnel.terminate()
         T.engine.shutdown()
 
 

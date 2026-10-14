@@ -41,12 +41,14 @@ async function api(path, body) {
 }
 
 // POST that streams: the server sends "status" lines and "text" deltas as Server-Sent Events, then
-// "done" with the final result (or "error"). on = { status(text), text(delta) }.
-async function apiStream(path, body, on = {}) {
+// "done" with the final result (or "error"). on = { status(text), text(delta) }. An aborted signal rejects with
+// the browser's AbortError (callers ignore it: whoever aborted already moved on).
+const isAbort = (e) => e && e.name === "AbortError";
+async function apiStream(path, body, on = {}, signal = undefined) {
   let r;
   try {
-    r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, stream: true }) });
-  } catch { throw new Error("The hub isn't responding. Start it again with start.bat, then retry."); }
+    r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, stream: true }), signal });
+  } catch (e) { if (isAbort(e)) throw e; throw new Error("The hub isn't responding. Start it again with start.bat, then retry."); }
   if (!r.ok || !(r.headers.get("content-type") || "").includes("event-stream")) {
     const data = await r.json().catch(() => ({}));
     throw new Error(data.error || "Something went wrong. Try again.");
@@ -85,9 +87,14 @@ const STEPS = [["review", "Review"], ["new", "New slides"], ["practise", "Practi
 
 // ------------------------------------------------------------ markdown + math
 
+// A cue in a spoken answer, [#left]: lights up that part of the Talk canvas's drawing (speaker()). Never shown as text.
+const CUE = /\[#([A-Za-z][\w-]{0,40})\]/g;
+const uncue = (t) => String(t || "").replace(/[ \t]?\[#[A-Za-z][\w-]{0,40}\]/g, "");
+
 function renderMd(md, courseId) {
   const code = [], math = [];
   let src = String(md || "").replace(/```[\s\S]*?```|`[^`\n]+`/g, (m) => { code.push(m); return `CODETOKEN${code.length - 1}X`; });
+  src = uncue(src);
   // [[term]] becomes a button that explains the term in a side question (openSide), its maths still rendered.
   const terms = [];
   src = src.replace(/\[\[([^[\]\n]{1,120}?)\]\]/g, (_, t) => { terms.push(t); return `TERMOPEN${terms.length - 1}X${t}TERMCLOSEX`; });
@@ -198,6 +205,9 @@ async function route() {
   const token = ++routeToken;
   closeMenu();
   renderSessionBar();
+  // A recording never outlives the page; speech only carries on while staying on the same deck (e.g. a citation).
+  cancelRecording();
+  if (!(APP.deck && p.c === APP.deck.course && p.d === APP.deck.tag)) stopSpeaking();
   const main = $("#main");
   try {
     if (p.upload) await showUpload(p.upload);
@@ -432,12 +442,12 @@ async function showCourse(id, token) {
         return h("a", { href: `#c=${encodeURIComponent(id)}&notes=${encodeURIComponent(n.path)}` }, `W${n.week}${k ? ` (${k + 1})` : ""}`);
       })));
   }
-  const label = { exams: "Mock tests & cheat sheets", labs: "Labs", assignments: "Assignments" };
-  for (const kind of ["exams", "labs", "assignments"]) {
+  const label = { exams: "Mock tests & cheat sheets", labs: "Labs", assignments: "Assignments", tutor: "Voice tutor" };
+  for (const kind of ["exams", "labs", "assignments", "tutor"]) {
     const groups = c.docs.filter((g) => g.kind === kind);
     if (!groups.length) continue;
     page.append(h("p", { class: "notes-line" }, `${label[kind]}: `,
-      ...groups.flatMap((g) => [h("span", { class: "muted" }, `${g.name} `),
+      ...groups.flatMap((g) => [g.name ? h("span", { class: "muted" }, `${g.name} `) : null,
         ...g.files.map((f) => h("a", { href: `#c=${encodeURIComponent(id)}&notes=${encodeURIComponent(f.path)}` }, f.name))])));
   }
   $("#main").replaceChildren(page);
@@ -453,7 +463,8 @@ async function showNotes(id, path, token) {
   const c = await loadCourse(id);
   if (token !== routeToken) return;
   const n = c.notes.find((x) => x.path === path);
-  const label = n ? `Class notes W${n.week}` : path.split("/").slice(-2).join(" · ").replace(/\.md$/, "");
+  const label = n ? `Class notes W${n.week}` : path === "study/tutor-memory.md" ? "What your tutor remembers"
+    : path.split("/").slice(-2).join(" · ").replace(/\.md$/, "");
   setCrumbs({ label: "Home", href: "#" }, { label: c.code, href: `#c=${encodeURIComponent(id)}` }, { label });
   const r = await fetch(`/api/note?course=${encodeURIComponent(id)}&path=${encodeURIComponent(path)}`);
   const text = r.ok ? await r.text() : "Not found.";
@@ -506,8 +517,14 @@ function buildViewer() {
     if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) step(dx < 0 ? 1 : -1);
     x0 = null;
   });
-  sm.addEventListener("dblclick", () => toggleZoom());
-  sm.addEventListener("click", (e) => { if (isPhone() && e.target.classList.contains("slide-img")) toggleZoom(); });
+  sm.addEventListener("dblclick", () => { if (!isPhone()) toggleZoom(); });
+  // Phone: tap the left or right half of the slide to go back or forward; zoom is the browser's own two-finger pinch.
+  sm.addEventListener("click", (e) => {
+    if (!isPhone() || !e.target.classList.contains("slide-img")) return;
+    if (window.visualViewport && visualViewport.scale > 1.05) return;   // pinched in: a tap shouldn't turn the page
+    const r = e.target.getBoundingClientRect();
+    step(e.clientX < r.left + r.width / 2 ? -1 : 1);
+  });
   stageObserver.disconnect();
   stageObserver.observe(sm);
   APP.text = false; APP.zoom = false;
@@ -571,7 +588,11 @@ function fitSlide() {
   sm.classList.toggle("portrait", portrait);
   const cs = getComputedStyle(sm);
   const w = sm.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
-  const hgt = sm.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+  let hgt = sm.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+  if (isPhone()) {   // the slide sizes the stage on a phone, so measure the room around it, not the slide itself
+    const v = $(".viewer"), st = $("#stage"), foot = $(".stage-foot", st);
+    if (v && st) hgt = (v.classList.contains("ask-open") ? v.clientHeight * 0.42 : st.clientHeight) - (foot ? foot.offsetHeight : 0);
+  }
   const k = portrait ? Math.min(w / img.naturalWidth, 760 / img.naturalWidth, 1.5)
                      : Math.min(w / img.naturalWidth, hgt / img.naturalHeight, isPhone() ? 9 : 1.5);
   img.style.width = Math.floor(img.naturalWidth * k) + "px";
@@ -639,7 +660,9 @@ function setTutor(mode) {
   t.style.width = saved && !isPhone() ? `${clampPanel(saved)}px` : "";
   $("#resizer")?.toggleAttribute("hidden", mode === "closed" || isPhone());
   $("#stage")?.classList.toggle("shrunk", mode === "focus");
+  $(".viewer")?.classList.toggle("ask-open", mode === "open");   // phone: slide on top, chat below
   if (mode !== "focus") restoreStage();
+  requestAnimationFrame(fitSlide);
   applyReading();
 }
 
@@ -776,6 +799,9 @@ async function newChat() {
   if (d.chat) d.chats = [{ id: d.chat.id, title: d.chat.title, updated: d.chat.updated }, ...(d.chats || [])].slice(0, 5);
   d.chat = null;
   d.asked = [];
+  stopSpeaking();
+  clearVoiceTurn();
+  if ($("#talk-stage")) talkRefresh();
   drawThread();
   $("#ask-input")?.focus();
 }
@@ -784,6 +810,8 @@ async function openChat(id) {
   try {
     const r = await api("/api/chat/open", { id });
     APP.tutor = "open";
+    // The opened chat shows in the Type tab's thread.
+    if (APP.talk) { APP.talk = false; store.set("talk", false); stopSpeaking(); cancelRecording(); clearVoiceTurn(); }
     if (APP.deck && APP.deck.course === r.course && APP.deck.tag === r.deck) {
       APP.deck = await api(`/api/deck?course=${encodeURIComponent(r.course)}&tag=${encodeURIComponent(r.deck)}`);
       renderTutor();
@@ -796,26 +824,31 @@ function renderTutor() {
   if (!t) return;
   if (APP.tutor === "closed") {
     closeSide();
+    stopSpeaking();
+    cancelRecording();
     setTutor("closed");
     t.replaceChildren(h("div", { class: "rail" },
       h("button", { class: "primary", type: "button", onclick: () => startPracticeInPanel({ kind: tryKind() }), title: "A problem on this slide (or the whole deck, if chosen in the panel)" },
         h("span", { class: "go", "aria-hidden": "true" }, "✎"), "Try one"),
-      h("button", { type: "button", onclick: () => { APP.tutor = "open"; renderTutor(); $("#ask-input")?.focus(); } },
+      h("button", { type: "button", onclick: () => { APP.tutor = "open"; setTalk(false); $("#ask-input")?.focus(); } },
         h("span", { class: "glyph", "aria-hidden": "true" }, "💬"), "Ask"),
-      h("button", { type: "button", onclick: () => { APP.tutor = "open"; renderTutor(); tutorAsk("example"); } },
+      h("button", { type: "button", title: "Talk it through: ask out loud, hear the answer", onclick: () => { APP.tutor = "open"; setTalk(true); } },
+        h("span", { class: "glyph", "aria-hidden": "true" }, "🎙"), "Talk"),
+      h("button", { type: "button", onclick: () => tutorAsk("example") },
         h("span", { class: "glyph", "aria-hidden": "true" }, "▤"), "Example")));
     return;
   }
   setTutor("open");
-  const thread = h("div", { class: "thread", id: "thread", "aria-live": "polite", tabindex: "-1" });
-  t.replaceChildren(h("div", { class: "panel" },
+  const talk = APP.talk;
+  const thread = talk ? talkStage() : h("div", { class: "thread", id: "thread", "aria-live": "polite", tabindex: "-1" });
+  t.replaceChildren(h("div", { class: "panel" + (talk ? " talking" : "") },
     h("div", { class: "panel-head" }, h("h2", {}, "Tutor"), h("span", { class: "muted small", id: "tutor-where" }), readTools(),
       h("button", { class: "link quiet new-chat", type: "button", title: "Copy this chat as Markdown", onclick: () => copyChat(APP.deck.chat, APP.deck) }, "Copy chat"),
       h("button", { class: "link quiet new-chat", type: "button", id: "read-btn", title: "Reading view: the chat as full-width pages, like a PDF (R)", onclick: toggleReading }, "Read"),
       h("button", { class: "link quiet new-chat", type: "button", title: "Print this chat, or save it as a PDF", onclick: () => printChat(APP.deck.chat, APP.deck) }, "PDF"),
       h("button", { class: "link quiet new-chat", type: "button", title: "Start a new chat on this deck", onclick: newChat }, "New chat"),
       h("button", { class: "icon-btn", type: "button", "aria-label": "Close the tutor", onclick: () => { APP.tutor = "closed"; renderTutor(); } }, "×")),
-    h("div", { class: "panel-actions" },
+    talk ? null : h("div", { class: "panel-actions" },
       scopeSwitch(),
       h("button", { class: "btn block", type: "button", onclick: () => startPracticeInPanel({ kind: tryKind() }) }, "Try one"),
       h("div", { class: "links" },
@@ -826,9 +859,10 @@ function renderTutor() {
         h("button", { class: "link", type: "button", title: "What to know first: prerequisites, rules and symbols", onclick: () => tutorAsk("before") }, "Before you start"),
         h("button", { class: "link", type: "button", title: "Methods, formulas and shortcuts to copy onto your sheet (always the whole deck)", onclick: () => tutorAsk("cheatsheet_deck") }, "Cheat sheet"))),
     thread,
-    composeBox("Ask anything about this slide", (q) => tutorAsk("ask", q))));
+    h("div", { class: "ask-area" }, talkSwitch(),
+      talk ? talkBar() : composeBox("Ask anything about this slide", (q) => tutorAsk("ask", q)))));
   updateTutorWhere();
-  drawThread();
+  if (talk) talkRefresh(); else drawThread();
   applyReading();
   // A side question survives the panel being redrawn (e.g. the scope switch), but not a change of deck.
   if (APP.side && APP.deck && APP.side.course === APP.deck.course && APP.side.tag === APP.deck.tag) $(".panel", t).append(APP.side.el);
@@ -1009,7 +1043,7 @@ function drawThread() {
       ...earlier.map((c) => h("button", { class: "link", type: "button", onclick: () => openChat(c.id) }, c.starred ? `★ ${c.title}` : c.title))));
   }
   msgs.forEach((m, i) => {
-    if (m.role === "q") th.append(h("p", { class: "msg-q" }, m.text, h("span", { class: "where" }, m.slide ? ` · s${m.slide}` : "")));
+    if (m.role === "q") th.append(h("p", { class: "msg-q" }, m.mode === "voice" ? `🎙 ${m.text}` : m.text, h("span", { class: "where" }, m.slide ? ` · s${m.slide}` : "")));
     else th.append(answerEl(m, i === msgs.length - 1));
   });
   th.scrollTop = th.scrollHeight;
@@ -1020,6 +1054,8 @@ function answerEl(m, isLast) {
   body.className = "msg-a";
   const wrap = h("div", { class: "ans" }, body,
     h("button", { class: "copy-one", type: "button", title: "Copy this answer", onclick: (e) => copyText(unmark(m.text), e.currentTarget) }, "Copy"));
+  if (m.mode === "voice") wrap.append(h("button", { class: "link quiet", type: "button", title: "Hear this answer again",
+    onclick: (e) => { if (VOICE.playBtn === e.currentTarget) { stopSpeaking(); talkSet("idle"); } else speakAll(m.text, e.currentTarget); } }, "▶ Play again"));
   if (isLast) {
     const deckWide = (m.mode || "").endsWith("_deck");
     const next = (m.mode || "").startsWith("example")
@@ -1065,8 +1101,8 @@ function chatMeta(chat, deck) {
   return [code, where, chat.updated || chat.created || ""].filter(Boolean).join(" · ");
 }
 
-// Copied Markdown shows terms as plain words, without the [[…]] that makes them buttons.
-const unmark = (t) => String(t || "").replace(/\[\[([^[\]\n]{1,120}?)\]\]/g, "$1");
+// Copied Markdown shows terms as plain words, without the [[…]] that makes them buttons (or any canvas cues).
+const unmark = (t) => uncue(t).replace(/\[\[([^[\]\n]{1,120}?)\]\]/g, "$1");
 
 function chatMarkdown(chat, deck) {
   const out = [`# ${chat.title || "Tutor chat"}`, "", `_${chatMeta(chat, deck)}_`, ""];
@@ -1108,7 +1144,9 @@ function metaText(m) {
 
 async function tutorAsk(mode, question = "") {
   if (APP.scope === "deck" && DECK_MODES.includes(mode)) mode += "_deck";
-  if (APP.tutor !== "open") { APP.tutor = "open"; renderTutor(); }
+  // Written answers go in the Type tab's thread (switched to straight away: the Talk tab isn't drawn on the way).
+  if (APP.talk) { APP.talk = false; store.set("talk", false); stopSpeaking(); cancelRecording(); }
+  if (APP.tutor !== "open" || !$("#thread")) { APP.tutor = "open"; renderTutor(); }
   const th = $("#thread");
   const d = APP.deck;
   const n = Math.min(APP.n, d.slides);
@@ -1169,6 +1207,663 @@ async function tutorAsk(mode, question = "") {
   }
 }
 
+// ------------------------------------------------------------ talk (voice)
+// The Talk tab: tap the mic (or hold Space), ask out loud, and hear the answer. The recording is decoded here to
+// 16 kHz mono WAV and transcribed on the hub (faster-whisper, local); the text goes to the tutor as mode "voice"
+// in the deck's chat, the same conversation as the Type tab. The answer is spoken a sentence at a time as it
+// streams in (Kokoro, local), so the tutor starts talking early. Instead of a written thread the tab shows a
+// canvas: when a picture helps, the tutor draws one there and then talks it through (voice_prompt.md).
+
+APP.talk = store.get("talk", false);
+const VOICE = { rec: null, stream: null, chunks: [], recDone: null, recGen: 0, recTimer: 0, state: "idle", gen: 0, ctrl: null,
+  el: null, voices: null, poll: 0, tick: 0, thinkT0: 0, thinkMsg: "", playBtn: null,
+  starting: false, releaseEarly: false, spaceHeld: false, owner: "", heard: "", drawing: "", caption: "", last: "", cue: null };
+const micOk = () => window.isSecureContext && !!navigator.mediaDevices?.getUserMedia && !!window.MediaRecorder;
+const TALK_STATES = { idle: "Tap the mic (or hold Space), ask, then tap again (or let go).",
+  listening: "Listening… tap again, or let go of Space, to send.", hearing: "Working out what you said…",
+  thinking: "Thinking…", speaking: "Speaking… tap the mic to cut in." };
+const MAX_RECORDING_MS = 120000;
+
+function setTalk(on) {
+  APP.talk = on;
+  store.set("talk", on);
+  if (!on) { silence(); cancelRecording(); }   // an answer being written still finishes, into the Type tab
+  renderTutor();
+}
+
+function talkSwitch() {
+  const mk = (on, label) => h("button", { type: "button", role: "radio", "aria-checked": String(APP.talk === on),
+    class: APP.talk === on ? "on" : "", onclick: () => { if (APP.talk !== on) setTalk(on); } }, label);
+  return h("div", { class: "scope-switch talk-switch", role: "radiogroup", "aria-label": "Ask by" }, mk(false, "Type"), mk(true, "Talk"));
+}
+
+function talkStage() {
+  return h("div", { class: "talk-stage", id: "talk-stage" },
+    h("p", { class: "talk-heard", id: "talk-heard" }),
+    h("div", { class: "talk-canvas", id: "talk-canvas", "aria-label": "Canvas" }),
+    h("p", { class: "talk-caption", id: "talk-caption", "aria-live": "polite" }));
+}
+
+function talkBar() {
+  const voice = h("select", { id: "talk-voice", "aria-label": "Voice", onchange: (e) => store.set("voice", e.target.value) });
+  const speed = h("select", { "aria-label": "Speed", onchange: (e) => store.set("voiceSpeed", +e.target.value) },
+    ...[0.85, 1, 1.1, 1.2, 1.35].map((s) => h("option", { value: s }, `${s}×`)));
+  speed.value = store.get("voiceSpeed", 1);
+  return h("div", { class: "talk" },
+    h("button", { class: "mic", id: "talk-mic", type: "button", "aria-label": "Talk", "aria-pressed": "false", onclick: micTap }, "🎙"),
+    h("div", { class: "talk-main" },
+      h("p", { class: "talk-state", id: "talk-state" }),
+      h("div", { class: "talk-opts" }, voice, speed,
+        h("button", { class: "link quiet", id: "talk-replay", type: "button", title: "Hear the last answer again", onclick: () => VOICE.last && speakAll(VOICE.last) }, "▶ Replay"),
+        h("button", { class: "link quiet", id: "talk-stop", type: "button", onclick: () => { stopSpeaking(); talkSet("idle"); } }, "■ Stop"))));
+}
+
+// What the Talk tab shows (heard / drawing / caption / last answer) belongs to one deck; another deck starts blank.
+function voiceDeck(d) {
+  const key = d ? `${d.course}\u0000${d.tag}` : "";
+  if (VOICE.owner !== key) { VOICE.owner = key; clearVoiceTurn(); }
+}
+function clearVoiceTurn() { Object.assign(VOICE, { heard: "", drawing: "", caption: "", last: "" }); }
+
+// Fill the Talk tab from VOICE after it is (re)drawn, and get the models loading.
+function talkRefresh() {
+  voiceDeck(APP.deck);
+  if (!VOICE.last) {       // after a reload: Replay plays the chat's last spoken answer
+    const msgs = (APP.deck && APP.deck.chat && APP.deck.chat.messages) || [];
+    VOICE.last = [...msgs].reverse().find((m) => m.role !== "q" && m.mode === "voice")?.text || "";
+  }
+  if (!VOICE.drawing) VOICE.drawing = lastDrawing();
+  $("#talk-heard").textContent = VOICE.heard ? `You: ${VOICE.heard}` : "";
+  paintCanvas(VOICE.drawing);
+  $("#talk-caption").textContent = VOICE.caption;
+  fillVoices();
+  if (!micOk()) return talkSet("off", window.isSecureContext ? "This browser can't record audio. Try Chrome or Edge."
+    : "The microphone only works on a secure page: open the hub on this computer (start option 1), or through the Cloudflare link (option 3), not the Wi-Fi address.");
+  talkSet(VOICE.state === "off" ? "idle" : VOICE.state, VOICE.state === "thinking" ? VOICE.thinkMsg : undefined);
+  if (!VOICE.voices) warmVoice();
+}
+
+function talkSet(state, msg) {
+  // Thinking shows the seconds waited (the first answer on a deck can take most of a minute), after any status text.
+  if (state === "thinking") {
+    if (VOICE.state !== "thinking" || !VOICE.tick) {
+      clearInterval(VOICE.tick);
+      VOICE.thinkT0 = Date.now();
+      VOICE.tick = setInterval(() => { if (VOICE.state === "thinking") talkSet("thinking", VOICE.thinkMsg); }, 1000);
+    }
+    VOICE.thinkMsg = msg || "";
+    const s = Math.round((Date.now() - VOICE.thinkT0) / 1000);
+    msg = (VOICE.thinkMsg || TALK_STATES.thinking) + (s ? ` ${s} s` : "");
+  } else if (VOICE.tick) { clearInterval(VOICE.tick); VOICE.tick = 0; }
+  VOICE.state = state;
+  if (state !== "speaking" && VOICE.playBtn) { VOICE.playBtn.textContent = "▶ Play again"; VOICE.playBtn = null; }
+  const line = $("#talk-state"), mic = $("#talk-mic");
+  if (line) line.textContent = msg || TALK_STATES[state] || "";
+  if (mic) {
+    mic.classList.toggle("on", state === "listening");
+    mic.setAttribute("aria-pressed", String(state === "listening"));
+    mic.disabled = ["hearing", "loading", "off"].includes(state);
+  }
+  $("#talk-stop")?.toggleAttribute("hidden", !["thinking", "speaking"].includes(state));
+  $("#talk-replay")?.toggleAttribute("hidden", !VOICE.last || ["thinking", "speaking", "listening"].includes(state));
+}
+
+function fillVoices() {
+  const sel = $("#talk-voice");
+  if (!sel || !VOICE.voices) return;
+  sel.replaceChildren(...Object.entries(VOICE.voices.voices).map(([id, label]) => h("option", { value: id }, label)));
+  sel.value = store.get("voice", VOICE.voices.default_voice);
+}
+
+async function warmVoice() {
+  clearTimeout(VOICE.poll);
+  if (!$("#talk-mic")) return;        // the Talk tab was closed meanwhile
+  const calm = () => ["idle", "loading", "off"].includes(VOICE.state);   // never over a turn in progress
+  let st;
+  // With the deck, the hub also opens the deck's conversation now, so the first answer skips that step.
+  try { st = await api("/api/voice/warm", APP.deck ? { course: APP.deck.course, tag: APP.deck.tag, model: APP.model, slides_only: slidesOnly(APP.deck.course) } : {}); } catch (e) { if (calm()) talkSet("off", e.message); return; }
+  if (st.error) { if (calm()) talkSet("off", st.error); return; }
+  if (!st.ready) {
+    if (calm()) talkSet("loading", "Loading the voice models (the very first time this downloads about 600 MB)…");
+    VOICE.poll = setTimeout(warmVoice, 2000);
+    return;
+  }
+  VOICE.voices = st;
+  fillVoices();
+  if (VOICE.state === "loading") talkSet("idle");
+}
+
+// Resolves once any Mermaid diagram on the canvas is drawn (so cues can find its nodes).
+function paintCanvas(md) {
+  const c = $("#talk-canvas");
+  if (!c) return Promise.resolve();
+  if (!md) { c.replaceChildren(h("p", { class: "empty" }, "When a picture helps, the tutor draws it here and talks you through it.")); return Promise.resolve(); }
+  c.replaceChildren(...renderMd(md, APP.deck.course).childNodes);
+  // An SVG goes in as live (cleaned) markup rather than an <img>, so cues can reach its parts.
+  $$(".svg-box[data-src]", c).forEach((fig) => {
+    const svg = inlineSvg(fig.dataset.src), img = $("img", fig);
+    if (svg && img) img.replaceWith(svg);
+  });
+  applyCues();
+  // Mermaid sizes its SVG to the text (max-width in px): on the narrow canvas, scale drawings to fill the canvas instead.
+  return drawMermaid().then(() => {
+    $$(".mermaid-box svg, .svg-box svg", c).forEach((s) => {
+      s.style.removeProperty("max-width");
+      s.removeAttribute("height");
+      s.style.maxHeight = `${Math.max(200, c.clientHeight - 24)}px`;
+    });
+    applyCues();
+  });
+}
+
+// The tutor's SVG as live markup, rebuilt from an allowlist: SVG shapes and text with drawing attributes only, so
+// nothing in it can run, fetch or navigate (a blocklist missed html:meta refresh, html:img, image-set() in style).
+// Ids get a tsvg- prefix (and references with them) so a part called "thread" can't take over the page's #thread;
+// class is dropped so page CSS (.on, .empty…) can't reach in. null if it isn't clean SVG.
+const SVG_NS = "http://www.w3.org/2000/svg", XLINK_NS = "http://www.w3.org/1999/xlink";
+const SVG_TAGS = new Set(("svg g defs title desc rect circle ellipse line polyline polygon path text tspan marker linearGradient "
+  + "radialGradient stop clipPath mask pattern symbol use").split(" "));
+const SVG_PAINT = new Set(("fill fill-opacity fill-rule stroke stroke-width stroke-dasharray stroke-dashoffset stroke-linecap "
+  + "stroke-linejoin stroke-miterlimit stroke-opacity opacity font-size font-family font-weight font-style text-anchor "
+  + "dominant-baseline alignment-baseline baseline-shift letter-spacing word-spacing text-decoration stop-color stop-opacity "
+  + "visibility display paint-order vector-effect").split(" "));
+const SVG_ATTRS = new Set([...SVG_PAINT, ...("x y x1 y1 x2 y2 cx cy r rx ry fx fy width height d points pathLength transform viewBox "
+  + "preserveAspectRatio dx dy rotate textLength lengthAdjust marker-start marker-mid marker-end markerWidth markerHeight refX refY "
+  + "orient markerUnits offset gradientUnits gradientTransform spreadMethod clip-path clip-rule clipPathUnits mask maskUnits "
+  + "maskContentUnits patternUnits patternContentUnits patternTransform").split(" ")]);
+const SVG_ID = /^[A-Za-z][\w.-]*$/;
+// An attribute value with its url(#id) references re-pointed at prefixed ids; null if it could fetch or escape.
+function svgValue(v) {
+  if (/\\|image-set|javascript:|expression\(|@import/i.test(v)) return null;
+  v = v.replace(/url\(\s*(['"]?)#([A-Za-z][\w.-]*)\1\s*\)/g, "url(#tsvg-$2)");
+  return /url\(/i.test(v.replace(/url\(#tsvg-[\w.-]+\)/g, "")) ? null : v;
+}
+function inlineSvg(src) {
+  const doc = new DOMParser().parseFromString(src, "image/svg+xml");
+  const root = doc.documentElement;
+  if (!root || root.localName !== "svg" || root.namespaceURI !== SVG_NS || doc.getElementsByTagName("parsererror").length) return null;
+  const copy = (from, to) => {
+    for (const n of from.childNodes) {
+      if (n.nodeType === 3 || n.nodeType === 4) { to.append(n.nodeValue); continue; }
+      if (n.nodeType !== 1 || n.namespaceURI !== SVG_NS) continue;            // html:*, comments, …: gone with their subtree
+      if (n.localName === "a") { copy(n, to); continue; }                       // a link: keep what it wraps, not the link
+      if (!SVG_TAGS.has(n.localName)) continue;
+      to.append(copy(n, cleanSvgEl(n)));
+    }
+    return to;
+  };
+  const svg = copy(root, cleanSvgEl(root));
+  // Without a viewBox, dropping width/height would leave it drawn at 300×150 user units, cropped.
+  const num = (v) => /^\d+(\.\d+)?(px)?$/.test((v || "").trim()) ? parseFloat(v) : 0;
+  const w = num(root.getAttribute("width")), ht = num(root.getAttribute("height"));
+  if (!svg.hasAttribute("viewBox") && w && ht) svg.setAttribute("viewBox", `0 0 ${w} ${ht}`);
+  svg.removeAttribute("width");
+  svg.removeAttribute("height");
+  svg.setAttribute("class", "cue-svg");
+  return svg;
+}
+// A fresh SVG element with only the allowed attributes of el (simple style declarations become attributes).
+function cleanSvgEl(el) {
+  const out = document.createElementNS(SVG_NS, el.localName);
+  for (const a of el.attributes) {
+    if (a.namespaceURI && a.namespaceURI !== XLINK_NS) continue;
+    const n = a.localName, v = a.value.trim();
+    if (n === "id") { if (SVG_ID.test(v)) out.setAttribute("id", `tsvg-${v}`); continue; }
+    if (n === "href") { if (/^#[A-Za-z][\w.-]*$/.test(v)) out.setAttribute("href", `#tsvg-${v.slice(1)}`); continue; }
+    if (a.namespaceURI || !SVG_ATTRS.has(n)) continue;
+    const ok = svgValue(v);
+    if (ok != null) out.setAttribute(n, ok);
+  }
+  for (const decl of (el.getAttribute("style") || "").split(";")) {      // style beats attributes, so it goes last
+    const m = decl.match(/^\s*([a-z-]+)\s*:\s*([#\w\s.,%()-]+?)\s*$/i);
+    if (m && SVG_PAINT.has(m[1].toLowerCase()) && !/url\(|image-set/i.test(m[2])) out.setAttribute(m[1].toLowerCase(), m[2]);
+  }
+  return out;
+}
+
+// The most recent drawing in this deck's run of spoken answers, to put back on the canvas after a reload.
+function lastDrawing() {
+  const msgs = (APP.deck && APP.deck.chat && APP.deck.chat.messages) || [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m.role === "q") continue;
+    if (m.mode !== "voice") return "";
+    const f = m.text.match(/(```|~~~)(?:mermaid|svg|plot)\b[\s\S]*?\1/);
+    if (f) return f[0];
+  }
+  return "";
+}
+
+// Cues ([#id] in the spoken text) and the canvas. While an answer is spoken over a new drawing, its named parts
+// start hidden and appear when the sentence that names them starts; the part being talked about is lit and the
+// rest fade back. Everything shows once the answer ends or is cut short, so a missed cue never hides a part.
+// A follow-up answer can cue the drawing that's already there without drawing it again.
+//   VOICE.cue = { build: parts start hidden, shown: Set of ids, on: ids lit now } (null: all shown, none lit)
+function cueParts(c) {
+  const parts = new Map();     // id → its elements; mermaid edges (and their labels) come with both ends
+  const add = (id, el) => {     // only a name a cue can carry ([#id]) is a part
+    if (!/^[A-Za-z][\w-]{0,40}$/.test(id)) return;
+    if (!parts.has(id)) parts.set(id, []);
+    parts.get(id).push(el);
+  };
+  const svg = $(".cue-svg", c);
+  if (svg) svg.querySelectorAll(":is(g, rect, circle, ellipse, line, polyline, polygon, path, text, use)[id]").forEach((el) => {
+    if (!el.closest("defs, marker, symbol, clipPath, mask, pattern")) add(el.id.replace(/^tsvg-/, ""), el);
+  });
+  const mm = $(".mermaid-box svg", c), edges = [];
+  if (mm) {
+    mm.querySelectorAll("g.node[id]").forEach((el) => { const m = el.id.match(/^flowchart-(.+)-\d+$/); if (m) add(m[1], el); });
+    mm.querySelectorAll("g.cluster[id]").forEach((el) => add(el.id, el));
+    const labels = $$(".edgeLabels > .edgeLabel", mm);
+    $$(".edgePaths > path", mm).forEach((p, i) => {
+      const from = [...p.classList].find((k) => k.startsWith("LS-"))?.slice(3), to = [...p.classList].find((k) => k.startsWith("LE-"))?.slice(3);
+      if (from && to) edges.push({ from, to, els: [p, labels[i]].filter(Boolean) });
+    });
+  }
+  return { parts, edges };
+}
+
+function applyCues() {
+  const c = $("#talk-canvas");
+  if (!c) return;
+  const { parts, edges } = cueParts(c), st = VOICE.cue;
+  const on = new Set(st ? st.on.filter((id) => parts.has(id)) : []);
+  const shows = (id) => !st || !st.build || st.shown.has(id);
+  for (const [id, els] of parts) for (const el of els) {
+    el.classList.add("cue-part");
+    el.classList.toggle("cue-hide", !shows(id));
+    el.classList.toggle("cue-on", on.has(id));
+  }
+  for (const e of edges) for (const el of e.els) {
+    el.classList.toggle("cue-hide", !(shows(e.from) && shows(e.to)));
+    el.classList.toggle("cue-dim", on.size > 0 && !on.has(e.from) && !on.has(e.to));   // fades back with the nodes
+  }
+  // A part drawn inside another named part: showing it shows the group around it too.
+  for (const [id, els] of parts) if (shows(id)) for (const el of els) {
+    for (let up = el.parentElement; up && up !== c; up = up.parentElement) up.classList.remove("cue-hide");
+  }
+  c.classList.toggle("cueing", on.size > 0);
+}
+
+// A piece of speech is starting: the parts it names appear (if hidden) and light up. Cues naming no part on the
+// canvas are ignored; returns how many did name one.
+function showCues(ids) {
+  const c = $("#talk-canvas"), parts = c ? cueParts(c).parts : new Map();
+  ids = ids.filter((id) => parts.has(id));
+  if (!ids.length) return 0;
+  const st = VOICE.cue || (VOICE.cue = { build: false, shown: new Set(), on: [] });
+  ids.forEach((id) => st.shown.add(id));
+  st.on = ids;
+  applyCues();
+  return ids.length;
+}
+// A new drawing is going up while it is being explained: its parts wait for their cues.
+function buildCues() { VOICE.cue = { build: true, shown: new Set(), on: [] }; }
+function endCues() { if (VOICE.cue) { VOICE.cue = null; applyCues(); } }
+
+async function micTap() {
+  if (VOICE.state === "listening") { unlockAudio(); return finishRecording(); }
+  if (VOICE.starting || ["hearing", "loading", "off"].includes(VOICE.state)) return;
+  stopSpeaking();
+  unlockAudio();                      // inside the tap: lets the answer play later (iOS, autoplay rules)
+  const tok = ++VOICE.recGen;
+  VOICE.starting = true;
+  VOICE.releaseEarly = false;
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+  } catch {
+    if (tok !== VOICE.recGen) return;
+    VOICE.starting = false;
+    return talkSet("idle", "The microphone is blocked. Allow it from the site settings next to the address bar, then try again.");
+  }
+  if (tok !== VOICE.recGen) { stream.getTracks().forEach((t) => t.stop()); return; }   // cancelled meanwhile
+  const chunks = [];
+  let rec;
+  try {
+    rec = new MediaRecorder(stream);
+    rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    VOICE.recDone = new Promise((res) => { rec.onstop = () => res(); rec.onerror = () => res(); });
+    rec.start();
+  } catch {
+    VOICE.starting = false;
+    stream.getTracks().forEach((t) => t.stop());
+    return talkSet("idle", "This browser couldn't start recording. Try Chrome or Edge.");
+  }
+  Object.assign(VOICE, { rec, stream, chunks, starting: false });
+  talkSet("listening");
+  VOICE.recTimer = setTimeout(() => { if (VOICE.rec === rec) finishRecording(); }, MAX_RECORDING_MS);   // forgot to stop
+  if (VOICE.releaseEarly) finishRecording();
+}
+
+// Stop a recording (or one about to start) without sending it: leaving the tab, the deck or the page.
+function cancelRecording() {
+  VOICE.recGen++;
+  clearTimeout(VOICE.recTimer);
+  const rec = VOICE.rec;
+  if (rec) {
+    rec.onstop = rec.onerror = rec.ondataavailable = null;
+    if (rec.state !== "inactive") { try { rec.stop(); } catch { /* already stopping */ } }
+  }
+  VOICE.stream?.getTracks().forEach((t) => t.stop());
+  Object.assign(VOICE, { rec: null, stream: null, chunks: [], recDone: null, starting: false, releaseEarly: false, spaceHeld: false });
+  if (["listening", "hearing"].includes(VOICE.state)) talkSet("idle");
+}
+
+async function finishRecording() {
+  const { rec, stream, chunks, recDone, recGen: tok } = VOICE;
+  if (!rec) return;
+  clearTimeout(VOICE.recTimer);
+  Object.assign(VOICE, { rec: null, stream: null, recDone: null });
+  talkSet("hearing");
+  const d = APP.deck;
+  let text = "", msg = "Didn't catch that. Tap the mic and try again.";
+  try {
+    if (rec.state !== "inactive") { rec.stop(); await recDone; }
+    stream.getTracks().forEach((t) => t.stop());
+    if (tok !== VOICE.recGen) return;
+    const wav = await toWav16k(new Blob(chunks, { type: rec.mimeType }));
+    if (tok !== VOICE.recGen) return;
+    try {
+      text = (await api("/api/voice/transcribe", { course: d.course, tag: d.tag, n: Math.min(APP.n, d.slides), audio: await blobBase64(wav) })).text.trim();
+    } catch (e) { msg = e.message; }
+  } catch { /* couldn't decode the recording: msg says so */ } finally {
+    stream.getTracks().forEach((t) => t.stop());
+    if (tok === VOICE.recGen && VOICE.state === "hearing" && !text) talkSet("idle", msg);
+  }
+  if (text && tok === VOICE.recGen && APP.deck === d) talkAsk(text);
+}
+
+// Whatever the browser recorded (webm/opus, mp4…) → 16 kHz mono 16-bit WAV, what Whisper wants.
+async function toWav16k(blob) {
+  const ctx = new AudioContext();
+  let buf;
+  try { buf = await ctx.decodeAudioData(await blob.arrayBuffer()); } finally { ctx.close(); }
+  const off = new OfflineAudioContext(1, Math.max(1, Math.ceil(buf.duration * 16000)), 16000);
+  const src = off.createBufferSource();
+  src.buffer = buf;
+  src.connect(off.destination);
+  src.start();
+  return new Blob([pcmWav((await off.startRendering()).getChannelData(0), 16000)], { type: "audio/wav" });
+}
+function pcmWav(pcm, rate) {
+  const v = new DataView(new ArrayBuffer(44 + pcm.length * 2));
+  const str = (o, s) => [...s].forEach((ch, i) => v.setUint8(o + i, ch.charCodeAt(0)));
+  str(0, "RIFF"); v.setUint32(4, 36 + pcm.length * 2, true); str(8, "WAVE"); str(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true);
+  v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); str(36, "data"); v.setUint32(40, pcm.length * 2, true);
+  pcm.forEach((x, i) => v.setInt16(44 + i * 2, Math.max(-1, Math.min(1, x)) * 32767, true));
+  return v.buffer;
+}
+const blobBase64 = (b) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(b); });
+
+async function talkAsk(question) {
+  const d = APP.deck, n = Math.min(APP.n, d.slides);
+  stopSpeaking();
+  const ctrl = VOICE.ctrl = new AbortController();
+  const gen = VOICE.gen;
+  voiceDeck(d);
+  Object.assign(VOICE, { heard: question, caption: "" });     // the drawing stays: a follow-up can point at it
+  if ($("#talk-stage")) talkRefresh();
+  talkSet("thinking");
+  const sp = speaker(gen, ctrl.signal);
+  let r;
+  try {
+    r = await apiStream("/api/tutor", { course: d.course, tag: d.tag, n, mode: "voice", question, model: APP.model, slides_only: slidesOnly(d.course) },
+      { status: (t) => { if (gen === VOICE.gen && VOICE.state === "thinking") talkSet("thinking", `${t}…`); }, text: sp.feed }, ctrl.signal);
+  } catch (e) {
+    if (!isAbort(e) && gen === VOICE.gen) { stopSpeaking(); talkSet("idle", e.message); }
+    return;          // aborted (cut in, Stop, left the deck): nothing more to do; the hub saves what it has
+  }
+  // The server saved the turn, so it joins the deck's chat (and the Type tab shows it) even if it was cut short here.
+  const chat = d.chat || { id: r.chat, title: question, updated: "", messages: [] };
+  chat.messages.push({ role: "q", mode: "voice", slide: n, text: question }, r.message);
+  chat.updated = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  d.chat = chat;
+  if (!d.asked.includes(n)) d.asked.push(n);
+  if (gen === VOICE.gen) {
+    VOICE.last = r.message.text;
+    sp.end();
+  } else VOICE.drawing = "";      // went quiet (left Talk) before its drawing went up: lastDrawing() finds it
+  if (APP.deck === d && !APP.talk && $("#thread")) drawThread();
+}
+
+function speakAll(text, btn = null) {
+  stopSpeaking();
+  unlockAudio();
+  const ctrl = VOICE.ctrl = new AbortController();
+  const sp = speaker(VOICE.gen, ctrl.signal);
+  talkSet("speaking");
+  if (btn) { VOICE.playBtn = btn; btn.textContent = "■ Stop"; }
+  sp.feed(text);
+  sp.end();
+}
+
+// Speaks streamed Markdown a few sentences at a time, in order: each piece is synthesised while the previous
+// one plays. A ``` drawing block isn't read out; once it is complete it goes on the canvas. stopSpeaking()
+// (a new question, Stop, closing the tab) makes every queued piece of this answer drop out.
+const ABBREV = /(?:^|[\s(])(?:e\.g|i\.e|vs|etc|dr|fig)\.$/i;
+function speaker(gen, signal) {
+  let acc = "", taken = 0, first = true, ended = false, pending = 0, blocked = false, building = false, uncued = 0;
+  let synth = Promise.resolve(), play = Promise.resolve();
+  const live = () => gen === VOICE.gen;
+  const check = () => {
+    if (ended && !pending && live()) {
+      endCues();
+      talkSet("idle", blocked ? "Tap ▶ Replay to hear the answer." : undefined);
+    }
+  };
+  // Cues take effect as the piece naming them starts. A new drawing whose explanation names none of its parts
+  // in the next two pieces was drawn without cues: show it whole rather than wait for the end.
+  // Cues naming nothing on the canvas count as none.
+  const cueUp = (cues) => {
+    if (showCues(cues)) building = false;
+    else if (building && ++uncued >= 2) { building = false; endCues(); }
+  };
+  const sayOne = (text, cues = []) => {
+    pending++;
+    const audio = synth = synth.then(() => (live() && !blocked && text ? fetchSpeech(text, signal) : null)).catch(() => null);
+    play = play.then(async () => {
+      const url = await audio;
+      if (live()) cueUp(cues);
+      if (url && live() && !blocked) {
+        VOICE.caption = text;
+        const cap = $("#talk-caption");
+        if (cap) cap.textContent = text;
+        talkSet("speaking");
+        if (!(await playUrl(url)) && live()) blocked = true;    // the browser refused to play (no tap to unlock)
+      } else if (url) URL.revokeObjectURL(url);
+      pending--;
+      check();
+    });
+  };
+  // The drawing goes up when the speech reaches it, not when it arrives, with its parts waiting for their cues.
+  // Counted in pending, so an answer ending on a drawing still shows it whole; the next piece waits (up to 2 s)
+  // for a Mermaid diagram to be drawn, so its cues land on the nodes. With no canvas showing (▶ Play again in
+  // the Type tab), the Talk drawing is forgotten and lastDrawing() finds the latest when Talk opens.
+  const draw = (block) => {
+    pending++;
+    play = play.then(async () => {
+      if (live() && !$("#talk-canvas")) VOICE.drawing = "";
+      else if (live()) {
+        VOICE.drawing = block;
+        buildCues();
+        building = true;
+        uncued = 0;
+        await Promise.race([paintCanvas(block), new Promise((res) => setTimeout(res, 2000))]);
+      }
+      pending--;
+      check();
+    });
+  };
+  const say = (chunk) => {      // a piece per cued sentence (so a cue lands as it is said); none over 1000 characters
+    for (const { text: part, cues } of cueSplit(chunk)) {
+      let text = speakable(part), lead = cues;
+      while (text.length > 1000) {
+        const sp = text.lastIndexOf(" ", 1000);
+        const k = sp > 200 ? sp : 1000;
+        sayOne(text.slice(0, k), lead);
+        lead = [];
+        text = text.slice(k).trim();
+      }
+      if (text || lead.length) sayOne(text, lead);
+    }
+  };
+  const take = (final) => {
+    for (;;) {
+      const rest = acc.slice(taken);
+      if (!rest.trim()) return;
+      const fence = rest.search(/```|~~~/);
+      if (fence === 0) {          // a drawing: wait until it is complete, then show it
+        const mark = rest.slice(0, 3), close = rest.indexOf(mark, 3);
+        if (close < 0) {
+          if (/^...\s*mermaid\b/.test(rest)) loadMermaid().catch(() => {});   // the library loads while the diagram streams in
+          if (final) taken = acc.length;
+          return;
+        }
+        const block = rest.slice(0, close + 3);
+        taken += close + 3;
+        draw(block);
+        continue;
+      }
+      const scan = fence > 0 ? rest.slice(0, fence) : rest;
+      // Cut after a sentence or a line; the first piece as early as possible, then pieces of 140+ characters.
+      const re = /[.!?](?=["')\]]*\s)|\n/g;
+      let cut = -1, soft = -1, m;
+      while ((m = re.exec(scan))) {
+        const end = m.index + m[0].length;
+        if (m[0] === "." && ABBREV.test(scan.slice(0, end))) continue;
+        if (first || end >= 140) { cut = end; break; }
+        soft = end;
+      }
+      if (cut < 0 && scan.length > 350) {       // a long run with no sentence end: break at a pause, or a space
+        const head = scan.slice(0, 350);
+        const p = Math.max(head.lastIndexOf(","), head.lastIndexOf(";"), head.lastIndexOf(":"));
+        cut = soft > 0 ? soft : p > 0 ? p + 1 : head.lastIndexOf(" ") > 0 ? head.lastIndexOf(" ") + 1 : 350;
+      }
+      if (cut < 0) {
+        if (fence > 0) cut = fence;              // speak what comes before the drawing
+        else if (final) cut = rest.length;
+        else return;
+      }
+      say(rest.slice(0, cut));
+      taken += cut;
+      first = false;
+    }
+  };
+  return { feed: (t) => { acc += t; take(false); }, end: () => { take(true); ended = true; check(); } };
+}
+
+// A piece of speech → parts, a new one at each sentence carrying a cue, with the cues it carries (its words keep them;
+// speakable() drops them).
+function cueSplit(text) {
+  const out = [], sents = [];
+  // Sentences with the space after each (no lookbehind: older iPhone Safari can't even parse one).
+  const re = /[.!?]["')\]]*\s+|\n+/g;
+  let last = 0;
+  for (let m; (m = re.exec(text));) { sents.push(text.slice(last, re.lastIndex)); last = re.lastIndex; }
+  if (last < text.length || !sents.length) sents.push(text.slice(last));
+  for (const sent of sents) {
+    const cues = [...sent.matchAll(CUE)].map((m) => m[1]);
+    if (!out.length || (cues.length && out[out.length - 1].text.trim())) out.push({ text: sent, cues });
+    else { const last = out[out.length - 1]; last.text += sent; last.cues.push(...cues); }
+  }
+  return out;
+}
+
+// Markdown → words to say. The voice prompt asks for plain sentences; this catches whatever slips through.
+const TEX_WORDS = { cdot: "times", times: "times", le: "at most", leq: "at most", ge: "at least", geq: "at least",
+  neq: "not equal to", approx: "about", to: "to", rightarrow: "to", infty: "infinity", sqrt: "root of", pm: "plus or minus" };
+const TEX_DROP = /^(left|right|text|textbf|mathrm|mathbf|mathit|mathcal|operatorname|displaystyle|quad|qquad|big|Big|bigg|Bigg)$/;
+function speakable(md) {
+  return String(md)
+    .replace(/(```|~~~)[\s\S]*?(\1|$)/g, " ")
+    .replace(CUE, " ")
+    .replace(/<\/?[a-zA-Z][^>]*>/g, " ")
+    .replace(/\|\|[\s\S]*?\|\|/g, " ")
+    .replace(/\[\[([^\]]+)\]\]/g, "$1")
+    .replace(/\[[A-Za-z&0-9-]+ s\d+(?:\s*[–-]\s*s?\d+)?\]/g, " ")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/\$+([^$]*)\$+/g, "$1")
+    .replace(/\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, " $1 over $2 ")
+    .replace(/\^\{?2\}?(?![\d}])/g, " squared ")
+    .replace(/\^/g, " to the ")
+    .replace(/\\([a-zA-Z]+)/g, (_, c) => (TEX_DROP.test(c) ? " " : ` ${TEX_WORDS[c] || c} `))
+    .replace(/\\[,;:! ]/g, " ")
+    .replace(/[{}]/g, " ")
+    .replace(/^\s{0,3}(#{1,6}|>|[-*+]|\d+\.)\s+/gm, "")
+    .replace(/[*_`#|\\]/g, "")
+    .replace(/\s+/g, " ").replace(/ ([,.;:!?])/g, "$1").trim();     // "half [#L], four" → "half, four"
+}
+
+async function fetchSpeech(text, signal) {
+  const r = await fetch("/api/voice/speak", { method: "POST", headers: { "Content-Type": "application/json" }, signal,
+    body: JSON.stringify({ text, voice: store.get("voice", ""), speed: store.get("voiceSpeed", 1) }) });
+  return r.ok ? URL.createObjectURL(await r.blob()) : null;
+}
+
+// One <audio> for every answer, unlocked by playing a moment of silence inside a tap: iOS Safari (and autoplay
+// rules elsewhere) only let an element play later if it first played during a user gesture.
+const SILENT_WAV = URL.createObjectURL(new Blob([pcmWav(new Float32Array(800), 8000)], { type: "audio/wav" }));
+function unlockAudio() {
+  if (!VOICE.el) VOICE.el = new Audio();
+  const a = VOICE.el;
+  if (!a.paused) return;
+  a.src = SILENT_WAV;
+  a.play().catch(() => { /* a later play() reports it */ });
+}
+
+// Resolves true when the piece played to the end (or was stopped), false when the browser refused to play it.
+function playUrl(url) {
+  if (!VOICE.el) VOICE.el = new Audio();
+  const a = VOICE.el;
+  return new Promise((res) => {
+    let over = false;
+    const done = (ok) => {
+      if (over) return;
+      over = true;
+      a.onended = a.onerror = a.onpause = null;
+      URL.revokeObjectURL(url);
+      res(ok);
+    };
+    a.src = url;
+    a.onended = () => done(true); a.onerror = () => done(true); a.onpause = () => done(true);
+    a.play().catch((e) => done(!(e && e.name === "NotAllowedError")));
+  });
+}
+
+// Cut in / Stop / leave: abort the answer being written and its speech, and go quiet.
+function stopSpeaking() {
+  VOICE.ctrl?.abort();
+  VOICE.ctrl = null;
+  silence();
+}
+// Go quiet (queued pieces drop out) but let an answer being written finish: the hub saves it to the chat.
+function silence() {
+  VOICE.gen++;
+  endCues();
+  if (VOICE.el && !VOICE.el.paused) VOICE.el.pause();
+  if (["thinking", "speaking"].includes(VOICE.state)) talkSet("idle");
+  else if (VOICE.playBtn) { VOICE.playBtn.textContent = "▶ Play again"; VOICE.playBtn = null; }
+}
+
+// Hold Space to talk while the Talk tab is open (not while typing in a field).
+document.addEventListener("keydown", (e) => {
+  if (e.key !== " " || !APP.talk || APP.tutor !== "open" || !$("#talk-mic") || e.target.closest("input, textarea, select, [contenteditable], .spoiler")) return;
+  e.preventDefault();
+  if (e.repeat || VOICE.spaceHeld) return;
+  VOICE.spaceHeld = true;
+  if (VOICE.state !== "listening") micTap();
+});
+document.addEventListener("keyup", (e) => {
+  if (e.key !== " " || !VOICE.spaceHeld) return;
+  e.preventDefault();
+  VOICE.spaceHeld = false;
+  if (!$("#talk-mic")) return cancelRecording();      // the Talk tab went away while Space was held
+  if (VOICE.state === "listening") finishRecording();
+  else if (VOICE.starting) VOICE.releaseEarly = true;
+});
+
 function showAskedMark() { /* deliberately no marker on the slide */ }
 
 // ------------------------------------------------------------ practice
@@ -1198,6 +1893,7 @@ function restoreStage() {
 function startPracticeInPanel(p) {
   const d = APP.deck;
   if (!d) return;
+  cancelRecording();
   if (APP.session && APP.session.course === d.course && APP.session.step === 1 && ["try", "deck", "yourturn"].includes(p.kind)) {
     setSessionStep(2);
   }
@@ -1605,7 +2301,9 @@ async function showHistory() {
 function showPhoneQr() {
   const qr = qrcode(0, "M"); qr.addData(APP.phoneUrl); qr.make();
   $("#qr-title").textContent = "Open on your phone";
-  $("#qr-text").textContent = "Connect your phone to the same Wi-Fi, then scan this with its camera. Keep this computer on while you use it.";
+  $("#qr-text").textContent = APP.phoneUrl.startsWith("https:")
+    ? "Scan this with your phone's camera. It works on any Wi-Fi or mobile data while this computer is on. Anyone with the link can open the hub, so don't share it."
+    : "Connect your phone to the same Wi-Fi, then scan this with its camera. Keep this computer on while you use it.";
   $("#qr").innerHTML = qr.createSvgTag({ cellSize: 6, margin: 2, scalable: true });
   $("#qr-url").textContent = APP.phoneUrl;
   $("#qr-dlg").showModal();

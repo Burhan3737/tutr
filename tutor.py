@@ -6,6 +6,8 @@ study logic.
 
 Modes
 - chat (explain / example / quiz / map / before / cheatsheet / ask / deeper / brush / side): Markdown answers streamed into the deck's chat
+- voice: a spoken question from the Talk tab, answered in plain spoken sentences (voice_prompt.md) in the same
+  chat; afterwards the tutor's notes on the student (study/tutor-memory.md) are updated in the background
 - practice: a problem written and solved by Claude (structured output); the solution and hints stay
   on the server until the student has tried
 - check: marks the student's work (typed and/or photographed), method first
@@ -13,7 +15,7 @@ Modes
 Every entry point takes `emit(kind, data)`: "status" lines (what Claude is looking at) and, for
 chats, "text" deltas as the answer is written. The server relays them to the browser.
 """
-import json, re, threading, time, uuid
+import json, os, re, threading, time, uuid
 from pathlib import Path
 
 import engine
@@ -280,31 +282,232 @@ def deck_where(cdir, tag):
     return f"[{tag}] \"{d['title']}\" (slides 1–{d['slides']})" if d else f"[{tag}]"
 
 
+# Two questions on one deck can be in flight at once (a voice turn spoken while the last one is still being
+# answered). Both go into the same chat: the first to start a new chat registers it at once (_PENDING until its
+# file is saved), so the second joins it, and the engine runs both on the same client, one after the other.
+# Each turn reloads the chat just before saving and appends to the fresh copy, so neither overwrites the other.
+_DECK_LOCKS = {}            # (course, tag) -> lock around picking/creating the chat and around reload→append→save
+_DECK_LOCKS_LOCK = threading.Lock()
+_PENDING = {}               # chat id -> the new chat's skeleton, until its first answer is saved
+_WARM_IDS = {}              # (course, tag) -> the id a warm-up opened a client for, used by the next new chat
+
+
+def _deck_lock(cdir, tag):
+    with _DECK_LOCKS_LOCK:
+        return _DECK_LOCKS.setdefault((cdir.name, tag), threading.Lock())
+
+
 def chat_turn(cdir, tag, n, mode, question, model, web, emit=None):
     """One tutor answer inside the deck's chat. Returns the saved message and the chat id."""
-    if mode not in CHAT_PROMPTS:
+    if mode not in CHAT_PROMPTS and mode != "voice":
         raise TutorError("Unknown request.", 400)
-    chat_id = S.chat_for(cdir, tag)
-    chat = load_chat(chat_id) if chat_id else None
     label = MODE_LABELS.get(mode) or (f"Brush up: {question.strip()}" if mode == "brush" else question.strip())
     now = time.strftime("%Y-%m-%d %H:%M")
-    new = chat is None
-    if new:     # saved only once Claude has answered
-        chat = {"id": uuid.uuid4().hex[:12], "course": cdir.name, "code": L.course_meta(cdir)[0], "deck": tag,
-                "title": f"{label[:70]} · " + (tag if mode in DECK_MODES else f"s{n}"), "created": now, "messages": []}
-    prompt = CHAT_PROMPTS[mode].format(where=where(cdir, tag, n), question=question.strip(), tag=tag,
-                                       deck=deck_where(cdir, tag),
-                                       style=STYLE.get(L.course_meta(cdir)[0], "this course's quizzes and exams"))
-    r = run_claude(cdir, system_prompt(cdir, tag, web), prompt, model=model, chat_key=(cdir.name, tag, chat["id"]),
-                   session=chat.get("session"), web=web, label=f"chat:{mode}", emit=emit)
-    if new:
-        S.set_chat(cdir, tag, chat["id"])
-    chat["session"] = r["session"]
-    chat["updated"] = now
-    msg = {"role": "a", "mode": mode, "slide": n, "text": r["text"], "ms": r["ms"], "cost": r["cost"], "model": model}
-    chat["messages"] += [{"role": "q", "mode": mode, "slide": n, "text": label}, msg]
-    save_chat(chat)
+    lock = _deck_lock(cdir, tag)
+    with lock:
+        chat_id = S.chat_for(cdir, tag)
+        chat = load_chat(chat_id) if chat_id else None
+        if chat is None and chat_id in _PENDING:       # another turn is starting this chat right now: join it
+            chat = dict(_PENDING[chat_id])
+        created = chat is None
+        if created:     # the file is saved only once Claude has answered
+            chat = {"id": _WARM_IDS.pop((cdir.name, tag), None) or uuid.uuid4().hex[:12], "course": cdir.name,
+                    "code": L.course_meta(cdir)[0], "deck": tag, "created": now, "messages": [],
+                    "title": f"{label[:70]} · " + (tag if mode in DECK_MODES else f"s{n}")}
+            _PENDING[chat["id"]] = dict(chat, messages=[])
+            S.set_chat(cdir, tag, chat["id"])
+    if mode == "voice":
+        prompt = voice_prompt(cdir, where(cdir, tag, n), question.strip())
+    else:
+        prompt = CHAT_PROMPTS[mode].format(where=where(cdir, tag, n), question=question.strip(), tag=tag,
+                                           deck=deck_where(cdir, tag),
+                                           style=STYLE.get(L.course_meta(cdir)[0], "this course's quizzes and exams"))
+    try:
+        r = run_claude(cdir, system_prompt(cdir, tag, web), prompt, model=model, chat_key=(cdir.name, tag, chat["id"]),
+                       session=chat.get("session"), web=web, label=f"chat:{mode}", emit=emit)
+        msg = {"role": "a", "mode": mode, "slide": n, "text": r["text"], "ms": r["ms"], "cost": r["cost"], "model": model}
+        with lock:      # reload: another turn on this chat may have been saved while this one was answered
+            chat = load_chat(chat["id"]) or chat
+            chat["session"] = r["session"] or chat.get("session")       # the last finished turn's
+            chat["updated"] = time.strftime("%Y-%m-%d %H:%M")
+            chat["messages"] = chat.get("messages", []) + [{"role": "q", "mode": mode, "slide": n, "text": label}, msg]
+            save_chat(chat)
+    finally:
+        if created:
+            with lock:
+                _PENDING.pop(chat["id"], None)
+    if mode == "voice":
+        remember(cdir, tag, n, question.strip(), r["text"])
     return chat, msg
+
+
+def warm_chat(cdir, tag, model, web):
+    """Open the deck's chat client before the first question (the Talk tab opening): no turn is sent. A deck
+    with no chat yet gets its id reserved, so the next new chat uses the client opened here."""
+    with _deck_lock(cdir, tag):
+        chat_id = S.chat_for(cdir, tag)
+        chat = load_chat(chat_id) if chat_id else None
+        if chat is None and chat_id in _PENDING:
+            return      # its first turn is already opening it
+        if chat is None:
+            chat = {"id": _WARM_IDS.setdefault((cdir.name, tag), uuid.uuid4().hex[:12])}
+    engine.open_chat((cdir.name, tag, chat["id"]), cdir, system_prompt(cdir, tag, web),
+                     model=model if model in MODELS else DEFAULT_MODEL, web=web, session=chat.get("session"), log=log)
+
+
+# ---------------------------------------------------------------- voice turns and the tutor's memory
+# The Talk tab sends what speech recognition heard as mode "voice". Its prompt is voice_prompt.md (read on every
+# turn, so it can be tuned without a restart). The voice tutor keeps notes on the student in
+# <course>/study/tutor-memory.md: read into every voice turn, and rewritten after each one by a quick one-off
+# call in the background, so the next answer knows what was asked again and which mistakes were corrected.
+
+VOICE_PROMPT = HERE / "voice_prompt.md"
+MEMORY_MODEL = "claude-haiku-4-5"
+MEMORY_TITLE = "# What your tutor remembers"
+MEMORY_HEAD = MEMORY_TITLE + "\n\n_Kept by the Study Hub's voice tutor after each spoken question. Edit or delete anything._\n\n"
+MEMORY_SECTIONS = ("About me", "Questions I keep asking", "Mistakes I've corrected", "Still shaky")
+_MEMORY_LOCKS = {}
+_MEMORY_LOCKS_LOCK = threading.Lock()
+
+
+def memory_file(cdir):
+    return cdir / "study" / "tutor-memory.md"
+
+
+def _read_memory(cdir):
+    """(the file's text, its mtime) — ("", None) when there's no file yet."""
+    f = memory_file(cdir)
+    try:
+        return f.read_text(encoding="utf-8", errors="replace").strip(), f.stat().st_mtime_ns
+    except FileNotFoundError:
+        return "", None
+
+
+def memory_text(cdir, text=None):
+    """The notes without the file's title and intro line (from the first "## " heading on)."""
+    text = _read_memory(cdir)[0] if text is None else text
+    m = re.search(r"^## ", text, re.M)
+    return text[m.start():].strip() if text.startswith(MEMORY_TITLE) and m else text
+
+
+def known_mistakes(cdir, limit=3000):
+    """Weak topics and the error log from progress.md (marked mocks), for the voice tutor to steer by."""
+    f = cdir / "study" / "progress.md"
+    if not f.is_file():
+        return ""
+    text = f.read_text(encoding="utf-8")
+    out = [f"### {h}\n{L.section(text, h).strip()}" for h in ("Weak topics", "Error log") if L.section(text, h).strip()]
+    return "\n\n".join(out)[:limit]
+
+
+def voice_prompt(cdir, where_, question):
+    t = re.sub(r"<!--.*?-->\s*", "", VOICE_PROMPT.read_text(encoding="utf-8"), flags=re.S).strip()
+    fill = {"where": where_, "question": question, "memory": memory_text(cdir) or "(nothing yet: this is a new student)",
+            "mistakes": known_mistakes(cdir) or "(none recorded yet)"}
+    # Plain replacement, not str.format: the file is edited by hand and may contain other braces.
+    return re.sub(r"\{(where|question|memory|mistakes)\}", lambda m: fill[m.group(1)], t)
+
+
+MEMORY_SCHEMA = {"type": "object", "properties": {
+    "changed": {"type": "boolean", "description": "False only if the exchange adds nothing to the notebook."},
+    "memory": {"type": "string", "description": "The whole updated notebook as Markdown, starting with "
+                                                "'## About me'; not a summary of the exchange."}},
+    "required": ["changed", "memory"], "additionalProperties": False}
+MEMORY_SYSTEM = """You keep a tutor's private notebook about one student. Answer only with the structured output;
+don't open any files."""
+MEMORY_PROMPT = """Today is {today}. Here is the notebook so far:
+
+<notebook>
+{memory}
+</notebook>
+
+Here is the latest spoken exchange, on deck [{tag}] slide {n}. The question came through speech recognition,
+so ignore misheard words.
+
+<student>{question}</student>
+<tutor>{answer}</tutor>
+{hint}
+Update the notebook from this exchange. Return the complete notebook as Markdown starting with these four
+sections, in this order, each a short bullet list (a section with nothing in it says "- (nothing yet)"):
+
+## About me
+How this student likes things explained, what they already know well, what they're aiming for. Only from
+something the student explicitly said about themselves or their preferences ("I'm a visual learner", "I did
+economics in high school"). Never infer it from what they asked.
+## Questions I keep asking
+One concept per line, by concept rather than word for word, with a count and the last date, e.g.
+"- When demand counts as elastic (3 times, last {today}, [S&D-3])". If this exchange asks about a
+concept already listed, raise its count and date instead of adding a line. Count only the same concept: "how
+demand slopes down", "what shifts the demand curve" and "why demand slopes down" are three lines, not one.
+## Mistakes I've corrected
+"- Thought X, actually Y ([{tag}])". If the student states something wrong and the tutor corrects it ("Not
+quite", "Actually", "No, ..."), it MUST go here and "changed" must be true; if it's already listed, add
+"(again, {today})". A plain question with no wrong claim in it is not a mistake.
+## Still shaky
+Every concept asked about 3 or more times, and every corrected mistake that came back. An item stays under
+Questions I keep asking (with its count) when it's also listed here; don't move it out. Remove an item from
+here once later exchanges show they've got it.
+
+Rules:
+- Record only what this exchange and the notebook show; never invent.
+- Deck references are the deck tag in square brackets, exactly as given: [{tag}].
+- Plain words; no maths symbols or formulas needed.
+- The student may edit this notebook. Keep every line they wrote themselves as it is, and keep any other "## "
+  section they added, word for word, after the four sections.
+- Keep the whole notebook under 400 words; drop the oldest one-off questions first.
+- "changed" is false only if the exchange adds nothing at all (then return the notebook unchanged). A new or
+  repeated question, or a corrected mistake, is always a change."""
+# An answer that opens like this corrected the student: the memory prompt is told so (Haiku missed it otherwise).
+CORRECTION = re.compile(r"^\W*(not quite|actually|no[,.!]|nope|that's not|that is not|that isn't|not really|"
+                        r"close,? but)", re.I)
+MEMORY_HINT = """
+Note: the tutor's answer opens with a correction, so the student said something wrong. Record it under
+Mistakes I've corrected.
+"""
+MEMORY_RETRY = """
+
+Your last reply put a summary in "memory". It must be the whole notebook itself: the four "## " sections with
+their bullets, as described above."""
+
+
+def remember(cdir, tag, n, question, answer):
+    """Update the tutor's notes on the student after a voice turn, in the background (nobody waits for it)."""
+    def work():
+        with _MEMORY_LOCKS_LOCK:
+            lock = _MEMORY_LOCKS.setdefault(cdir.name, threading.Lock())
+        with lock:      # one update at a time per course, each starting from the last one's result
+            f = memory_file(cdir)
+            tmp = f.with_suffix(".md.tmp")
+            try:
+                text, mtime = _read_memory(cdir)
+                hint = MEMORY_HINT if CORRECTION.match(answer.replace("’", "'")) else ""
+                prompt = MEMORY_PROMPT.format(today=time.strftime("%Y-%m-%d"), tag=tag, n=n, hint=hint,
+                                              memory=memory_text(cdir, text) or "(empty: this is the first exchange)",
+                                              question=question[:2000], answer=answer[:4000])
+                for attempt in (1, 2):      # Haiku now and then returns a summary instead of the notebook: once more
+                    r = run_claude(cdir, MEMORY_SYSTEM, prompt + (MEMORY_RETRY if attempt == 2 else ""),
+                                   model=MEMORY_MODEL, schema=MEMORY_SCHEMA, web=False, label="memory")
+                    body = str(r["json"].get("memory", "")).strip()
+                    if not r["json"].get("changed"):
+                        return log(f"memory unchanged course={cdir.name}")
+                    # the four sections must be there (the student may have added more); "I’ve" counts as "I've"
+                    heads = {re.sub(r"\s+", " ", h).strip(" :").replace("’", "'").lower()
+                             for h in re.findall(r"^##[ \t]+(.+)$", body, re.M)}
+                    missing = [sec for sec in MEMORY_SECTIONS if sec.lower() not in heads]
+                    if not missing:
+                        break
+                    log(f"memory rejected: missing sections {missing} attempt={attempt} course={cdir.name}")
+                else:
+                    return
+                tmp.write_text(MEMORY_HEAD + body + "\n", encoding="utf-8")
+                if _read_memory(cdir)[1] != mtime:     # the student edited it meanwhile: their edit wins
+                    tmp.unlink()
+                    return log(f"memory skipped: edited meanwhile course={cdir.name}")
+                os.replace(tmp, f)
+            except Exception as e:      # the notes just stay as they were
+                log(f"memory update failed: {type(e).__name__}: {str(e)[:200]}")
+                tmp.unlink(missing_ok=True)
+    threading.Thread(target=work, daemon=True).start()
 
 
 # ---------------------------------------------------------------- side questions (a term or a selection)

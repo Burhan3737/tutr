@@ -376,6 +376,44 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 .panel-actions { padding: 16px 20px 8px; display: flex; flex-direction: column; gap: 0; }
 .panel-actions .links { display: flex; gap: 12px; flex-wrap: wrap; }
 .thread { flex: 1; min-height: 0; overflow: auto; padding: 8px 20px 16px; }
+/* Type | Talk, and the Talk tab: a canvas for the tutor's drawing, a caption of what it is saying, the mic. */
+.ask-area { border-top: 1px solid var(--line); }
+.ask-area .compose { border-top: 0; padding-top: 8px; }
+.talk-switch { margin: 10px 16px 0; }
+.talk-stage { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; padding: 14px 20px; overflow: auto; }
+.talk-heard { margin: 0; font-size: 14px; color: var(--text-2); }
+.talk-canvas { flex: 1; min-height: 220px; display: grid; place-items: center; padding: 12px; overflow: auto;
+  border: 1px dashed var(--line-strong); border-radius: var(--r); }
+.talk-canvas > * { max-width: 100%; }
+.talk-canvas .diagram { margin: 0; width: 100%; }
+.talk-canvas .mermaid-box svg { display: block; width: 100%; height: auto; max-width: 100% !important; margin: 0 auto; }
+.talk-canvas .svg-box img { width: 100%; height: auto; }
+.talk-canvas .svg-box svg { display: block; width: 100%; height: auto; margin: 0 auto; }
+/* Cues: parts of a drawing appear as they're named; the one being talked about glows and the rest fade back. */
+.talk-canvas .cue-part, .talk-canvas .flowchart-link, .talk-canvas .edgeLabel { transition: opacity .45s var(--ease), filter .3s var(--ease); }
+.talk-canvas .cue-hide { opacity: 0 !important; }
+/* Not a part inside the lit one either: fading it there would muddy the part being talked about. */
+.talk-canvas.cueing .cue-part:not(.cue-on):not(:has(.cue-on)):not(.cue-on *), .talk-canvas.cueing .cue-dim { opacity: .35; }
+.talk-canvas .cue-on { filter: drop-shadow(0 0 2px #e8a317) drop-shadow(0 0 6px #e8a317); }
+.talk-canvas .mermaid-box .cue-on :is(rect, circle, ellipse, polygon, path) { stroke: #e8a317 !important; stroke-width: 3px !important; }
+/* Safari may skip filter on SVG groups: the lit part's outlines turn amber too (the inlined SVG has no inline styles). */
+.talk-canvas .cue-svg :is(.cue-on, .cue-on *):is(rect, circle, ellipse, polygon, path, line, polyline) { stroke: #e8a317; stroke-width: 3px; }
+.talk-canvas .empty { text-align: center; max-width: 260px; }
+.talk-caption { margin: 0; min-height: 3em; font-size: 16px; line-height: 1.5; }
+.talk { display: flex; align-items: center; gap: 14px; padding: 12px 16px 16px; }
+.mic { flex: none; width: 60px; height: 60px; border: 0; border-radius: 50%; background: var(--accent); color: var(--on-accent);
+  font-size: 24px; cursor: pointer; }
+.mic:hover:not(:disabled) { background: var(--accent-hover); }
+.mic.on { background: #c0392b; animation: talk-pulse 1.2s infinite; }
+.mic:disabled { opacity: .45; cursor: default; }
+@keyframes talk-pulse { 0% { box-shadow: 0 0 0 0 rgba(192, 57, 43, .5); } 70% { box-shadow: 0 0 0 14px rgba(192, 57, 43, 0); } 100% { box-shadow: 0 0 0 0 rgba(192, 57, 43, 0); } }
+.talk-main { flex: 1; min-width: 0; }
+.talk-state { margin: 0 0 6px; font-size: 14px; color: var(--text-2); }
+.talk-opts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.talk-opts select { border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); color: var(--text);
+  font: inherit; font-size: 13px; padding: 4px 6px; }
+.talk-opts .link { font-size: 13px; min-height: 30px; }
+@media (prefers-reduced-motion: reduce) { .mic.on { animation: none; } .talk-canvas * { transition: none !important; } }
 .thread .empty { color: var(--text-2); font-size: 13px; }
 /* Your messages: right-aligned bubbles; the tutor's answers stay full width on the left. */
 .msg-q { width: fit-content; max-width: 85%; margin: 20px 0 10px auto; padding: 8px 12px;
@@ -516,7 +554,7 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   .practice { padding: 16px 16px 0; }
   .check-row { position: sticky; bottom: 0; background: var(--surface); padding: 8px 0 calc(8px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); }
   pre { white-space: pre-wrap; font-size: 13px; }
-  .stage { justify-content: flex-end; }
+  .stage { justify-content: center; }
   .stage-foot { order: 2; }
   .tutor { box-shadow: none; }
   .tutor.open, .tutor.focus { box-shadow: var(--shadow-sheet); }
@@ -535,6 +573,45 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 .mob-arrows { display: none !important; gap: 4px; align-items: center; position: absolute; left: 50%; transform: translateX(-50%); }
 .mob-arrows button { width: 44px; height: 44px; border: 0; background: none; font-size: 22px; color: var(--text-2); }
 @media (max-width: 760px) { .mob-arrows ~ .counter { visibility: hidden; } }
+
+/* ---------- phone, Ask open: the slide stays on top, the chat fills the rest of the screen below it */
+@media (max-width: 760px) {
+  .viewer.ask-open .stage { flex: none; max-height: 42%; }
+  .viewer.ask-open .stage-foot { height: 36px; }
+  .viewer.ask-open .stage-foot .chip { height: 26px; }
+  .viewer.ask-open .mob-arrows button { height: 36px; }
+  .viewer.ask-open .tutor.open { position: relative; top: auto; flex: 1 1 0; min-height: 0; height: auto; z-index: auto;
+    border-radius: 0; box-shadow: none; }
+  .viewer.ask-open .panel { flex: 1; min-height: 0; height: auto; }
+  /* Header: just the tools, on one line; scrolls sideways if they don't fit, with × always in reach. */
+  .viewer.ask-open .panel-head { min-height: 38px; padding: 0 0 0 8px; gap: 2px; overflow-x: auto; scrollbar-width: none;
+    justify-content: flex-end; }
+  .viewer.ask-open .panel-head::-webkit-scrollbar { display: none; }
+  .viewer.ask-open .panel-head h2, .viewer.ask-open #tutor-where { display: none; }
+  .viewer.ask-open .panel-head .new-chat { white-space: nowrap; flex: none; min-height: 36px; font-size: 13px; }
+  .viewer.ask-open .panel-head .icon-btn { height: 36px; }
+  .viewer.ask-open .panel-head > .icon-btn:last-child { position: sticky; right: 0; background: var(--surface); }
+  /* Actions: one sideways-scrolling row instead of a stack. */
+  .viewer.ask-open .panel-actions { flex-direction: row; align-items: center; gap: 8px; padding: 6px 12px; overflow-x: auto;
+    scrollbar-width: none; border-bottom: 1px solid var(--line); }
+  .viewer.ask-open .panel-actions::-webkit-scrollbar { display: none; }
+  .viewer.ask-open .scope-switch { flex: none; margin: 0; }
+  .viewer.ask-open .scope-switch button { padding: 0 10px; white-space: nowrap; min-height: 28px; }
+  .viewer.ask-open .panel-actions .btn.block { width: auto; flex: none; min-height: 34px; padding: 0 14px; font-size: 14px; }
+  .viewer.ask-open .panel-actions .links { flex-wrap: nowrap; flex: none; gap: 2px; }
+  .viewer.ask-open .panel-actions .link { min-height: 34px; white-space: nowrap; font-size: 14px; padding: 0 6px; }
+  .viewer.ask-open .thread { padding: 4px 14px 12px; }
+  .viewer.ask-open .chat-bar { top: -4px; margin: 0 -14px; padding: 2px 8px; }
+  .viewer.ask-open .msg-a { font-size: 15px; line-height: 24px; }
+  .viewer.ask-open .msg-q { max-width: 90%; }
+  .viewer.ask-open .compose { padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); }
+  /* 16px stops iOS zooming the page when the box is focused. */
+  .viewer.ask-open .compose textarea { font-size: 16px; min-height: 44px; padding: 10px 12px; }
+  .viewer.ask-open .compose .btn { min-height: 44px; }
+  .viewer.ask-open .side-sheet { height: 85%; }
+  /* Reading view still takes the whole screen. */
+  .viewer.ask-open.reading .stage { display: none; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation-duration: .001s !important; }
