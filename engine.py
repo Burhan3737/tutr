@@ -5,6 +5,8 @@ login — no API key.
   first question starts it (about 1 s); follow-ups reuse it, so there is no start-up and the topic's
   slides stay in the prompt cache. Clients idle for IDLE_SECONDS are closed (each holds ~200 MB); the
   next question reopens the same conversation with `resume`.
+- Side questions fork the deck's chat (`fork_session`): they start from a copy of its conversation, so
+  they know what was said, and nothing they say is added to the chat itself.
 - Practice problems and marking are one-off queries, each with its own JSON schema (output_format).
 - Answers stream: text arrives as it's written, and every file or web lookup becomes a status line
   ("Reading the S&D-2 slides…"), via the `emit(kind, data)` callback.
@@ -116,13 +118,13 @@ def _confine(root):
     return hook
 
 
-def _options(cdir, system, model, web, *, resume=None, schema=None, partial=True):
+def _options(cdir, system, model, web, *, resume=None, fork=False, schema=None, partial=True):
     tools = ["Read", "Grep", "Glob"] + (["WebSearch", "WebFetch"] if web else [])
     return ClaudeAgentOptions(
         model=model, cwd=str(cdir), tools=tools, allowed_tools=["WebSearch", "WebFetch"] if web else [],
         max_turns=MAX_TURNS, strict_mcp_config=True, setting_sources=["local"],
         system_prompt={"type": "file", "path": str(prompt_file(system))},
-        include_partial_messages=partial, resume=resume,
+        include_partial_messages=partial, resume=resume, fork_session=bool(fork and resume),
         output_format={"type": "json_schema", "schema": schema} if schema else None,
         extra_args={"disable-slash-commands": None},
         hooks={"PreToolUse": [HookMatcher(matcher="Read|Grep|Glob", hooks=[_confine(cdir)])]},
@@ -209,7 +211,7 @@ async def _reaper():
                 await _close(key)
 
 
-async def _chat(key, cdir, system, prompt, model, web, session, emit):
+async def _chat(key, cdir, system, prompt, model, web, session, emit, fork=False):
     sig = (hashlib.sha1(system.encode("utf-8")).hexdigest(), model, web)
     c = _CHATS.get(key)
     if c and c.sig != sig:          # the slides, model or web setting changed: reopen the same conversation
@@ -217,7 +219,7 @@ async def _chat(key, cdir, system, prompt, model, web, session, emit):
         c = None
     for attempt in (1, 2):
         if c is None:
-            client = ClaudeSDKClient(_options(cdir, system, model, web, resume=session))
+            client = ClaudeSDKClient(_options(cdir, system, model, web, resume=session, fork=fork))
             await client.connect()
             c = _CHATS[key] = _Chat(client, sig)
         try:
@@ -246,14 +248,17 @@ async def _one_shot(cdir, system, prompt, model, web, schema, emit):
 
 # ---------------------------------------------------------------- the one entry point
 
-def run(cdir, system, prompt, *, model, web=True, schema=None, chat_key=None, session=None, emit=None, log=None, label=""):
+def run(cdir, system, prompt, *, model, web=True, schema=None, chat_key=None, session=None, fork=False, emit=None,
+        log=None, label=""):
     """Ask Claude. chat_key set → a turn in that chat's open client; otherwise a one-off query.
+    fork → start from a copy of `session` (a side question): the original conversation is left untouched.
     Returns {"text", "json", "session", "ms", "cost"}; raises EngineError."""
     emit = emit or (lambda kind, data: None)
     t0 = time.time()
     if not SDK:
-        return _run_cli(cdir, system, prompt, model=model, web=web, schema=schema, session=session, log=log, label=label)
-    coro = (_chat(chat_key, cdir, system, prompt, model, web, session, emit) if chat_key
+        return _run_cli(cdir, system, prompt, model=model, web=web, schema=schema, session=session, fork=fork, log=log,
+                        label=label)
+    coro = (_chat(chat_key, cdir, system, prompt, model, web, session, emit, fork) if chat_key
             else _one_shot(cdir, system, prompt, model, web, schema, emit))
     fut = asyncio.run_coroutine_threadsafe(asyncio.wait_for(coro, TIMEOUT), _loop())
     try:
@@ -303,7 +308,7 @@ def close_chat(chat_key):
 
 # ---------------------------------------------------------------- fallback: one CLI process per request
 
-def _run_cli(cdir, system, prompt, *, model, web, schema, session, log, label):
+def _run_cli(cdir, system, prompt, *, model, web, schema, session, log, label, fork=False):
     tools = "Read,Grep,Glob" + (",WebSearch,WebFetch" if web else "")
     cmd = ["claude", "-p", "--output-format", "json", "--model", model, "--tools", tools,
            "--max-turns", str(MAX_TURNS), "--strict-mcp-config", "--disable-slash-commands",
@@ -311,7 +316,7 @@ def _run_cli(cdir, system, prompt, *, model, web, schema, session, log, label):
     if web:
         cmd += ["--allowedTools", "WebSearch", "WebFetch"]
     if session:
-        cmd += ["--resume", session]
+        cmd += ["--resume", session] + (["--fork-session"] if fork else [])
     if schema:
         cmd += ["--json-schema", json.dumps(schema)]
     t0 = time.time()

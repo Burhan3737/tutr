@@ -5,7 +5,7 @@ deck, streaming, the course-folder check) lives in engine.py. This file holds th
 study logic.
 
 Modes
-- chat (explain / example / quiz / map / before / cheatsheet / ask / deeper / brush = "Explain more"): Markdown answers streamed into the deck's chat
+- chat (explain / example / quiz / map / before / cheatsheet / ask / deeper / brush / side): Markdown answers streamed into the deck's chat
 - practice: a problem written and solved by Claude (structured output); the solution and hints stay
   on the server until the student has tried
 - check: marks the student's work (typed and/or photographed), method first
@@ -41,9 +41,10 @@ def log(msg):
 TutorError = engine.EngineError
 
 
-def run_claude(cdir, system, prompt, *, model, session=None, schema=None, web=True, label="", chat_key=None, emit=None):
+def run_claude(cdir, system, prompt, *, model, session=None, fork=False, schema=None, web=True, label="", chat_key=None,
+               emit=None):
     return engine.run(cdir, system, prompt, model=model if model in MODELS else DEFAULT_MODEL, web=web, schema=schema,
-                      chat_key=chat_key, session=session, emit=emit, log=log,
+                      chat_key=chat_key, session=session, fork=fork, emit=emit, log=log,
                       label=f"{label} course={L.course_meta(cdir)[0]}")
 
 
@@ -70,18 +71,14 @@ Style:
 - Follow the slides: their method, notation and named quantities (if the slides call the price P, so do
   you). Never skip a step, even one the slides skip; in an example every number must be traceable to where it
   came from, so the student is never left to assume anything.
-- Need to know: the rule behind a step, a prerequisite, or a symbol or term the slides use without defining goes
-  in a collapsed section, never inline, so the main text stays short. Exactly this HTML (the blank lines matter):
-  <details class="ntk"><summary>Need to know: NAME — WHY IT'S NEEDED HERE (a few words) [TAG sN]</summary>
-
-  The rule or definition (KaTeX), then one tiny example with numbers.
-
-  *Check:* one short question ||its answer||
-
-  </details>
-  [TAG sN] is where it's taught (any deck); write (Beyond slides) instead if the slides never teach it. On a
-  step of a worked solution, keep it to the rule in 1–2 sentences, no check, right after the step (inside a
-  numbered list, indent the whole section 3 spaces). Use one only where it genuinely helps, at most one per step.
+- Terms to look up: assume the student is meeting all of this for the first time. Wrap every technical term,
+  symbol, piece of notation, rule or prerequisite that appears in the student's question or in your answer, and
+  that your text doesn't already define in plain words, in double square brackets: [[opportunity cost]],
+  [[marginal cost]], [[$\\mu$]], [[percentage change]]. The student taps one to have it explained on the side, so mark
+  generously, with no limit, but only its first mention in each answer, and never inside headings, code,
+  drawings or $$...$$ blocks (for a symbol, wrap the inline math: [[$x_i$]]). Don't explain a marked term
+  inline beyond what the sentence needs. In a worked solution, name the rule behind a step as a marked term,
+  e.g. "(by [[solving a linear equation]])".
 - Markdown. Math in KaTeX: $...$ inline, $$...$$ display. No headings bigger than ####.
 - Drawings: draw whenever a picture genuinely helps understanding, and whenever the student asks for a
   visual — then use as many as the explanation needs (e.g. one per step of a process). Never draw for
@@ -134,51 +131,70 @@ def where(cdir, tag, n):
 # ---------------------------------------------------------------- chat (explain / example / ask / deeper)
 
 CHAT_PROMPTS = {
-    "explain": """Explain the idea on slide {where} simply. If that slide is a title, outline or admin slide, explain
-the main idea of the slides around it instead. Use exactly this shape, about 190 words in total, not counting
-the Need to know sections:
+    "explain": """Tutor the student through the idea on slide {where} so they actually understand it, as a good tutor
+would at a whiteboard. If that slide is a title, outline or admin slide, use the main idea of the slides around
+it. Teach through ONE concrete example and a picture: the example comes first, and the general rule is drawn out
+of it afterwards. This shape, about 350 words plus the drawing:
 
-<the idea in plain English, 2–3 sentences, no jargon before it's explained>
+**The problem:** <1–2 sentences in everyday words: what goal or question this slide answers and why it matters.
+Use a simple real-life situation if one captures it.>
 
-**Why it works:** <1–3 sentences>
+**Let's work through it:** <one small, concrete example with tiny numbers: the slide's own example if it is
+small enough, otherwise one like it. Start from the raw input; if the slide uses a table, matrix or count, show
+how it is built from that input. Then short numbered steps, each saying what we are about to do and why, doing
+it, and saying what the result tells us. Every number is either given or computed in front of the student; no
+number from the slide appears without where it comes from and what it means.>
 
-**Use it when:** <the clues in a problem that tell you to reach for this, as a short list (at most 3)>
+<one drawing of that same example, labelled with its numbers: the state at each step of a process or
+calculation (```svg, or a table with one row per step), a structure or flow (```mermaid), or a curve
+(```plot). For a history or motivation slide, a simple timeline or flow.>
 
-**Example:** <one tiny example with numbers, 2–3 lines>
+**So the idea is:** <the general rule in 2–3 plain sentences, pointing back at the example ("that's why step 3
+started over"). Spell out every abbreviation at first use; the one or two terms the slide rests on get a
+plain-words meaning here, not only a marked term. Then the slide's formula or definition in KaTeX if it has
+one, with each symbol tied to its value in the example.>
 
-**Common trap:** <one line: the mistake students make with this on exams>
+**Why it works:** <1–2 sentences of intuition>
 
-**Used in:** <one line: where this is used in real systems or real work>
+**Spot it / watch out:** <one line: the clue in a problem that calls for this · the mistake that costs marks>
 
-<one Need to know section (with its check) for each prerequisite, rule or undefined symbol the slide assumes,
-at most 3; none if it assumes nothing>""",
+**Check yourself:** <one short question on a slightly changed version of the example (one number or condition
+changed), with the answer hidden in double bars on the same line: ||Answer: …||>
+
+**Need to know:** <the prerequisites, rules and undefined symbols the slide assumes, as marked terms separated
+by " · " (e.g. [[percentage change]] · [[slope of a line]]); leave this line out if it assumes nothing>
+
+If the slide compares several methods, run the same tiny example through each one (a table, one row per
+method) so the differences show in the numbers.""",
     "example": """Show ONE worked example of the idea on slide {where}. If that slide is a title, outline or admin slide,
 use the main idea of the slides around it. Pick a problem like the slides' examples but not identical.
-Shape: the problem in one or two lines, then numbered steps, each saying what it does (the rule behind a
-step goes in a Need to know section), then the answer in bold. At most about 200 words, not counting Need
-to know sections.""",
+Shape: the problem in one or two lines, then numbered steps, each saying what it does and naming its rule
+as a marked term, then the answer in bold. At most about 200 words.""",
     "ask": """(The student is looking at slide {where}.)
 
 {question}""",
     "deeper": """Go deeper on your last answer: the fuller explanation, the reasoning behind each step, and one more
 example if it helps. Up to about 250 words; if more is needed, stop and offer to continue.""",
-    "brush": """The student opened "Need to know: {question}" and wants it explained more. Teach just that, briefly:
-the rule(s), one tiny example each, and how it shows up on slide {where}. About 150 words.""",
+    "brush": """The student wants to brush up on a prerequisite: {question}. Teach just that, briefly: the rule(s),
+one tiny example each, and how it shows up on slide {where}. About 150 words.""",
     "before": """Before you start slide {where}: what the student must already know to follow it. If that slide is a
-title, outline or admin slide, use the slides around it. Don't explain the slide itself. This shape:
+title, outline or admin slide, use the slides around it. Don't explain the slide itself or the terms (the
+student taps a term to have it explained). This shape:
 
 **This slide:** <one line, plain English: what the slide is about>
 
-<2–4 Need to know sections, each with its check, the most basic first: the prerequisites, rules and any
-symbols or terms the slide uses without defining>""",
-    "before_deck": """Before you start the whole deck {deck}: what the student must already know to follow it. Don't
-explain the deck itself. This shape:
+**Need to know:**
+<2–5 bullets, the most basic first: the prerequisites, rules and any symbols or terms the slide uses without
+defining, each as "- [[term]] — why it's needed here, a few words [TAG sN where it's taught, or (Beyond slides)]">""",
+    "before_deck": """Before you start the whole deck {deck}: what the student must already know to follow it. Don't explain
+the deck itself or the terms (the student taps a term to have it explained). This shape:
 
 **This deck:** <one line, plain English: what the deck is about>
 
-<up to 6 Need to know sections, each with its check, the most basic first: the prerequisites, rules and
-symbols the deck relies on but doesn't teach. In each WHY, name the slides that rely on it, e.g. "for
-[{tag} s4–s9]", followed as usual by where it's taught>""",
+**Need to know:**
+<up to 8 bullets, the most basic first: the prerequisites, rules and symbols the deck relies on but doesn't
+teach, each as "- [[term]] — for [{tag} sA–sB] (the slides that rely on it) · [TAG sN where it's taught, or
+(Beyond slides)]">""",
     "cheatsheet_deck": """Make a cheat sheet for the whole deck {deck}: what the student would copy onto a hand-written sheet
 for this course's assessments ({style}; CLAUDE.md has the format and aids). Terse fragments, not sentences.
 Cite slides. This shape:
@@ -195,8 +211,7 @@ Cite slides. This shape:
 #### Don't forget
 <2–3 one-liners on what costs marks>
 
-When the rule behind a shortcut isn't obvious, put it in a Need to know section (no check). HARD LIMIT 350
-words, not counting Need to know sections.""",
+Name the rule behind a shortcut as a marked term rather than explaining it. HARD LIMIT 350 words.""",
     "quiz": """Quiz prep for slide {where}, for this course's assessments ({style}). If it's a title or admin slide,
 use the slides around it. About 150 words, this shape:
 
@@ -233,8 +248,8 @@ price from two equations">
 HARD LIMIT 180 words outside the diagram. Bold names and tags only; no other prose.""",
     "example_deck": """Show ONE worked example that uses the central method of the whole deck {deck} from start to finish (the
 kind of problem the deck builds up to). The problem in one or two lines, then numbered steps, each saying
-what it does and citing the slide it comes from (the rule behind a step goes in a Need to know section), then
-the answer in bold. At most about 250 words, not counting Need to know sections.""",
+what it does, naming its rule as a marked term and citing the slide it comes from, then the answer in bold.
+At most about 250 words.""",
     "quiz_deck": """Make a quiz-prep sheet for the whole deck {deck}, shaped by this course's assessments ({style}; see
 CLAUDE.md for the format and aids). Cite slides. HARD LIMIT 400 words — terse bullets, no filler. This shape:
 
@@ -271,7 +286,7 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None):
         raise TutorError("Unknown request.", 400)
     chat_id = S.chat_for(cdir, tag)
     chat = load_chat(chat_id) if chat_id else None
-    label = MODE_LABELS.get(mode) or (f"Explain more: {question.strip()}" if mode == "brush" else question.strip())
+    label = MODE_LABELS.get(mode) or (f"Brush up: {question.strip()}" if mode == "brush" else question.strip())
     now = time.strftime("%Y-%m-%d %H:%M")
     new = chat is None
     if new:     # saved only once Claude has answered
@@ -290,6 +305,68 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None):
     chat["messages"] += [{"role": "q", "mode": mode, "slide": n, "text": label}, msg]
     save_chat(chat)
     return chat, msg
+
+
+# ---------------------------------------------------------------- side questions (a term or a selection)
+# A side question forks the deck's chat: it starts from a copy of the conversation, so it knows what was said,
+# and nothing it says is added to the chat. Follow-ups continue the fork. Nothing is saved; closing ends it.
+
+SIDE_TERM = """Side question: the student tapped "{anchor}" in your answer, in this passage:
+
+> {para}
+
+(They are on slide {where}.) Explain just that, as a short aside: what it is (the rule or definition, in KaTeX
+where it's math), one tiny example with numbers, and in one line how it shows up here. About 120 words. Mark
+terms as usual."""
+SIDE_SELECTION = """Side question about this part of your answer (the student is on slide {where}):
+
+> {anchor}
+
+{question}
+
+Answer just that, briefly: about 150 words unless they ask for more. Mark terms as usual."""
+_SIDES = {}         # side id -> {"key", "session", "tag"}
+_SIDES_LOCK = threading.Lock()
+
+
+def _quote(t, limit):
+    t = " ".join(str(t or "").split())
+    return t if len(t) <= limit else t[:limit].rsplit(" ", 1)[0] + " …"
+
+
+def side_turn(cdir, tag, n, side_id, chat_id, anchor, para, question, model, web, emit=None):
+    """One answer in a side question. side_id None → a new side question (forking chat_id's conversation)."""
+    with _SIDES_LOCK:
+        side = _SIDES.get(side_id) if side_id else None
+    if side_id and not side:
+        raise TutorError("That side question was closed. Ask it again.", 410)
+    if side:
+        prompt, session, fork = question.strip(), side["session"], False
+    else:
+        if not anchor.strip():
+            raise TutorError("Nothing to ask about.", 400)
+        chat = load_chat(chat_id) if chat_id else None
+        if chat and (chat.get("course") != cdir.name or chat.get("deck") != tag):
+            chat = None
+        side_id = uuid.uuid4().hex[:12]
+        side = {"key": (cdir.name, tag, f"side-{side_id}"), "session": None, "tag": tag}
+        fill = dict(anchor=_quote(anchor, 1500), para=_quote(para, 600), where=where(cdir, tag, n), question=question.strip())
+        prompt = (SIDE_SELECTION if question.strip() else SIDE_TERM).format(**fill)
+        session = chat.get("session") if chat else None
+        fork = bool(session)
+    r = run_claude(cdir, system_prompt(cdir, tag, web), prompt, model=model, chat_key=side["key"], session=session,
+                   fork=fork, web=web, label="side", emit=emit)
+    side["session"] = r["session"]
+    with _SIDES_LOCK:
+        _SIDES[side_id] = side
+    return side_id, {"role": "a", "text": r["text"], "ms": r["ms"], "cost": r["cost"], "model": model}
+
+
+def side_close(side_id):
+    with _SIDES_LOCK:
+        side = _SIDES.pop(side_id, None)
+    if side:
+        engine.close_chat(side["key"])
 
 
 # ---------------------------------------------------------------- saved chats

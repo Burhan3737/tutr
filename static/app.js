@@ -88,6 +88,9 @@ const STEPS = [["review", "Review"], ["new", "New slides"], ["practise", "Practi
 function renderMd(md, courseId) {
   const code = [], math = [];
   let src = String(md || "").replace(/```[\s\S]*?```|`[^`\n]+`/g, (m) => { code.push(m); return `CODETOKEN${code.length - 1}X`; });
+  // [[term]] becomes a button that explains the term in a side question (openSide), its maths still rendered.
+  const terms = [];
+  src = src.replace(/\[\[([^[\]\n]{1,120}?)\]\]/g, (_, t) => { terms.push(t); return `TERMOPEN${terms.length - 1}X${t}TERMCLOSEX`; });
   src = src.replace(/\$\$([\s\S]+?)\$\$/g, (_, t) => { math.push([t, true]); return `MATHTOKEN${math.length - 1}X`; });
   src = src.replace(/(^|[^\\$])\$([^\s$](?:[^$\n]*?[^\s$])?)\$(?!\d)/g, (_, pre, t) => { math.push([t, false]); return `${pre}MATHTOKEN${math.length - 1}X`; });
   // ||hidden answer|| becomes a blurred span you click to reveal (works inside lists and around maths).
@@ -99,6 +102,9 @@ function renderMd(md, courseId) {
     const [tex, display] = math[+i];
     try { return katex.renderToString(tex, { displayMode: display, throwOnError: false }); } catch { return esc(tex); }
   });
+  if (terms.length) box.innerHTML = box.innerHTML
+    .replace(/TERMOPEN(\d+)X/g, (_, i) => `<button class="term" type="button" title="Explain this on the side" data-term="${esc(terms[+i])}">`)
+    .replace(/TERMCLOSEX/g, "</button>");
   const openFence = (String(md || "").match(/^ {0,3}```/gm) || []).length % 2 === 1;   // still streaming in
   enhanceVisuals(box, openFence);   // ```mermaid / ```svg / ```plot become drawings (visuals.js)
   box.querySelectorAll("a[href]").forEach((a) => {
@@ -146,6 +152,11 @@ function linkCitations(root, courseId) {
 document.addEventListener("click", (e) => {
   const sp = e.target.closest(".spoiler");
   if (sp) { sp.classList.add("shown"); return; }
+  const term = e.target.closest("button.term");
+  if (term && !term.closest("#print-root")) { openSide({ anchor: term.dataset.term, para: paraOf(term), nested: !!term.closest(".side-sheet") }); return; }
+  // A tap on the chat above the side sheet closes it (not the end of a drag that selected text).
+  if (APP.side && e.target.isConnected && !APP.side.el.contains(e.target) && e.target.closest("#tutor .panel")
+      && getSelection().isCollapsed) closeSide();
   const c = e.target.closest(".cite[data-d]");
   if (c && !c.closest("#print-root")) go({ c: c.dataset.c, d: c.dataset.d, s: +c.dataset.s });
 });
@@ -215,9 +226,23 @@ function toggleNav(open = !APP.navOpen) {
   renderSidenav();
 }
 
-function sidenavCourseIds() {
+// The course the page is in (null on the home page): the sidebar opens it and History lists only its chats.
+function routeCourseId() {
   const p = params();
-  const cid = p.c || p.review || (APP.session && APP.session.course);
+  return p.c || p.review || (APP.session && APP.session.course) || null;
+}
+
+// Every course, for the sidebar's course switcher; fetched once if the hub was opened straight into a course.
+async function allCourses() {
+  if (!APP.home) {
+    APP.home = await api("/api/home");
+    APP.home.courses.forEach((c) => { APP.courses[c.id] = APP.courses[c.id] || c; });
+  }
+  return APP.home.courses;
+}
+
+function sidenavCourseIds() {
+  const cid = routeCourseId();
   if (cid) return [cid];
   return (APP.home ? APP.home.courses : Object.values(APP.courses)).map((c) => c.id);
 }
@@ -231,8 +256,11 @@ async function renderSidenav() {
   if (nav.hidden) return;
   const p = params();
   const ids = sidenavCourseIds();
-  let courses;
+  let courses, others = [];
   try { courses = await Promise.all(ids.map((id) => loadCourse(id))); } catch { return; }
+  if (routeCourseId()) {
+    try { others = (await allCourses()).filter((c) => !ids.includes(c.id)); } catch { /* the switcher is optional */ }
+  }
   const here = APP.deck && p.c === APP.deck.course && p.d === APP.deck.tag ? APP.deck : null;
   const parts = [];
   for (const c of courses) {
@@ -262,6 +290,13 @@ async function renderSidenav() {
       }
       parts.push(box);
     }
+  }
+  // Course switcher, pinned to the top so it stays in reach while a long slide list is scrolled.
+  if (others.length) {
+    const all = [...courses, ...others].sort((a, b) => a.code.localeCompare(b.code));
+    parts.unshift(h("nav", { class: "sn-switch", "aria-label": "Courses" }, ...all.map((c) =>
+      h("a", { class: ids.includes(c.id) ? "here" : "", href: `#c=${encodeURIComponent(c.id)}`, title: c.title,
+        "aria-current": ids.includes(c.id) ? "page" : null }, c.code))));
   }
   nav.replaceChildren(...parts);
   const cur = $(".sn-slide.here", nav) || $(".sn-deck.here", nav);
@@ -605,6 +640,55 @@ function setTutor(mode) {
   $("#resizer")?.toggleAttribute("hidden", mode === "closed" || isPhone());
   $("#stage")?.classList.toggle("shrunk", mode === "focus");
   if (mode !== "focus") restoreStage();
+  applyReading();
+}
+
+// Reading view: the chat takes the whole viewer and reads like a PDF page. A preference, so it's remembered.
+// Zoom scales the text and the page with it; "Fit width" drops the grey margins so the page fills the screen.
+const READ_ZOOMS = [0.8, 0.9, 1, 1.1, 1.25, 1.4, 1.6, 1.8, 2];
+
+function applyReading() {
+  const on = APP.tutor === "open" && store.get("reading", false);
+  const v = $(".viewer");
+  if (v) {
+    v.classList.toggle("reading", on);
+    v.classList.toggle("read-wide", on && store.get("readWide", false));
+    v.style.setProperty("--rz", store.get("readZoom", 1));
+  }
+  $("#read-btn")?.setAttribute("aria-pressed", String(on));
+  $("#read-wide")?.setAttribute("aria-pressed", String(store.get("readWide", false)));
+  const z = $("#read-zoom");
+  if (z) z.textContent = `${Math.round(store.get("readZoom", 1) * 100)}%`;
+}
+
+// Re-lays out the chat while keeping the reader at the same place in it.
+function keepPlace(change) {
+  const th = $("#thread");
+  const at = th && th.scrollHeight > th.clientHeight ? th.scrollTop / (th.scrollHeight - th.clientHeight) : 1;
+  change();
+  applyReading();
+  if (th) th.scrollTop = at * (th.scrollHeight - th.clientHeight);
+  return th;
+}
+
+function toggleReading() {
+  const th = keepPlace(() => store.set("reading", !store.get("reading", false)));
+  if (th && $(".viewer.reading")) th.focus({ preventScroll: true });
+}
+
+function zoomReading(dir) {   // -1, +1, or 0 to reset
+  const cur = READ_ZOOMS.indexOf(store.get("readZoom", 1));
+  const i = dir === 0 ? READ_ZOOMS.indexOf(1) : Math.max(0, Math.min(READ_ZOOMS.length - 1, (cur < 0 ? 2 : cur) + dir));
+  keepPlace(() => store.set("readZoom", READ_ZOOMS[i]));
+}
+
+function readTools() {
+  return h("span", { class: "read-tools" },
+    h("button", { class: "icon-btn", type: "button", title: "Smaller text (−)", "aria-label": "Zoom out", onclick: () => zoomReading(-1) }, "−"),
+    h("button", { class: "link quiet zoom-level", type: "button", id: "read-zoom", title: "Reset zoom (0)", onclick: () => zoomReading(0) }, "100%"),
+    h("button", { class: "icon-btn", type: "button", title: "Larger text (+)", "aria-label": "Zoom in", onclick: () => zoomReading(1) }, "+"),
+    h("button", { class: "link quiet new-chat", type: "button", id: "read-wide", title: "Fill the screen width, no side margins (W)",
+      onclick: () => keepPlace(() => store.set("readWide", !store.get("readWide", false))) }, "Fit width"));
 }
 
 function clampPanel(w) {
@@ -711,6 +795,7 @@ function renderTutor() {
   const t = $("#tutor");
   if (!t) return;
   if (APP.tutor === "closed") {
+    closeSide();
     setTutor("closed");
     t.replaceChildren(h("div", { class: "rail" },
       h("button", { class: "primary", type: "button", onclick: () => startPracticeInPanel({ kind: tryKind() }), title: "A problem on this slide (or the whole deck, if chosen in the panel)" },
@@ -722,10 +807,11 @@ function renderTutor() {
     return;
   }
   setTutor("open");
-  const thread = h("div", { class: "thread", id: "thread", "aria-live": "polite" });
+  const thread = h("div", { class: "thread", id: "thread", "aria-live": "polite", tabindex: "-1" });
   t.replaceChildren(h("div", { class: "panel" },
-    h("div", { class: "panel-head" }, h("h2", {}, "Tutor"), h("span", { class: "muted small", id: "tutor-where" }),
+    h("div", { class: "panel-head" }, h("h2", {}, "Tutor"), h("span", { class: "muted small", id: "tutor-where" }), readTools(),
       h("button", { class: "link quiet new-chat", type: "button", title: "Copy this chat as Markdown", onclick: () => copyChat(APP.deck.chat, APP.deck) }, "Copy chat"),
+      h("button", { class: "link quiet new-chat", type: "button", id: "read-btn", title: "Reading view: the chat as full-width pages, like a PDF (R)", onclick: toggleReading }, "Read"),
       h("button", { class: "link quiet new-chat", type: "button", title: "Print this chat, or save it as a PDF", onclick: () => printChat(APP.deck.chat, APP.deck) }, "PDF"),
       h("button", { class: "link quiet new-chat", type: "button", title: "Start a new chat on this deck", onclick: newChat }, "New chat"),
       h("button", { class: "icon-btn", type: "button", "aria-label": "Close the tutor", onclick: () => { APP.tutor = "closed"; renderTutor(); } }, "×")),
@@ -743,7 +829,142 @@ function renderTutor() {
     composeBox("Ask anything about this slide", (q) => tutorAsk("ask", q))));
   updateTutorWhere();
   drawThread();
+  applyReading();
+  // A side question survives the panel being redrawn (e.g. the scope switch), but not a change of deck.
+  if (APP.side && APP.deck && APP.side.course === APP.deck.course && APP.side.tag === APP.deck.tag) $(".panel", t).append(APP.side.el);
+  else closeSide();
 }
+
+// ------------------------------------------------------------ side questions
+// Tapping a [[term]] or asking about a selection opens a sheet over the lower part of the tutor panel. The
+// server forks the deck's chat for it, so it knows the conversation, but nothing it says joins the chat; the
+// chat underneath keeps its place (and keeps streaming). × or a tap on the chat closes it; it isn't saved.
+// A term tapped inside the sheet opens its own side on top; ‹ (or Esc) goes back to the previous one.
+
+const sideStack = [];   // the sides under APP.side, still open on the server
+
+function paraOf(el) {
+  const p = el.closest("p, li, td, blockquote") || el.parentElement;
+  return p ? p.textContent.trim().slice(0, 600) : "";
+}
+
+function openSide({ anchor, para = "", selection = false, nested = false }) {
+  const d = APP.deck;
+  if (!d || !anchor) return;
+  hideSelAsk();
+  if (APP.tutor !== "open") { APP.tutor = "open"; renderTutor(); }
+  if (nested && APP.side) { sideStack.push(APP.side); APP.side.el.remove(); APP.side = null; }
+  else closeSide();
+  const thread = h("div", { class: "side-thread", "aria-live": "polite" });
+  const ta = h("textarea", { rows: "1", placeholder: selection ? "What do you want to know about this?" : "Ask a follow-up", "aria-label": "Side question" });
+  const form = h("form", { class: "compose side-compose", onsubmit: (e) => { e.preventDefault(); const q = ta.value.trim(); if (!q) return; ta.value = ""; sideAsk(q); } },
+    ta, h("button", { class: "btn ghost", type: "submit" }, "Ask"));
+  ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
+  const el = h("section", { class: "side-sheet", role: "dialog", "aria-label": "Side question" },
+    h("div", { class: "side-head" },
+      sideStack.length ? h("button", { class: "icon-btn side-back", type: "button", "aria-label": "Back to the previous side question",
+        title: "Back (Esc)", onclick: () => sideBack() }, "‹") : null,
+      h("div", { class: "side-quote" }, h("span", { class: "side-label" }, "On the side · not added to your chat"),
+        h("div", { class: "side-anchor" }, ...inlineMd(anchor, d.course))),
+      h("button", { class: "icon-btn", type: "button", "aria-label": "Close the side question", title: "Close (Esc)", onclick: () => closeSide() }, "×")),
+    thread, form);
+  APP.side = { el, thread, ta, id: null, course: d.course, tag: d.tag, n: Math.min(APP.n, d.slides), anchor, para, selection, busy: false };
+  $("#tutor .panel")?.append(el);
+  if (selection) ta.focus(); else sideAsk("");
+}
+
+function dropSide(s) {
+  s.el.remove();
+  if (s.id) api("/api/side/close", { course: s.course, side: s.id }).catch(() => {});
+}
+
+function closeSide() {   // closes the whole stack
+  if (APP.side) dropSide(APP.side);
+  APP.side = null;
+  while (sideStack.length) dropSide(sideStack.pop());
+}
+
+function sideBack() {
+  if (!sideStack.length) return closeSide();
+  if (APP.side) dropSide(APP.side);
+  APP.side = sideStack.pop();
+  $("#tutor .panel")?.append(APP.side.el);
+}
+
+async function sideAsk(question) {
+  const s = APP.side;
+  if (!s || s.busy) return;
+  if (!s.id && !question && s.selection) return;      // a selection waits for the student's question
+  s.busy = true;
+  if (question) s.thread.append(h("p", { class: "msg-q" }, question));
+  const wait = h("p", { class: "waiting" }, "Thinking…");
+  const live = h("div", { class: "msg-a" });
+  s.thread.append(wait);
+  s.thread.scrollTop = s.thread.scrollHeight;
+  let acc = "", queued = false;
+  const paint = () => { queued = false; live.replaceChildren(...renderMd(acc, s.course).childNodes); s.thread.scrollTop = s.thread.scrollHeight; };
+  const deck = APP.deck;
+  try {
+    const r = await apiStream("/api/side", { course: s.course, tag: s.tag, n: s.n, chat: deck.chat ? deck.chat.id : "", side: s.id,
+      anchor: s.anchor, para: s.para, question, model: APP.model, slides_only: slidesOnly(s.course) }, {
+      status: (t) => { wait.textContent = `${t}…`; },
+      text: (t) => {
+        if (!acc) { wait.replaceWith(live); }
+        acc += t;
+        if (!queued) { queued = true; requestAnimationFrame(paint); }
+      },
+    });
+    s.id = r.side;
+    if (APP.side !== s && !sideStack.includes(s)) { api("/api/side/close", { course: s.course, side: r.side }).catch(() => {}); return; }   // closed meanwhile
+    const done = renderMdCached(r.message.text, s.course);
+    done.className = "msg-a";
+    (live.isConnected ? live : wait).replaceWith(done);
+    s.thread.scrollTop = s.thread.scrollHeight;
+  } catch (e) {
+    (live.isConnected ? live : wait).replaceWith(h("p", { class: "err" }, e.message));
+  } finally {
+    s.busy = false;
+  }
+}
+
+// Select part of an answer (main chat or side) → "Ask about this" just below the selection.
+let selAskBtn = null;
+function hideSelAsk() { selAskBtn?.remove(); selAskBtn = null; }
+
+// The selected text as Markdown: formulas come back as $TeX$ (from KaTeX's annotation), not as jumbled glyphs.
+function selectionMarkdown(range) {
+  const k0 = range.startContainer.parentElement?.closest(".katex"), k1 = range.endContainer.parentElement?.closest(".katex");
+  if (k0) range.setStartBefore(k0);
+  if (k1) range.setEndAfter(k1);
+  const frag = range.cloneContents();
+  frag.querySelectorAll(".katex").forEach((k) => {
+    const tex = k.querySelector("annotation")?.textContent || k.textContent;
+    k.replaceWith(k.closest(".katex-display") ? `$$${tex}$$` : `$${tex}$`);
+  });
+  const box = document.createElement("div");
+  box.append(frag);
+  return box.textContent.replace(/\s+\n/g, "\n").trim();
+}
+
+function maybeShowSelAsk() {
+  hideSelAsk();
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return;
+  const range = sel.getRangeAt(0);
+  const msg = range.commonAncestorContainer.nodeType === 1 ? range.commonAncestorContainer.closest(".msg-a") : range.commonAncestorContainer.parentElement?.closest(".msg-a");
+  if (!msg || !msg.closest("#tutor") || !sel.toString().trim()) return;
+  const rect = range.getBoundingClientRect();
+  selAskBtn = h("button", { class: "sel-ask", type: "button",
+    onmousedown: (e) => e.preventDefault(),         // keep the selection while clicking
+    onclick: () => { const r = sel.rangeCount ? sel.getRangeAt(0).cloneRange() : range; const md = selectionMarkdown(r); const para = paraOf(r.startContainer.parentElement); sel.removeAllRanges(); openSide({ anchor: md, para, selection: true }); } },
+    "Ask about this");
+  selAskBtn.style.left = `${Math.max(8, Math.min(window.innerWidth - 140, rect.left + rect.width / 2 - 60))}px`;
+  selAskBtn.style.top = `${Math.min(window.innerHeight - 44, rect.bottom + 8)}px`;
+  document.body.append(selAskBtn);
+}
+let selTimer = 0;
+document.addEventListener("selectionchange", () => { clearTimeout(selTimer); selTimer = setTimeout(maybeShowSelAsk, 250); });
+document.addEventListener("scroll", hideSelAsk, true);
 
 function updateTutorWhere() {
   const w = $("#tutor-where");
@@ -797,14 +1018,8 @@ function drawThread() {
 function answerEl(m, isLast) {
   const body = renderMdCached(m.text, APP.deck.course);
   body.className = "msg-a";
-  // Each "Need to know" section ends with "Explain more ›", which asks for a fuller explanation in the chat.
-  $$("details.ntk", body).forEach((det) => {
-    const sum = det.querySelector("summary");
-    const name = sum ? sum.textContent.replace(/^\s*Need to know:\s*/i, "").split(/\s+[—–-]\s+|\s*\[/)[0].trim() : "";
-    if (name) det.append(h("button", { class: "link ntk-more", type: "button", onclick: () => tutorAsk("brush", name) }, "Explain more ›"));
-  });
   const wrap = h("div", { class: "ans" }, body,
-    h("button", { class: "copy-one", type: "button", title: "Copy this answer", onclick: (e) => copyText(m.text, e.currentTarget) }, "Copy"));
+    h("button", { class: "copy-one", type: "button", title: "Copy this answer", onclick: (e) => copyText(unmark(m.text), e.currentTarget) }, "Copy"));
   if (isLast) {
     const deckWide = (m.mode || "").endsWith("_deck");
     const next = (m.mode || "").startsWith("example")
@@ -850,11 +1065,14 @@ function chatMeta(chat, deck) {
   return [code, where, chat.updated || chat.created || ""].filter(Boolean).join(" · ");
 }
 
+// Copied Markdown shows terms as plain words, without the [[…]] that makes them buttons.
+const unmark = (t) => String(t || "").replace(/\[\[([^[\]\n]{1,120}?)\]\]/g, "$1");
+
 function chatMarkdown(chat, deck) {
   const out = [`# ${chat.title || "Tutor chat"}`, "", `_${chatMeta(chat, deck)}_`, ""];
   for (const m of chat.messages || []) {
     if (m.role === "q") out.push(`**You**${m.slide ? ` (slide ${m.slide})` : ""}: ${m.text}`, "");
-    else out.push(m.text.trim(), "", "---", "");
+    else out.push(unmark(m.text).trim(), "", "---", "");
   }
   return out.join("\n");
 }
@@ -895,7 +1113,7 @@ async function tutorAsk(mode, question = "") {
   const d = APP.deck;
   const n = Math.min(APP.n, d.slides);
   $(".empty", th)?.remove();
-  th.append(h("p", { class: "msg-q" }, mode === "ask" ? question : mode === "brush" ? `Explain more: ${question}` : MODE_LABEL[mode], h("span", { class: "where" }, mode.endsWith("_deck") ? ` · ${d.tag}` : ` · s${n}`)));
+  th.append(h("p", { class: "msg-q" }, mode === "ask" ? question : mode === "brush" ? `Brush up: ${question}` : MODE_LABEL[mode], h("span", { class: "where" }, mode.endsWith("_deck") ? ` · ${d.tag}` : ` · s${n}`)));
   const wait = h("p", { class: "waiting" }, mode.startsWith("example") ? "Writing a worked example…" : mode.endsWith("_deck") ? "Reading the whole deck…" : "Thinking…");
   th.append(wait);
   th.scrollTop = th.scrollHeight;
@@ -906,12 +1124,11 @@ async function tutorAsk(mode, question = "") {
   let acc = "", done = 0, queued = false, cost = 0, follow = true;
   const onScroll = () => { follow = th.scrollHeight - th.scrollTop - th.clientHeight < 80; };
   th.addEventListener("scroll", onScroll, { passive: true });
-  // Everything before the last blank line that isn't inside $$…$$, a ``` block or a <details> section is finished text.
+  // Everything before the last blank line that isn't inside $$…$$ or a ``` block is finished text.
   const cutPoint = (text) => {
     for (let i = text.lastIndexOf("\n\n"); i > done; i = text.lastIndexOf("\n\n", i - 1)) {
       const head = text.slice(0, i);
-      if ((head.split("$$").length - 1) % 2 === 0 && (head.split("```").length - 1) % 2 === 0
-        && head.split("<details").length === head.split("</details>").length) return i + 2;
+      if ((head.split("$$").length - 1) % 2 === 0 && (head.split("```").length - 1) % 2 === 0) return i + 2;
     }
     return done;
   };
@@ -934,7 +1151,7 @@ async function tutorAsk(mode, question = "") {
       },
     });
     const chat = d.chat || { id: r.chat, title: mode === "ask" ? question : MODE_LABEL[mode] || question, updated: "", messages: [] };
-    chat.messages.push({ role: "q", mode, slide: n, text: mode === "ask" ? question : mode === "brush" ? `Explain more: ${question}` : MODE_LABEL[mode] }, r.message);
+    chat.messages.push({ role: "q", mode, slide: n, text: mode === "ask" ? question : mode === "brush" ? `Brush up: ${question}` : MODE_LABEL[mode] }, r.message);
     chat.updated = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
     d.chat = chat;
     if (!d.asked.includes(n)) d.asked.push(n);
@@ -1360,10 +1577,13 @@ $("#menu").addEventListener("click", (e) => {
 async function showHistory() {
   const list = $("#history-list");
   list.replaceChildren(h("p", { class: "waiting" }, "Loading…"));
+  const cid = routeCourseId();
+  const course = cid && APP.courses[cid];
+  $("#history-title").textContent = course ? `History · ${course.code}` : "History";
   $("#history-dlg").showModal();
-  const chats = await api("/api/chats").catch(() => []);
+  const chats = (await api("/api/chats").catch(() => [])).filter((c) => !cid || c.course === cid);
   list.replaceChildren();
-  if (!chats.length) list.append(h("p", { class: "muted" }, "No tutor chats yet."));
+  if (!chats.length) list.append(h("p", { class: "muted" }, course ? `No tutor chats in ${course.code} yet.` : "No tutor chats yet."));
   for (const c of chats) {
     const open = () => { $("#history-dlg").close(); if (!c.deck) return go({ chat: c.id }); openChat(c.id); };
     const title = renamable(c, "hist-title", () => { if (APP.deck && APP.deck.chat && APP.deck.chat.id === c.id) { APP.deck.chat.title = c.title; drawThread(); } });
@@ -1442,13 +1662,25 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     if (!$("#search").hidden) return closeSearch();
     if (!$("#menu").hidden) return closeMenu();
+    if (selAskBtn) return hideSelAsk();
+    if (APP.side) return sideBack();
     if (APP.zoom) return toggleZoom();
     if (APP.text) return toggleText(false);
     if (APP.tutor === "focus" && !typing) return closePractice();
+    if ($(".viewer.reading") && !typing) return toggleReading();
     if (APP.navOpen && isPhone()) return toggleNav(false);
   }
   if (!typing && e.key === "[" && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); toggleNav(); return; }
   if (typing || !$(".viewer") || APP.tutor === "focus") return;
+  if (e.key.toLowerCase() === "r" && !e.ctrlKey && !e.metaKey && !e.altKey && APP.tutor === "open") return toggleReading();
+  if ($(".viewer.reading")) {   // the slide is hidden: arrows and Page keys scroll the chat instead
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === "+" || e.key === "=") zoomReading(1);
+    else if (e.key === "-" || e.key === "_") zoomReading(-1);
+    else if (e.key === "0") zoomReading(0);
+    else if (e.key.toLowerCase() === "w") keepPlace(() => store.set("readWide", !store.get("readWide", false)));
+    return;
+  }
   if (e.key === "ArrowRight" || e.key === "PageDown") { e.preventDefault(); step(1); }
   else if (e.key === "ArrowLeft" || e.key === "PageUp") { e.preventDefault(); step(-1); }
   else if (e.key.toLowerCase() === "t") toggleText();

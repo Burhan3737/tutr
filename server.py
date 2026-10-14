@@ -291,6 +291,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 chat, msg = T.chat_turn(c, tag, int(req.get("n") or 1), mode, q, model, web, emit)
                 return {"chat": chat["id"], "message": msg}
             return self._answer(req, work)
+        if path == "/api/side":              # a side question about a term or a selection (forks the chat)
+            tag = str(req.get("tag", ""))
+            if not L.deck(c, tag):
+                return self._json({"error": "Open a deck first."}, 400)
+            side, q = req.get("side") or None, str(req.get("question") or "")
+            if side and not q.strip():
+                return self._json({"error": "Type a question first."}, 400)
+            def work(emit):
+                sid, msg = T.side_turn(c, tag, int(req.get("n") or 1), side and str(side), str(req.get("chat") or ""),
+                                       str(req.get("anchor") or ""), str(req.get("para") or ""), q, model, web, emit)
+                return {"side": sid, "message": msg}
+            return self._answer(req, work)
+        if path == "/api/side/close":
+            T.side_close(str(req.get("side") or ""))
+            return self._json({"ok": True})
         if path == "/api/practice/new":
             kind = str(req.get("kind", "try"))
             if kind not in T.TASKS:

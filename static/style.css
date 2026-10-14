@@ -127,6 +127,11 @@ main { flex: 1; min-width: 0; min-height: 0; overflow: auto; position: relative;
 .sn-course span { font-size: 12px; color: var(--text-2); }
 .sn-course:hover, .sn-deck:hover, .sn-slide:hover { background: var(--sunken); text-decoration: none; }
 .sn-course.here { background: var(--accent-soft); }
+.sn-switch { position: sticky; top: -12px; z-index: 1; display: flex; gap: 4px; margin: -12px -8px 4px; padding: 10px 8px 8px;
+  background: var(--bg); border-bottom: 1px solid var(--line); }
+.sn-switch a { flex: 1; text-align: center; padding: 5px 0; border-radius: var(--r); font-size: 13px; font-weight: 600; color: var(--text-2); }
+.sn-switch a:hover { background: var(--sunken); text-decoration: none; }
+.sn-switch a.here { background: var(--accent-soft); color: var(--text); }
 .sn-topic > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: var(--r);
   font-weight: 600; color: var(--text); }
 .sn-topic > summary::-webkit-details-marker { display: none; }
@@ -296,14 +301,6 @@ h1.page-title { font-size: 28px; line-height: 34px; font-weight: 600; margin: 0 
 @media print { .spoiler { filter: none !important; background: none; } }
 .msg-a details { margin: 4px 0 10px; }
 .msg-a summary { cursor: pointer; color: var(--accent); font-weight: 600; font-size: 14px; }
-/* "Need to know" sections: a quiet row when closed, a small card when open. */
-.msg-a details.ntk { margin: 6px 0; padding: 6px 10px; border-radius: 8px; background: var(--sunken); }
-.msg-a details.ntk > summary { font-size: 13px; line-height: 1.4; }
-.msg-a details.ntk[open] { padding-bottom: 8px; }
-.msg-a details.ntk > :not(summary) { font-size: 14px; }
-.msg-a details.ntk p { margin: 6px 0; }
-.ntk-more { font-size: 13px; }
-@media print { .ntk-more { display: none; } }
 .chat-bar { position: sticky; top: -8px; z-index: 1; display: flex; align-items: center; gap: 4px; margin: 0 -20px; padding: 6px 12px;
   background: var(--surface); border-bottom: 1px solid var(--line); }
 .star { border: 0; background: none; cursor: pointer; font-size: 18px; line-height: 1; width: 32px; height: 32px; border-radius: 6px;
@@ -354,7 +351,26 @@ h1.page-title { font-size: 28px; line-height: 34px; font-weight: 600; margin: 0 
 .rail .go { width: 44px; height: 44px; border-radius: 50%; background: var(--accent); color: var(--on-accent); display: grid; place-items: center; font-size: 18px; }
 .rail .glyph { font-size: 20px; height: 24px; }
 .rail .primary { color: var(--text); font-weight: 600; }
-.panel { display: flex; flex-direction: column; height: 100%; min-width: 0; }
+.panel { position: relative; display: flex; flex-direction: column; height: 100%; min-width: 0; }
+/* Side questions: a sheet over the lower two thirds of the panel; the chat above keeps its place. */
+.side-sheet { position: absolute; left: 0; right: 0; bottom: 0; height: 66%; z-index: 5; display: flex; flex-direction: column;
+  background: var(--surface); border-top: 1px solid var(--line-strong); border-radius: 14px 14px 0 0;
+  box-shadow: 0 -8px 24px rgba(20,18,26,.14); animation: side-up .18s var(--ease); }
+@keyframes side-up { from { transform: translateY(24px); opacity: 0; } }
+.side-head { display: flex; align-items: flex-start; gap: 8px; padding: 10px 8px 8px 20px; border-bottom: 1px solid var(--line); }
+.side-quote { flex: 1; min-width: 0; }
+.side-label { display: block; font-size: 11px; font-weight: 600; letter-spacing: .02em; text-transform: uppercase; color: var(--text-2); }
+.side-anchor { font-size: 14px; line-height: 20px; margin-top: 2px; max-height: 60px; overflow: auto; border-left: 3px solid var(--accent-soft); padding-left: 8px; }
+.side-thread { flex: 1; min-height: 0; overflow: auto; padding: 4px 20px 12px; }
+.side-thread .msg-a { font-size: 15px; line-height: 24px; }
+/* [[term]] in an answer: a quiet dotted underline that opens a side question. */
+button.term { all: unset; cursor: pointer; color: inherit; text-decoration: underline dotted var(--accent); text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px; border-radius: 3px; }
+button.term:hover { background: var(--accent-soft); }
+button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@media print { button.term { text-decoration: none; } }
+.sel-ask { position: fixed; z-index: 50; height: 32px; padding: 0 12px; border: 0; border-radius: 999px; background: var(--text); color: var(--surface);
+  font-family: inherit; font-size: 13px; font-weight: 600; box-shadow: 0 4px 14px rgba(20,18,26,.25); cursor: pointer; }
 .panel-head { display: flex; align-items: center; gap: 4px; padding: 6px 8px 6px 20px; border-bottom: 1px solid var(--line); min-height: 52px; }
 .panel-head h2 { flex: 1; font-size: 15px; font-weight: 600; margin: 0; }
 .panel-actions { padding: 16px 20px 8px; display: flex; flex-direction: column; gap: 0; }
@@ -385,6 +401,46 @@ h1.page-title { font-size: 28px; line-height: 34px; font-weight: 600; margin: 0 
   border-radius: var(--r); padding: 12px; background: var(--surface); font-size: 15px; line-height: 22px; }
 .compose textarea::placeholder, .answer::placeholder { color: var(--text-2); }
 .compose .btn { padding: 0 16px; }
+
+/* ---------- reading view: the chat fills the viewer as one long page on a grey desk, like a PDF */
+.new-chat[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); }
+.read-tools { display: none; align-items: center; gap: 2px; margin-right: 6px; padding-right: 8px; border-right: 1px solid var(--line); }
+.viewer.reading .read-tools { display: flex; }
+.read-tools .icon-btn { width: 32px; height: 32px; font-size: 18px; }
+.zoom-level { font-size: 13px; min-width: 48px; min-height: 32px; font-variant-numeric: tabular-nums; }
+.viewer.reading { --rz: 1; --page: calc(820px * var(--rz)); --page-pad: 64px; }
+.viewer.reading.read-wide { --page: 100%; --page-pad: 48px; }
+.viewer.reading.read-wide .thread { background: var(--surface); }
+.viewer.reading .diagram { zoom: var(--rz); }
+.viewer.reading .stage, .viewer.reading .resizer, .viewer.reading .panel-actions { display: none; }
+.viewer.reading .tutor { flex: 1; width: auto !important; border-left: 0; transition: none; }
+.viewer.reading .thread {
+  --edge: max(0px, calc(50% - var(--page) / 2));
+  padding: 40px max(24px, calc(var(--edge) + var(--page-pad))) 96px;
+  background:
+    linear-gradient(to right, var(--canvas) var(--edge), var(--line) var(--edge), var(--line) calc(var(--edge) + 1px),
+      var(--surface) calc(var(--edge) + 1px), var(--surface) calc(100% - var(--edge) - 1px), var(--line) calc(100% - var(--edge) - 1px),
+      var(--line) calc(100% - var(--edge)), var(--canvas) calc(100% - var(--edge)));
+  background-attachment: local;
+}
+.viewer.reading .chat-bar { top: -40px; margin: -40px calc(-1 * var(--page-pad)) 8px; padding: 14px calc(var(--page-pad) - 8px) 10px; }
+.viewer.reading .chat-title { font-size: calc(18px * var(--rz)); line-height: 1.45; }
+.viewer.reading .msg-q { width: auto; max-width: none; margin: 36px 0 14px; padding: 10px 0 10px 14px; background: none;
+  border-radius: 0; border-left: 3px solid var(--accent); font-size: calc(17px * var(--rz)); line-height: 1.55; font-weight: 600; }
+.viewer.reading .msg-q .where { font-size: .75em; }
+.viewer.reading .msg-a { max-width: none; font-size: calc(17px * var(--rz)); line-height: 1.7; }
+.viewer.reading .msg-a p { margin: 0 0 .8em; }
+.viewer.reading .msg-a h1, .viewer.reading .msg-a h2, .viewer.reading .msg-a h3, .viewer.reading .msg-a h4 { font-size: 1.06em; line-height: 1.55; margin: 1.3em 0 .35em; }
+.viewer.reading .msg-a summary { font-size: .85em; }
+.viewer.reading .msg-a table { font-size: .9em; }
+.viewer.reading .ans { padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.viewer.reading .compose { padding-inline: max(16px, calc(50% - var(--page) / 2 + 16px)); }
+@media (max-width: 760px) {
+  .viewer.reading { --page-pad: 0px; }
+  .viewer.reading #read-wide, .viewer.reading #tutor-where { display: none; }
+  .viewer.reading .thread { padding: 20px 18px 64px; background: var(--surface); }
+  .viewer.reading .chat-bar { top: -20px; margin: -20px -18px 8px; padding: 8px 10px; }
+}
 
 /* ---------- practice focus */
 .practice { flex: 1; min-height: 0; overflow: auto; padding: 24px 32px 32px; }
