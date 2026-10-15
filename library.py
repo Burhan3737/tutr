@@ -3,7 +3,11 @@
 Everything comes from files the course folders already have:
 - `<course>/CLAUDE.md` — the deck table (Week | Deck | Tag | Topic) and the Topics table (Topic | Read more)
 - `<course>/course/WeekN/<deck>.pdf` — the lecture decks, as downloaded
-- `<course>/.cache/WeekN/<deck>.transcript.md` — slide-by-slide transcripts (`## [tag sN] title`)
+- `<course>/course/practice/<deck>.pdf` — homework and practice exams: decks too, but listed apart from the
+  topics (`practice`), whatever their Topic cell says; their week is the Week cell of their deck-table row
+  (else the last lecture week)
+- `<course>/.cache/WeekN/<deck>.transcript.md` — slide-by-slide transcripts (`## [tag sN] title`);
+  `.cache/practice/` for the practice decks
 - `<course>/study/slides/<tag>-sNNN.jpg` — slide images
 - `<course>/study/progress.md` — the Deadlines table (with a Covers column for exam scope)
 - `<course>/course/WeekN/notes*.md` — the student's own class notes
@@ -18,6 +22,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = Path(os.environ.get("STUDY_HUB_ROOT") or HERE.parent.parent).resolve()
 WEEK_RE = re.compile(r"^Week(\d+)$", re.I)
+PRACTICE = "practice"   # course/practice/: homework and practice exams, no week folder
+PRACTICE_NAME = "Practice"   # what the hub calls them; never a topic
 UNSORTED = "Not sorted yet"
 _LOCK = threading.Lock()
 _CACHE = {}     # key -> (signature, value); rebuilt only when the underlying files change
@@ -100,14 +106,17 @@ def _pdfs(cdir):
             m = WEEK_RE.match(w.name)
             if w.is_dir() and m:
                 out += [(int(m.group(1)), p) for p in sorted(w.glob("*.pdf"))]
+    last = max((w for w, _ in out), default=0)
+    out += [(last, p) for p in sorted((base / PRACTICE).glob("*.pdf"))]    # week set from the deck table later
     return sorted(out, key=lambda x: (x[0], x[1].name))
 
 
 def course_info(cdir):
-    """{'code','title','topics':[{name, read_more, decks:[...]}], 'decks': {tag: deck}} — cached."""
+    """{'code','title','topics':[{name, read_more, decks:[...]}], 'practice': [tag], 'decks': {tag: deck}} — cached."""
     cm = cdir / "CLAUDE.md"
     pdfs = _pdfs(cdir)
-    watch = [cm] + [p for _, p in pdfs] + sorted((cdir / ".cache").glob("Week*/*.transcript.md"))
+    watch = [cm] + [p for _, p in pdfs] + sorted((cdir / ".cache").glob("Week*/*.transcript.md")) + \
+        sorted((cdir / ".cache" / PRACTICE).glob("*.transcript.md"))
     return _cached(("info", cdir), watch, lambda: _build_info(cdir, pdfs))
 
 
@@ -132,25 +141,32 @@ def _build_info(cdir, pdfs):
         if stem not in by_stem:
             continue
         w, pdf = by_stem.pop(stem)
+        if pdf.parent.name == PRACTICE:                 # listed apart from the topics; week from its table row
+            topic = PRACTICE_NAME
+            if re.match(r"\d+", wk):
+                w = int(re.match(r"\d+", wk).group())
         decks[tag] = _deck(cdir, tag, w, pdf, topic, order)
         order += 1
     for stem, (w, pdf) in sorted(by_stem.items(), key=lambda x: (x[1][0], x[0])):   # not in the table yet
         if stem.lower().startswith("notes"):
             continue
         tag = stem.replace("_", "-")
-        decks[tag] = _deck(cdir, tag, w, pdf, UNSORTED, order)
+        decks[tag] = _deck(cdir, tag, w, pdf, PRACTICE_NAME if pdf.parent.name == PRACTICE else UNSORTED, order)
         order += 1
-    topics = {}
+    topics, practice = {}, []
     for d in sorted(decks.values(), key=lambda d: (d["week"], d["order"])):
-        topics.setdefault(d["topic"], []).append(d["tag"])
+        if d["topic"] == PRACTICE_NAME:
+            practice.append(d["tag"])
+        else:
+            topics.setdefault(d["topic"], []).append(d["tag"])
     # Topics in order of their first deck; decks inside a topic in lecture order.
     tlist = [{"name": n, "read_more": read_more.get(n, ""), "decks": tags} for n, tags in topics.items()]
     tlist.sort(key=lambda t: (t["name"] == UNSORTED, min(decks[x]["week"] * 1000 + decks[x]["order"] for x in t["decks"])))
-    return {"code": code, "title": title, "topics": tlist, "decks": decks}
+    return {"code": code, "title": title, "topics": tlist, "practice": practice, "decks": decks}
 
 
 def _deck(cdir, tag, week, pdf, topic, order):
-    tr = cdir / ".cache" / f"Week{week}" / f"{pdf.stem}.transcript.md"
+    tr = cdir / ".cache" / pdf.parent.name / f"{pdf.stem}.transcript.md"     # WeekN/ or practice/
     try:
         import fitz
         with fitz.open(pdf) as d:
@@ -372,6 +388,13 @@ def _build_map(cdir, info, books, notes):
             titles = " · ".join(f"s{s['n']} {s['title'][:50]}" for s in slide_texts(cdir, tag) if s["title"])
             out.append(f"- [{tag}] W{d['week']} {d['title']}: `{src}`, {d['slides']} slides")
             out.append(f"    {titles}")
+        out.append("")
+    if info["practice"]:
+        out.append("## Practice: homework and practice exams (questions only, no solutions)")
+        for tag in info["practice"]:
+            d = info["decks"][tag]
+            src = d["transcript"] or f"{d['pdf']} (no transcript yet: PDF only)"
+            out.append(f"- [{tag}] W{d['week']} {d['title']}: `{src}`, {d['slides']} pages")
         out.append("")
     if notes:
         out.append("## The student's own class notes")

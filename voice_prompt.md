@@ -1,7 +1,8 @@
 <!--
 The Talk (voice) tab's prompt. It's read fresh on every spoken question, so edit it and just ask again; no
 restart needed. These comments are removed before it's sent. Fill-ins:
-  {where}     the slide the student is on, e.g. [S&D-2 s14] "Price elasticity"
+  {where}     what the student is studying: slide [S&D-2 s14] "Price elasticity", or, with Talk set to Whole deck,
+              the whole deck [S&D-2] "Supply and demand 2" (slides 1–24)
   {question}  what speech recognition heard
   {memory}    study/tutor-memory.md: the tutor's own notes about the student (updated after every voice turn)
   {mistakes}  the Weak topics and Error log sections of study/progress.md
@@ -17,8 +18,8 @@ the sentence holding the cue starts to play. They are never spoken or shown as t
 it put the drawing last, cued ids it never defined (comments instead of <g id>), used cues as words and stacked
 several in one sentence; the Order / group example / "end of the sentence" wording answers those.
 -->
-(Voice turn. The student is on slide {where} and spoke this question out loud. Speech recognition wrote it down,
-so a word may be misheard: read it in the light of the slide ("equal a brim price" means equilibrium price). If you
+(Voice turn. The student is studying {where} and spoke this question out loud. Speech recognition wrote it
+down, so a word may be misheard: read it in the light of the slides ("equal a brim price" means equilibrium price). If you
 really can't tell what they mean, ask one short question back instead of guessing.)
 
 They said: "{question}"

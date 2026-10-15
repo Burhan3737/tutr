@@ -126,7 +126,7 @@ function renderMd(md, courseId) {
 
 function courseTags(courseId) {
   const c = APP.courses[courseId];
-  return c ? c.topics.flatMap((t) => t.decks.map((d) => d.tag)) : [];
+  return c ? [...c.topics.flatMap((t) => t.decks), ...(c.practice || [])].map((d) => d.tag) : [];
 }
 
 // [S&D-2 s14] / [S&D-2 s14–s16] become chips that open the slide.
@@ -281,25 +281,12 @@ async function renderSidenav() {
       const solved = t.decks.filter((d) => d.state === "solved").length;
       const box = h("details", { class: "sn-topic", open: hasHere || courses.length === 1 && !here ? true : hasHere },
         h("summary", {}, h("span", {}, t.name), h("span", { class: "sn-count" }, `${solved}/${t.decks.length}`)));
-      for (const d of t.decks) {
-        const isHere = here && here.tag === d.tag && here.course === c.id;
-        box.append(h("a", { class: "sn-deck" + (isHere ? " here" : ""), href: `#c=${encodeURIComponent(c.id)}&d=${encodeURIComponent(d.tag)}&s=${d.last || 1}`,
-          title: `${d.title} · ${stateLabel(d.state)}` },
-          h("span", { class: `dot ${d.state}` }), h("span", { class: "sn-tag" }, d.tag), h("span", { class: "sn-title" }, d.title),
-          h("span", { class: "chip week" }, `W${d.week}`)));
-        if (isHere) {
-          const list = h("ol", { class: "sn-slides" });
-          for (const s of here.slides_text) {
-            list.append(h("li", {}, h("a", { class: "sn-slide" + (s.n === APP.n ? " here" : ""), "data-n": String(s.n),
-              href: `#c=${encodeURIComponent(c.id)}&d=${encodeURIComponent(d.tag)}&s=${s.n}`,
-              onclick: (e) => { if (APP.deck === here) { e.preventDefault(); APP.n = s.n; showSlide(); if (APP.tutor === "open") updateTutorWhere(); if (isPhone()) toggleNav(false); } } },
-              h("span", { class: "sn-n" }, String(s.n)), s.title || `Slide ${s.n}`)));
-          }
-          box.append(list);
-        }
-      }
+      box.append(...t.decks.flatMap((d) => sidenavDeck(c, d, here)));
       parts.push(box);
     }
+    // Homework and practice exams: their own list under the topics, not a topic.
+    if (c.practice?.length) parts.push(h("div", { class: "sn-practice" }, h("p", { class: "sn-label" }, "Practice"),
+      ...c.practice.flatMap((d) => sidenavDeck(c, d, here))));
   }
   // Course switcher, pinned to the top so it stays in reach while a long slide list is scrolled.
   if (others.length) {
@@ -311,6 +298,26 @@ async function renderSidenav() {
   nav.replaceChildren(...parts);
   const cur = $(".sn-slide.here", nav) || $(".sn-deck.here", nav);
   if (cur) cur.scrollIntoView({ block: "center" });
+}
+
+// A deck's sidebar link, plus its slide list when it's the open deck.
+function sidenavDeck(c, d, here) {
+  const isHere = here && here.tag === d.tag && here.course === c.id;
+  const out = [h("a", { class: "sn-deck" + (isHere ? " here" : ""), href: `#c=${encodeURIComponent(c.id)}&d=${encodeURIComponent(d.tag)}&s=${d.last || 1}`,
+    title: `${d.title} · ${stateLabel(d.state)}` },
+    h("span", { class: `dot ${d.state}` }), h("span", { class: "sn-tag" }, d.tag), h("span", { class: "sn-title" }, d.title),
+    h("span", { class: "chip week" }, `W${d.week}`))];
+  if (isHere) {
+    const list = h("ol", { class: "sn-slides" });
+    for (const s of here.slides_text) {
+      list.append(h("li", {}, h("a", { class: "sn-slide" + (s.n === APP.n ? " here" : ""), "data-n": String(s.n),
+        href: `#c=${encodeURIComponent(c.id)}&d=${encodeURIComponent(d.tag)}&s=${s.n}`,
+        onclick: (e) => { if (APP.deck === here) { e.preventDefault(); APP.n = s.n; showSlide(); if (APP.tutor === "open") updateTutorWhere(); if (isPhone()) toggleNav(false); } } },
+        h("span", { class: "sn-n" }, String(s.n)), s.title || `Slide ${s.n}`)));
+    }
+    out.push(list);
+  }
+  return out;
 }
 
 // Keep the highlighted slide in step with the viewer without rebuilding the sidebar.
@@ -422,19 +429,16 @@ async function showCourse(id, token) {
       onclick: () => { box.classList.toggle("open"); btn.setAttribute("aria-expanded", box.classList.contains("open")); } },
       h("span", { class: "caret", "aria-hidden": "true" }, "›"), h("b", {}, t.name),
       h("span", { class: "muted small", title: `${solved} of ${t.decks.length} decks solved` }, `${solved}/${t.decks.length}`));
-    const decks = h("div", { class: "decks" });
-    for (const d of t.decks) {
-      decks.append(h("a", { class: "deck-row", href: `#c=${encodeURIComponent(id)}&d=${encodeURIComponent(d.tag)}&s=${d.last || 1}` },
-        h("span", { class: `dot ${d.state}`, title: stateLabel(d.state) }),
-        h("span", { class: "t" }, h("b", {}, d.tag), ` · ${d.title}`),
-        h("span", { class: "chip week" }, `W${d.week}`),
-        h("span", { class: "meta" }, d.state === "read" ? "Solve one to finish" : `${d.slides} slides`)));
-    }
+    const decks = h("div", { class: "decks" }, ...t.decks.map((d) => deckRow(id, d)));
     if (t.read_more) decks.append(h("p", { class: "read-more" }, `Textbook: ${t.read_more}`));
     box.append(btn, decks);
     topics.append(box);
   }
   page.append(topics);
+  // Homework and practice exams: a list of their own, apart from the topics.
+  if (c.practice?.length) page.append(h("section", { class: "practice-list" + (p.t === "Practice" ? " open" : "") },
+    h("h2", {}, "Practice"), h("p", { class: "muted small" }, "Homework and practice exams"),
+    ...c.practice.map((d) => deckRow(id, d, "pages"))));
   if (c.notes.length) {
     page.append(h("p", { class: "notes-line" }, "Your class notes: ",
       ...c.notes.map((n, i) => {
@@ -451,11 +455,19 @@ async function showCourse(id, token) {
         ...g.files.map((f) => h("a", { href: `#c=${encodeURIComponent(id)}&notes=${encodeURIComponent(f.path)}` }, f.name))])));
   }
   $("#main").replaceChildren(page);
-  if (p.t) $(".topic.open")?.scrollIntoView({ block: "center" });
+  if (p.t) $(".topic.open, .practice-list.open")?.scrollIntoView({ block: "center" });
+}
+
+function deckRow(id, d, unit = "slides") {
+  return h("a", { class: "deck-row", href: `#c=${encodeURIComponent(id)}&d=${encodeURIComponent(d.tag)}&s=${d.last || 1}` },
+    h("span", { class: `dot ${d.state}`, title: stateLabel(d.state) }),
+    h("span", { class: "t" }, h("b", {}, d.tag), ` · ${d.title}`),
+    h("span", { class: "chip week" }, `W${d.week}`),
+    h("span", { class: "meta" }, d.state === "read" ? "Solve one to finish" : `${d.slides} ${unit}`));
 }
 
 const stateLabel = (s) => ({ new: "Not started", started: "Started", read: "Read · solve one to finish", solved: "Solved" })[s] || s;
-function findDeck(c, tag) { for (const t of c.topics) for (const d of t.decks) if (d.tag === tag) return d; return null; }
+function findDeck(c, tag) { for (const t of c.topics) for (const d of t.decks) if (d.tag === tag) return d; return (c.practice || []).find((d) => d.tag === tag) || null; }
 // Lecture order (week, then the deck table's order), not topic order: topics can interleave within a week.
 function courseDeckOrder(c) { return c.topics.flatMap((t) => t.decks).sort((a, b) => a.week - b.week || (a.order ?? 0) - (b.order ?? 0)); }
 
@@ -855,12 +867,13 @@ function renderTutor() {
         h("button", { class: "link", type: "button", title: "Every concept in this deck at a glance (always the whole deck)", onclick: () => tutorAsk("map_deck") }, "Big picture"),
         h("button", { class: "link", type: "button", onclick: () => tutorAsk("example") }, "Worked example"),
         h("button", { class: "link", type: "button", onclick: () => tutorAsk("explain") }, "Explain simply"),
+        h("button", { class: "link", type: "button", title: "An oral exam: one question at a time, follow-ups on weak answers, a summary at the end", onclick: () => tutorAsk("grill") }, "Grill me"),
         h("button", { class: "link", type: "button", onclick: () => tutorAsk("quiz") }, "Quiz prep"),
         h("button", { class: "link", type: "button", title: "What to know first: prerequisites, rules and symbols", onclick: () => tutorAsk("before") }, "Before you start"),
         h("button", { class: "link", type: "button", title: "Methods, formulas and shortcuts to copy onto your sheet (always the whole deck)", onclick: () => tutorAsk("cheatsheet_deck") }, "Cheat sheet"))),
     thread,
-    h("div", { class: "ask-area" }, talkSwitch(),
-      talk ? talkBar() : composeBox("Ask anything about this slide", (q) => tutorAsk("ask", q)))));
+    h("div", { class: "ask-area" }, talk ? h("div", { class: "talk-modes" }, talkSwitch(), scopeSwitch()) : talkSwitch(),
+      talk ? talkBar() : composeBox(composeHint(), (q) => tutorAsk(grilling() ? "grill_reply" : "ask", q)))));
   updateTutorWhere();
   if (talk) talkRefresh(); else drawThread();
   applyReading();
@@ -1005,7 +1018,7 @@ function updateTutorWhere() {
   if (w && APP.deck) w.textContent = APP.scope === "deck" || APP.n > APP.deck.slides ? `${APP.deck.tag} · whole deck` : `${APP.deck.tag} s${APP.n}`;
 }
 
-// What Try one / Worked example / Explain simply / Quiz prep / Before you start work on: the current slide or
+// What Try one / Worked example / Explain simply / Grill me / Quiz prep / Before you start work on: the current slide or
 // the whole deck. (Big picture and Cheat sheet are always the whole deck.)
 const tryKind = () => (APP.scope === "deck" ? "deck" : "try");
 function scopeSwitch() {
@@ -1015,20 +1028,99 @@ function scopeSwitch() {
 }
 
 function composeBox(placeholder, onSend) {
-  const ta = h("textarea", { id: "ask-input", rows: "1", placeholder, "aria-label": placeholder });
+  const ta = h("textarea", { id: "ask-input", rows: "1", placeholder, "aria-label": placeholder,
+    "aria-autocomplete": "list", "aria-controls": "slash-menu" });
   const send = h("button", { class: "btn ghost", type: "submit" }, "Ask");
-  const form = h("form", { class: "compose", onsubmit: (e) => { e.preventDefault(); const q = ta.value.trim(); if (!q) return; ta.value = ""; autosize(); send.classList.add("ghost"); onSend(q); } }, ta, send);
+  const menu = h("ul", { class: "slash-menu", id: "slash-menu", role: "listbox", hidden: true });
+  const form = h("form", { class: "compose", onsubmit: (e) => {
+    e.preventDefault();
+    const q = ta.value.trim();
+    if (!q) return;
+    const slash = q.startsWith("/") ? slashCommand(q) : null;
+    if (slash && slash.error) return toast(slash.error);
+    ta.value = ""; autosize(); send.classList.add("ghost"); slashMenu();
+    if (slash) slash.run(); else onSend(q);
+  } }, menu, ta, micOk() ? dictateButton(ta) : null, send);
   const autosize = () => { ta.style.height = "auto"; ta.style.height = Math.min(160, ta.scrollHeight + 2) + "px"; };
-  ta.addEventListener("input", () => { autosize(); send.classList.toggle("ghost", !ta.value.trim()); });
-  ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
+  // Typing "/" at the start lists the modes; up/down pick, Tab (or Enter) fills one in, then add your own words.
+  let pick = 0, shown = [];
+  const fill = (c) => { ta.value = `/${c.cmd} `; ta.focus(); ta.dispatchEvent(new Event("input")); };
+  const slashMenu = () => {
+    const m = ta.value.match(/^\/(\w*)$/);
+    shown = m ? slashList().filter((c) => c.cmd.startsWith(m[1].toLowerCase())) : [];
+    pick = Math.min(pick, Math.max(0, shown.length - 1));
+    menu.hidden = !shown.length;
+    ta.setAttribute("aria-expanded", String(!!shown.length));
+    menu.replaceChildren(...shown.map((c, i) => h("li", { role: "option", id: `slash-${c.cmd}`, "aria-selected": String(i === pick), class: i === pick ? "on" : "",
+      onmousedown: (e) => { e.preventDefault(); fill(c); } }, h("b", {}, `/${c.cmd}`), h("span", {}, c.hint))));
+    if (shown.length) { ta.setAttribute("aria-activedescendant", `slash-${shown[pick].cmd}`); menu.children[pick].scrollIntoView({ block: "nearest" }); }
+    else ta.removeAttribute("aria-activedescendant");
+  };
+  ta.addEventListener("input", () => { autosize(); send.classList.toggle("ghost", !ta.value.trim()); pick = 0; slashMenu(); });
+  ta.addEventListener("blur", () => { menu.hidden = true; ta.setAttribute("aria-expanded", "false"); });
+  ta.addEventListener("keydown", (e) => {
+    if (!menu.hidden && shown.length) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); pick = (pick + (e.key === "ArrowDown" ? 1 : shown.length - 1)) % shown.length; slashMenu(); return; }
+      if (e.key === "Escape") { e.preventDefault(); menu.hidden = true; ta.setAttribute("aria-expanded", "false"); return; }
+      // Tab fills the command in; so does Enter, unless it's already typed out in full (then Enter runs it).
+      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && ta.value.trim() !== `/${shown[pick].cmd}`)) { e.preventDefault(); fill(shown[pick]); return; }
+    }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
+  });
   return form;
+}
+
+// Slash commands: every tutor mode from the chat box, with your own words after it ("/explain using a bank
+// queue", "/try something with worked numbers"). They follow the This slide / Whole deck switch like the buttons.
+const SLASH = [
+  { cmd: "explain", mode: "explain", hint: "Explain simply" },
+  { cmd: "example", mode: "example", hint: "Worked example" },
+  { cmd: "try", hint: "A practice problem (say what kind)" },
+  { cmd: "quiz", mode: "quiz", hint: "Quiz prep" },
+  { cmd: "grill", mode: "grill", hint: "Grill me: an oral exam" },
+  { cmd: "end", mode: "grill_end", hint: "End the grill", when: () => grilling() },
+  { cmd: "before", mode: "before", hint: "Before you start: what to know first" },
+  { cmd: "deeper", mode: "deeper", hint: "Go deeper on the last answer", when: () => !!(APP.deck && APP.deck.chat && APP.deck.chat.messages.length) },
+  { cmd: "bigpicture", mode: "map_deck", hint: "Big picture · whole deck" },
+  { cmd: "cheatsheet", mode: "cheatsheet_deck", hint: "Cheat sheet · whole deck" },
+  { cmd: "brush", mode: "brush", hint: "Brush up a prerequisite (say which)", needs: "Say what to brush up on, e.g. /brush percentage change" },
+];
+const slashList = () => SLASH.filter((c) => !c.when || c.when());
+
+function slashCommand(text) {
+  const m = text.match(/^\/(\w+)\s*([\s\S]*)$/);
+  const c = m && SLASH.find((x) => x.cmd === m[1].toLowerCase());
+  if (!c) return { error: `No command ${text.split(/\s/)[0]}. Type / to see them.` };
+  if (c.when && !c.when()) return { error: `/${c.cmd} isn't available right now.` };
+  const extra = m[2].trim();
+  if (c.needs && !extra) return { error: c.needs };
+  if (!c.mode) return { run: () => startPracticeInPanel({ kind: tryKind(), focus: extra }) };
+  return { run: () => tutorAsk(c.mode, extra) };
 }
 
 const MODE_LABEL = { explain: "Explain simply", example: "Worked example", deeper: "Go deeper", quiz: "Quiz prep",
   explain_deck: "Explain simply · whole deck", example_deck: "Worked example · whole deck", quiz_deck: "Quiz prep · whole deck",
   map_deck: "Big picture · whole deck", before: "Before you start", before_deck: "Before you start · whole deck",
-  cheatsheet_deck: "Cheat sheet · whole deck" };
-const DECK_MODES = ["explain", "example", "quiz", "before"];
+  cheatsheet_deck: "Cheat sheet · whole deck", grill: "Grill me", grill_deck: "Grill me · whole deck", grill_end: "End the grill" };
+const DECK_MODES = ["explain", "example", "quiz", "before", "grill"];
+// The question line for a request: what the student typed, or the mode's label.
+const askText = (mode, question) => (mode === "ask" || mode === "grill_reply" ? question : mode === "brush" ? `Brush up: ${question}`
+  : question ? `${MODE_LABEL[mode]}: ${question}` : MODE_LABEL[mode]);     // a slash command's own words follow the mode
+
+// Grill me runs over several turns: while the chat's last answer is a grill question, what the student types is
+// their answer (mode grill_reply), so it stays in the grill until the summary or another request ends it.
+const GRILL_MODES = ["grill", "grill_deck", "grill_reply"];
+function grilling() {
+  const msgs = APP.deck && APP.deck.chat ? APP.deck.chat.messages : [];
+  const last = msgs[msgs.length - 1];
+  return !!last && last.role === "a" && GRILL_MODES.includes(last.mode);
+}
+const composeHint = () => (grilling() ? "Your answer, or \"stuck\" / \"stop\"" : "Ask anything about this slide, or / for a mode");
+function updateComposeHint() {
+  const ta = $("#ask-input");
+  if (ta) { ta.placeholder = composeHint(); ta.setAttribute("aria-label", ta.placeholder); }
+  if (DICT.state !== "idle") dictShow();          // still dictating: keep "Listening…" in the box
+}
 
 function drawThread() {
   const th = $("#thread");
@@ -1043,10 +1135,11 @@ function drawThread() {
       ...earlier.map((c) => h("button", { class: "link", type: "button", onclick: () => openChat(c.id) }, c.starred ? `★ ${c.title}` : c.title))));
   }
   msgs.forEach((m, i) => {
-    if (m.role === "q") th.append(h("p", { class: "msg-q" }, m.mode === "voice" ? `🎙 ${m.text}` : m.text, h("span", { class: "where" }, m.slide ? ` · s${m.slide}` : "")));
+    if (m.role === "q") th.append(h("p", { class: "msg-q" }, m.mode === "voice" ? `🎙 ${m.text}` : m.text, h("span", { class: "where" }, m.deck ? ` · ${APP.deck.tag}` : m.slide ? ` · s${m.slide}` : "")));
     else th.append(answerEl(m, i === msgs.length - 1));
   });
   th.scrollTop = th.scrollHeight;
+  updateComposeHint();
 }
 
 function answerEl(m, isLast) {
@@ -1056,7 +1149,10 @@ function answerEl(m, isLast) {
     h("button", { class: "copy-one", type: "button", title: "Copy this answer", onclick: (e) => copyText(unmark(m.text), e.currentTarget) }, "Copy"));
   if (m.mode === "voice") wrap.append(h("button", { class: "link quiet", type: "button", title: "Hear this answer again",
     onclick: (e) => { if (VOICE.playBtn === e.currentTarget) { stopSpeaking(); talkSet("idle"); } else speakAll(m.text, e.currentTarget); } }, "▶ Play again"));
-  if (isLast) {
+  if (isLast && GRILL_MODES.includes(m.mode)) {
+    wrap.append(h("div", { class: "msg-foot" },
+      h("button", { class: "link", type: "button", title: "Stop here: what held up and what's shaky", onclick: () => tutorAsk("grill_end") }, "End the grill: summary ›")));
+  } else if (isLast) {
     const deckWide = (m.mode || "").endsWith("_deck");
     const next = (m.mode || "").startsWith("example")
       ? h("button", { class: "link", type: "button", onclick: () => startPracticeInPanel({ kind: "yourturn", example_md: m.text }) }, "Your turn: finish from here ›")
@@ -1151,7 +1247,7 @@ async function tutorAsk(mode, question = "") {
   const d = APP.deck;
   const n = Math.min(APP.n, d.slides);
   $(".empty", th)?.remove();
-  th.append(h("p", { class: "msg-q" }, mode === "ask" ? question : mode === "brush" ? `Brush up: ${question}` : MODE_LABEL[mode], h("span", { class: "where" }, mode.endsWith("_deck") ? ` · ${d.tag}` : ` · s${n}`)));
+  th.append(h("p", { class: "msg-q" }, askText(mode, question), h("span", { class: "where" }, mode.endsWith("_deck") ? ` · ${d.tag}` : ` · s${n}`)));
   const wait = h("p", { class: "waiting" }, mode.startsWith("example") ? "Writing a worked example…" : mode.endsWith("_deck") ? "Reading the whole deck…" : "Thinking…");
   th.append(wait);
   th.scrollTop = th.scrollHeight;
@@ -1188,8 +1284,8 @@ async function tutorAsk(mode, question = "") {
         if (!queued) { queued = true; setTimeout(() => requestAnimationFrame(paint), Math.max(50, cost * 4)); }
       },
     });
-    const chat = d.chat || { id: r.chat, title: mode === "ask" ? question : MODE_LABEL[mode] || question, updated: "", messages: [] };
-    chat.messages.push({ role: "q", mode, slide: n, text: mode === "ask" ? question : mode === "brush" ? `Brush up: ${question}` : MODE_LABEL[mode] }, r.message);
+    const chat = d.chat || { id: r.chat, title: askText(mode, question), updated: "", messages: [] };
+    chat.messages.push({ role: "q", mode, slide: n, text: askText(mode, question) }, r.message);
     chat.updated = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
     d.chat = chat;
     if (!d.asked.includes(n)) d.asked.push(n);
@@ -1199,6 +1295,7 @@ async function tutorAsk(mode, question = "") {
     // Swap in just the finished answer; the rest of the thread stays as it is.
     wait.remove();
     live.replaceWith(answerEl(r.message, true));
+    updateComposeHint();
     if (follow) th.scrollTop = th.scrollHeight;
   } catch (e) {
     th.removeEventListener("scroll", onScroll);
@@ -1228,6 +1325,7 @@ function setTalk(on) {
   APP.talk = on;
   store.set("talk", on);
   if (!on) { silence(); cancelRecording(); }   // an answer being written still finishes, into the Type tab
+  else cancelDictation();                      // the Type tab's 🎙 goes away with it
   renderTutor();
 }
 
@@ -1538,6 +1636,7 @@ async function micTap() {
 
 // Stop a recording (or one about to start) without sending it: leaving the tab, the deck or the page.
 function cancelRecording() {
+  cancelDictation();
   VOICE.recGen++;
   clearTimeout(VOICE.recTimer);
   const rec = VOICE.rec;
@@ -1565,13 +1664,109 @@ async function finishRecording() {
     const wav = await toWav16k(new Blob(chunks, { type: rec.mimeType }));
     if (tok !== VOICE.recGen) return;
     try {
-      text = (await api("/api/voice/transcribe", { course: d.course, tag: d.tag, n: Math.min(APP.n, d.slides), audio: await blobBase64(wav) })).text.trim();
+      text = (await api("/api/voice/transcribe", { course: d.course, tag: d.tag, n: Math.min(APP.n, d.slides), scope: APP.scope, audio: await blobBase64(wav) })).text.trim();
     } catch (e) { msg = e.message; }
   } catch { /* couldn't decode the recording: msg says so */ } finally {
     stream.getTracks().forEach((t) => t.stop());
     if (tok === VOICE.recGen && VOICE.state === "hearing" && !text) talkSet("idle", msg);
   }
   if (text && tok === VOICE.recGen && APP.deck === d) talkAsk(text);
+}
+
+// ------------------------------------------------------------ dictation (the Type tab)
+// 🎙 next to Ask: speak a question, and what the hub heard is typed into the box to check and edit before sending.
+// Same local speech recognition as Talk; nothing is sent until Ask.
+const DICT = { rec: null, stream: null, chunks: [], gen: 0, timer: 0, state: "idle" };
+const DICT_TITLE = { idle: "Dictate: speak your question, then edit it before sending", listening: "Stop and type out what you said",
+  hearing: "Writing down what you said…" };
+
+function dictateButton(ta) {
+  const b = h("button", { class: "btn ghost dictate", id: "dict-mic", type: "button", onclick: dictTap });
+  dictShow(b, ta);                                  // the new box isn't in the page yet (re-render mid-dictation)
+  return b;
+}
+function dictShow(b = $("#dict-mic"), ta = $("#ask-input")) {
+  if (!b) return;
+  const st = DICT.state;
+  b.textContent = st === "listening" ? "■" : st === "hearing" ? "…" : "🎙";
+  b.title = DICT_TITLE[st];
+  b.setAttribute("aria-label", "Dictate");
+  b.setAttribute("aria-pressed", String(st === "listening"));
+  b.classList.toggle("on", st === "listening");
+  b.disabled = st === "hearing";
+  if (ta) ta.placeholder = st === "listening" ? "Listening… tap ■ to stop" : st === "hearing" ? "Writing down what you said…" : composeHint();
+}
+function dictSet(state) { DICT.state = state; dictShow(); }
+
+async function dictTap() {
+  if (DICT.state === "listening") return dictFinish();
+  if (DICT.state !== "idle") return;
+  const tok = ++DICT.gen;
+  dictSet("listening");
+  api("/api/voice/warm", {}).catch(() => {});       // the speech models load while you talk (the first time ~10 s)
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+  } catch {
+    if (tok === DICT.gen) { dictSet("idle"); toast("The microphone is blocked: allow it from the site settings."); }
+    return;
+  }
+  if (tok !== DICT.gen) { stream.getTracks().forEach((t) => t.stop()); return; }   // cancelled meanwhile
+  try {
+    const rec = new MediaRecorder(stream), chunks = [];
+    rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    rec.start();
+    Object.assign(DICT, { rec, stream, chunks });
+    DICT.timer = setTimeout(() => { if (DICT.rec === rec) dictFinish(); }, MAX_RECORDING_MS);
+  } catch {
+    stream.getTracks().forEach((t) => t.stop());
+    dictSet("idle");
+    toast("This browser couldn't start recording. Try Chrome or Edge.");
+  }
+}
+
+async function dictFinish() {
+  const { rec, stream, chunks, gen: tok } = DICT;
+  if (!rec) { DICT.gen++; return dictSet("idle"); }   // tapped again before the mic had started: don't start it
+  clearTimeout(DICT.timer);
+  Object.assign(DICT, { rec: null, stream: null, chunks: [] });
+  dictSet("hearing");
+  const d = APP.deck;
+  let text = "", msg = "Didn't catch that. Tap 🎙 and try again.";
+  try {
+    if (rec.state !== "inactive") await new Promise((res) => { rec.onstop = res; rec.onerror = res; rec.stop(); setTimeout(res, 3000); });   // never stuck on "…"
+    const wav = await toWav16k(new Blob(chunks, { type: rec.mimeType }));
+    if (tok !== DICT.gen) return;
+    text = (await api("/api/voice/transcribe", { course: d.course, tag: d.tag, n: Math.min(APP.n, d.slides), scope: APP.scope, audio: await blobBase64(wav) })).text.trim();
+  } catch (e) { if (e && e.message && !(e instanceof DOMException)) msg = e.message; } finally {   // a recording that won't decode: "didn't catch that"
+    stream.getTracks().forEach((t) => t.stop());
+  }
+  if (tok !== DICT.gen) return;
+  dictSet("idle");
+  const ta = $("#ask-input");
+  if (!text || !ta || APP.deck !== d) { if (!text) toast(msg); return; }
+  // Into the box where the cursor was (it keeps its place after tapping 🎙 takes the focus), for checking before Ask.
+  const at = ta.selectionStart ?? ta.value.length, end = ta.selectionEnd ?? at;
+  const before = ta.value.slice(0, at), after = ta.value.slice(end);
+  const ins = (before && !/\s$/.test(before) ? " " : "") + text + (after && !/^\s/.test(after) ? " " : "");
+  ta.value = before + ins + after;
+  ta.focus();
+  ta.setSelectionRange(before.length + ins.length, before.length + ins.length);
+  ta.dispatchEvent(new Event("input"));            // resize the box and light up Ask
+}
+
+// Leaving the deck, closing the panel, starting practice: stop listening and drop what was recorded.
+function cancelDictation() {
+  DICT.gen++;
+  clearTimeout(DICT.timer);
+  const rec = DICT.rec;
+  if (rec) {
+    rec.onstop = rec.onerror = rec.ondataavailable = null;
+    if (rec.state !== "inactive") { try { rec.stop(); } catch { /* already stopping */ } }
+  }
+  DICT.stream?.getTracks().forEach((t) => t.stop());
+  Object.assign(DICT, { rec: null, stream: null, chunks: [] });
+  if (DICT.state !== "idle") dictSet("idle");
 }
 
 // Whatever the browser recorded (webm/opus, mp4…) → 16 kHz mono 16-bit WAV, what Whisper wants.
@@ -1598,7 +1793,7 @@ function pcmWav(pcm, rate) {
 const blobBase64 = (b) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(b); });
 
 async function talkAsk(question) {
-  const d = APP.deck, n = Math.min(APP.n, d.slides);
+  const d = APP.deck, n = Math.min(APP.n, d.slides), deck = APP.scope === "deck";
   stopSpeaking();
   const ctrl = VOICE.ctrl = new AbortController();
   const gen = VOICE.gen;
@@ -1609,7 +1804,7 @@ async function talkAsk(question) {
   const sp = speaker(gen, ctrl.signal);
   let r;
   try {
-    r = await apiStream("/api/tutor", { course: d.course, tag: d.tag, n, mode: "voice", question, model: APP.model, slides_only: slidesOnly(d.course) },
+    r = await apiStream("/api/tutor", { course: d.course, tag: d.tag, n, mode: "voice", question, model: APP.model, slides_only: slidesOnly(d.course), scope: deck ? "deck" : "slide" },
       { status: (t) => { if (gen === VOICE.gen && VOICE.state === "thinking") talkSet("thinking", `${t}…`); }, text: sp.feed }, ctrl.signal);
   } catch (e) {
     if (!isAbort(e) && gen === VOICE.gen) { stopSpeaking(); talkSet("idle", e.message); }
@@ -1617,7 +1812,7 @@ async function talkAsk(question) {
   }
   // The server saved the turn, so it joins the deck's chat (and the Type tab shows it) even if it was cut short here.
   const chat = d.chat || { id: r.chat, title: question, updated: "", messages: [] };
-  chat.messages.push({ role: "q", mode: "voice", slide: n, text: question }, r.message);
+  chat.messages.push({ role: "q", mode: "voice", slide: n, text: question, ...(deck ? { deck: true } : {}) }, r.message);
   chat.updated = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
   d.chat = chat;
   if (!d.asked.includes(n)) d.asked.push(n);
@@ -1910,8 +2105,9 @@ function startPracticeInPanel(p) {
   const area = h("div", { class: "practice" });
   t.replaceChildren(h("div", { class: "panel" }, head, area));
   const req = { course: d.course, kind: p.kind, tag: d.tag, n, example_md: p.example_md || "",
-    topics: p.kind === "mixed" ? mixedTopics(d.course) : null };
-  runPractice(area, req, practiceNext(p.kind));
+    topics: p.kind === "mixed" ? mixedTopics(d.course) : null, focus: p.focus || "" };
+  if (req.focus) head.after(h("p", { class: "muted small practice-focus" }, `You asked for: ${req.focus}`));
+  runPractice(area, req, practiceNext(p.kind, req.focus));
 }
 
 function closePractice() {
@@ -1920,21 +2116,21 @@ function closePractice() {
 }
 
 // What the one button after marking does.
-function practiceNext(kind) {
+function practiceNext(kind, focus = "") {     // focus: /try's own words, kept for "Try another" 
   return (result) => {
     const s = APP.session;
     const d = APP.deck;
     if (s && d && s.course === d.course) {
       if (s.step === 2 && kind !== "mixed") {
         s.practised = (s.practised || 0) + 1; saveSession();
-        if (s.practised < 3) return { label: "Try another", run: () => startPracticeInPanel({ kind: kind === "yourturn" ? "try" : kind }) };
+        if (s.practised < 3) return { label: "Try another", run: () => startPracticeInPanel({ kind: kind === "yourturn" ? "try" : kind, focus }) };
         return { label: "Next: one mixed problem", run: () => { setSessionStep(3); startPracticeInPanel({ kind: "mixed" }); } };
       }
       if (s.step === 3 || kind === "mixed") {
         if (s.step === 3) return { label: "Next: one line to remember", run: () => { setSessionStep(4); go({ step: "note" }); } };
       }
     }
-    return { label: "Try another", run: () => startPracticeInPanel({ kind: kind === "yourturn" ? "try" : kind }) };
+    return { label: "Try another", run: () => startPracticeInPanel({ kind: kind === "yourturn" ? "try" : kind, focus }) };
   };
 }
 
@@ -1984,7 +2180,7 @@ async function runPractice(area, req, nextFor, opts = {}) {
     try {
       const s = APP.session;
       const r = await apiStream("/api/practice/check", { id: prob.id, answer: answer.value, model: APP.model,
-        slides_only: slidesOnly(req.course), prefetch: ["try", "deck", "mixed"].includes(req.kind), topics: req.topics },
+        slides_only: slidesOnly(req.course), prefetch: ["try", "deck", "mixed"].includes(req.kind) && !req.focus, topics: req.topics },
         { status: (t) => { markEl.textContent = t === "Writing it up" ? "Writing your feedback…" : `${t}…`; } });
       if (s && r.saved && r.review_id) { s.lastMistake = r.review_id; saveSession(); }
       result.replaceChildren(resultEl(r, prob, req, nextFor, opts));

@@ -152,7 +152,7 @@ def describe(name, args, cdir):
         return "Looking through the course files"
     if name == "Read":
         p = str(args.get("file_path", "")).replace("\\", "/")
-        m = re.search(r"\.cache/Week\d+/([^/]+)\.transcript\.md$", p)
+        m = re.search(r"\.cache/(?:Week\d+|practice)/([^/]+)\.transcript\.md$", p)
         if m:
             return f"Reading the {m.group(1)} slides"
         m = re.search(r"\.cache/textbooks/([^/.]+)", p)

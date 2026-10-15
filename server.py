@@ -38,15 +38,18 @@ def course_summary(cdir):
         "next": L.next_assessment(cdir),
         "reviews": {"count": len(due), "warmup": sum(1 for r in due if r["warmup"]),
                     "minutes": max(1, round(len(due) * 1.5)) if due else 0},
-        "topics": [{"name": t["name"], "read_more": t["read_more"],
-                    "decks": [dict(_deck_public(info["decks"][tag]), state=S.state_word(s["decks"].get(tag, {})),
-                                   last=s["decks"].get(tag, {}).get("last", 1))
-                              for tag in t["decks"]]}
+        "topics": [{"name": t["name"], "read_more": t["read_more"], "decks": [_deck_row(info, s, tag) for tag in t["decks"]]}
                    for t in info["topics"]],
+        "practice": [_deck_row(info, s, tag) for tag in info["practice"]],
         "resume": S.resume_point(cdir, s),
         "notes": L.class_notes(cdir),
         "docs": L.other_docs(cdir),
     }
+
+
+def _deck_row(info, s, tag):
+    return dict(_deck_public(info["decks"][tag]), state=S.state_word(s["decks"].get(tag, {})),
+                last=s["decks"].get(tag, {}).get("last", 1))
 
 
 def _deck_public(d):
@@ -68,7 +71,8 @@ def deck_view(cdir, tag):
     chat = T.load_chat(s["chats"].get(tag)) if s["chats"].get(tag) else None
     asked = sorted({m["slide"] for m in (chat or {}).get("messages", []) if m.get("slide")})
     info = L.course_info(cdir)
-    topic = next(t for t in info["topics"] if t["name"] == d["topic"])
+    topic = next((t for t in info["topics"] if t["name"] == d["topic"]),
+                 {"read_more": "", "decks": info["practice"]})       # a practice deck: its siblings are the practice decks
     chats = [c for c in T.deck_chats(cdir, tag) if not chat or c["id"] != chat["id"]][:5]
     return {**_deck_public(d), "course": cdir.name, "code": info["code"], "read_more": topic["read_more"], "chats": chats,
             "topic_decks": topic["decks"],
@@ -273,9 +277,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             tag = str(req.get("tag", ""))
             d = L.deck(c, tag) if c else None
             hint = ""
-            if d:           # the deck's and slide's titles, so course terms are heard as course terms
-                s = next((x for x in L.slide_texts(c, tag) if x["n"] == _int(req.get("n"))), None)
-                hint = ". ".join(x for x in (d["title"], s and s["title"]) if x)
+            if d:           # the deck's and slide's titles (every slide's, for Whole deck), so course terms are heard right
+                slides = L.slide_texts(c, tag)
+                if req.get("scope") == "deck":
+                    titles = [t for t in dict.fromkeys(x["title"] for x in slides if x["title"]) if t != d["title"]]
+                    keep = []       # Whisper only keeps the end of its prompt: the last titles that fit in ~600 chars
+                    while titles and len(". ".join([titles[-1]] + keep)) <= 600:
+                        keep.insert(0, titles.pop())
+                    hint = ". ".join(keep + [d["title"]])
+                else:
+                    s = next((x for x in slides if x["n"] == _int(req.get("n"))), None)
+                    hint = ". ".join(x for x in (d["title"], s and s["title"]) if x)
             return self._json({"text": V.transcribe(audio, hint)})
         if path == "/api/chat/delete":
             f = T.chat_file(str(req.get("id", "")))
@@ -318,7 +330,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self._json({"error": "That problem has expired. Start a new one."}, 404)
             def work(emit):
                 out = T.check(c, rec["id"], str(req.get("answer", "")), model, web, emit)
-                if req.get("prefetch") and rec["kind"] in ("try", "deck", "mixed"):
+                if req.get("prefetch") and rec["kind"] in ("try", "deck", "mixed") and not rec.get("focus"):
                     T.prefetch(c, {"kind": rec["kind"], "tag": rec["tag"], "n": rec["n"], "topics": req.get("topics")}, model, web)
                 return out
             return self._answer(req, work)
@@ -337,10 +349,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self._json({"error": "Open a deck first."}, 400)
             mode = str(req.get("mode", "ask"))
             q = str(req.get("question") or "")
-            if mode in ("ask", "brush", "voice") and not q.strip():
+            if mode in ("ask", "brush", "voice", "grill_reply") and not q.strip():
                 return self._json({"error": "Type a question first."}, 400)
             def work(emit):
-                chat, msg = T.chat_turn(c, tag, _int(req.get("n")), mode, q, model, web, emit)
+                chat, msg = T.chat_turn(c, tag, _int(req.get("n")), mode, q, model, web, emit,
+                                        whole_deck=req.get("scope") == "deck")
                 return {"chat": chat["id"], "message": msg}
             return self._answer(req, work)
         if path == "/api/side":              # a side question about a term or a selection (forks the chat)
@@ -363,7 +376,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if kind not in T.TASKS:
                 return self._json({"error": "Unknown practice kind."}, 400)
             r = {"kind": kind, "tag": req.get("tag"), "n": req.get("n"), "example_md": req.get("example_md", ""),
-                 "review_id": req.get("review_id"), "topics": req.get("topics")}
+                 "review_id": req.get("review_id"), "topics": req.get("topics"), "focus": str(req.get("focus") or "")}
             return self._answer(req, lambda emit: T.public_problem(T.new_problem(c, r, model, web, emit)))
         if path == "/api/review/note":
             r = S.set_note(c, str(req.get("id", "")), str(req.get("note", "")))

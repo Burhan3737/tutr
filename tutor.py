@@ -5,7 +5,8 @@ deck, streaming, the course-folder check) lives in engine.py. This file holds th
 study logic.
 
 Modes
-- chat (explain / example / quiz / map / before / cheatsheet / ask / deeper / brush / side): Markdown answers streamed into the deck's chat
+- chat (explain / example / quiz / map / before / cheatsheet / grill / ask / deeper / brush / side): Markdown answers
+  streamed into the deck's chat; a grill runs over several turns (the student's answers come back as grill_reply)
 - voice: a spoken question from the Talk tab, answered in plain spoken sentences (voice_prompt.md) in the same
   chat; afterwards the tutor's notes on the student (study/tutor-memory.md) are updated in the background
 - practice: a problem written and solved by Claude (structured output); the solution and hints stay
@@ -131,6 +132,44 @@ def where(cdir, tag, n):
 
 
 # ---------------------------------------------------------------- chat (explain / example / ask / deeper)
+
+# Grill me (after Matt Pocock's grill-me skill): an oral exam, one question at a time, walking the slide's ideas
+# as a tree from the root. It's a conversation: the opening turn ("grill" / "grill_deck") sets the rules, every
+# answer the student types while it runs comes back as "grill_reply" (app.js), and "grill_end" asks for the summary.
+GRILL_SUMMARY = """#### How the grill went
+**Held up:** <bullets: what they showed they know, each with its slide>
+**Shaky:** <bullets: each gap, the right idea in one line, its slide; "- nothing" if none>
+**Next:** <one line: what to practise next, e.g. Try one on [TAG sN]>"""
+GRILL_RULES = """
+
+Known weak points of this student (steer towards any that touch this material; don't mention the list):
+{mistakes}
+
+Each time the student replies, until the grill ends:
+- Open with the verdict: "Right", "Right, but" (correct yet missing a reason or a step) or "Not quite".
+- Right: confirm in one line; add the model answer in 1–2 lines only if theirs lacked something worth having.
+- Right, but / Not quite: don't give the answer. Name what's missing or wrong in one line, then ask a smaller
+  question on that same point. Don't move on until it holds up. Only when they say they're stuck, ask for the
+  answer, or miss the same point twice: explain it briefly (about 80 words, citing the slide), then ask a
+  variant of the same question (other numbers or a changed condition) to check it stuck.
+- Probe the why: a correct answer with no reason gets "why?", "what rule allows that step?" or "what if
+  <condition> changed?" before the next branch.
+- Calculations and derivations: demand the full written working, as on paper in the exam: every step, the rule
+  that justifies it as a marked term (e.g. [[solving a linear equation]]) and explicit constants. A bare final answer or
+  a step with no rule is "Right, but". If the course's CLAUDE.md asks for more (e.g. the algebra rule behind
+  every step), hold them to it.
+- Then the next question, numbered on (Q2, Q3 …), same shape: ONE question per reply, never two. Climb the
+  tree: core definitions → why each step works → edge cases and traps → an exam-style problem.
+- Keep each reply under about 150 words. Don't lecture; the student does the talking.
+- End when every branch is covered (about {count} questions) or the student asks to stop: instead of a new
+  question, this summary:
+
+""" + GRILL_SUMMARY
+GRILL_SHAPE = """
+**Q1 · <a few words naming what it tests>** [<its slide, e.g. {tag} s3>]
+<the question: one thing only, answerable in a few lines>
+
+Then stop and wait for the answer: no answer, no hint, no list of the questions to come."""
 
 CHAT_PROMPTS = {
     "explain": """Tutor the student through the idea on slide {where} so they actually understand it, as a good tutor
@@ -267,14 +306,52 @@ CLAUDE.md for the format and aids). Cite slides. HARD LIMIT 400 words — terse 
 #### Check yourself
 <3 short questions of the likely types, as a numbered list; end each item with its answer hidden in double
 bars on the same line, e.g. "1. What is …? ||Answer: … (one or two sentences)||">""",
+    "grill": """Grill the student on slide {where}: a relentless oral exam, one question at a time, until you both know
+they understand it. If that slide is a title, outline or admin slide, use the main idea of the slides around it.
+Map what it teaches as a tree: core definitions and facts at the root, then the steps and the reasons behind
+them, then edge cases, then applying it the way this course's assessments ask ({style}). Walk it from the root,
+one branch at a time, and never ask something that rests on an idea they haven't shown yet.
+
+This turn: one line naming what the grill will cover (3–5 marked terms separated by " · "), then the first
+question, this shape:
+""" + GRILL_SHAPE + GRILL_RULES.replace("{count}", "8"),
+    "grill_deck": """Grill the student on the whole deck {deck}: a relentless oral exam, one question at a time, until
+you both know they understand it. Skip title, outline and admin slides. Map what the deck teaches as a tree: its
+core definitions at the root, then each method and the reasons behind its steps, then how the ideas connect,
+edge cases, and applying them the way this course's assessments ask ({style}). Walk it from the root, one branch
+at a time, and never ask something that rests on an idea they haven't shown yet.
+
+This turn: one line naming the deck's main ideas the grill will cover (at most 6 marked terms separated by
+" · "), then the first question, this shape:
+""" + GRILL_SHAPE + GRILL_RULES.replace("{count}", "12"),
+    "grill_reply": """The student's answer to your last grill question (they are now on slide {where}):
+
+{question}
+
+Carry on the grill by its rules: the verdict, then probe, follow up or ask the next single question; or, if
+they asked to stop or every branch is covered, the summary.""",
+    "grill_end": """End the grill now: no new question. From all the student's answers in this grill, this summary:
+
+""" + GRILL_SUMMARY + """
+
+If no grill has run in this chat, say so in one line instead.""",
 }
 
-DECK_MODES = {"explain_deck", "example_deck", "quiz_deck", "map_deck", "before_deck", "cheatsheet_deck"}
+DECK_MODES = {"explain_deck", "example_deck", "quiz_deck", "map_deck", "before_deck", "cheatsheet_deck", "grill_deck"}
 MODE_LABELS = {"explain": "Explain simply", "example": "Worked example", "deeper": "Go deeper", "quiz": "Quiz prep",
                "map_deck": "Big picture · whole deck", "before": "Before you start",
                "before_deck": "Before you start · whole deck", "cheatsheet_deck": "Cheat sheet · whole deck",
                "explain_deck": "Explain simply · whole deck", "example_deck": "Worked example · whole deck",
-               "quiz_deck": "Quiz prep · whole deck"}
+               "quiz_deck": "Quiz prep · whole deck", "grill": "Grill me", "grill_deck": "Grill me · whole deck",
+               "grill_end": "End the grill"}       # grill_reply is labelled with the student's answer, like ask
+
+
+# A mode asked by slash command (/explain …) can carry the student's own words: added to the mode's prompt.
+QUESTION_MODES = {"ask", "brush", "grill_reply"}       # their prompts already are the student's words
+EXTRA = """
+
+The student added this to the request: "{extra}". Let it shape the answer (what to focus on, an example to use,
+what they already know or find hard) while keeping the form asked for above."""
 
 
 def deck_where(cdir, tag):
@@ -297,11 +374,16 @@ def _deck_lock(cdir, tag):
         return _DECK_LOCKS.setdefault((cdir.name, tag), threading.Lock())
 
 
-def chat_turn(cdir, tag, n, mode, question, model, web, emit=None):
-    """One tutor answer inside the deck's chat. Returns the saved message and the chat id."""
+def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=False):
+    """One tutor answer inside the deck's chat. Returns the saved message and the chat id. whole_deck: a voice
+    question asked with Talk set to Whole deck (about the deck, not slide n)."""
+    whole_deck = whole_deck and mode == "voice"
     if mode not in CHAT_PROMPTS and mode != "voice":
         raise TutorError("Unknown request.", 400)
+    extra = question.strip() if mode in CHAT_PROMPTS and mode not in QUESTION_MODES else ""
     label = MODE_LABELS.get(mode) or (f"Brush up: {question.strip()}" if mode == "brush" else question.strip())
+    if extra and mode in MODE_LABELS:
+        label = f"{MODE_LABELS[mode]}: {extra}"
     now = time.strftime("%Y-%m-%d %H:%M")
     lock = _deck_lock(cdir, tag)
     with lock:
@@ -313,15 +395,19 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None):
         if created:     # the file is saved only once Claude has answered
             chat = {"id": _WARM_IDS.pop((cdir.name, tag), None) or uuid.uuid4().hex[:12], "course": cdir.name,
                     "code": L.course_meta(cdir)[0], "deck": tag, "created": now, "messages": [],
-                    "title": f"{label[:70]} · " + (tag if mode in DECK_MODES else f"s{n}")}
+                    "title": f"{label[:70]} · " + (tag if mode in DECK_MODES or whole_deck else f"s{n}")}
             _PENDING[chat["id"]] = dict(chat, messages=[])
             S.set_chat(cdir, tag, chat["id"])
     if mode == "voice":
-        prompt = voice_prompt(cdir, where(cdir, tag, n), question.strip())
+        prompt = voice_prompt(cdir, f"the whole deck {deck_where(cdir, tag)}" if whole_deck else f"slide {where(cdir, tag, n)}",
+                              question.strip())
     else:
         prompt = CHAT_PROMPTS[mode].format(where=where(cdir, tag, n), question=question.strip(), tag=tag,
                                            deck=deck_where(cdir, tag),
-                                           style=STYLE.get(L.course_meta(cdir)[0], "this course's quizzes and exams"))
+                                           style=STYLE.get(L.course_meta(cdir)[0], "this course's quizzes and exams"),
+                                           mistakes=weak_points(cdir) if mode in ("grill", "grill_deck") else "")
+        if extra:
+            prompt += EXTRA.format(extra=extra[:2000])
     try:
         r = run_claude(cdir, system_prompt(cdir, tag, web), prompt, model=model, chat_key=(cdir.name, tag, chat["id"]),
                        session=chat.get("session"), web=web, label=f"chat:{mode}", emit=emit)
@@ -330,14 +416,19 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None):
             chat = load_chat(chat["id"]) or chat
             chat["session"] = r["session"] or chat.get("session")       # the last finished turn's
             chat["updated"] = time.strftime("%Y-%m-%d %H:%M")
-            chat["messages"] = chat.get("messages", []) + [{"role": "q", "mode": mode, "slide": n, "text": label}, msg]
+            q = {"role": "q", "mode": mode, "slide": n, "text": label}
+            if whole_deck:
+                q["deck"] = True
+            chat["messages"] = chat.get("messages", []) + [q, msg]
             save_chat(chat)
     finally:
         if created:
             with lock:
                 _PENDING.pop(chat["id"], None)
     if mode == "voice":
-        remember(cdir, tag, n, question.strip(), r["text"])
+        remember(cdir, tag, None if whole_deck else n, question.strip(), r["text"])
+    elif mode == "grill_reply":     # a missed point in a grill goes into the same notes as a corrected voice mistake
+        remember(cdir, tag, n, question.strip(), r["text"], grill=True)
     return chat, msg
 
 
@@ -360,11 +451,12 @@ def warm_chat(cdir, tag, model, web):
 # turn, so it can be tuned without a restart). The voice tutor keeps notes on the student in
 # <course>/study/tutor-memory.md: read into every voice turn, and rewritten after each one by a quick one-off
 # call in the background, so the next answer knows what was asked again and which mistakes were corrected.
+# Answers typed during a Grill me feed the same notes (what the grill found wrong), and a grill steers by them.
 
 VOICE_PROMPT = HERE / "voice_prompt.md"
 MEMORY_MODEL = "claude-haiku-4-5"
 MEMORY_TITLE = "# What your tutor remembers"
-MEMORY_HEAD = MEMORY_TITLE + "\n\n_Kept by the Study Hub's voice tutor after each spoken question. Edit or delete anything._\n\n"
+MEMORY_HEAD = MEMORY_TITLE + "\n\n_Kept by the Study Hub's tutor after each spoken question and grill answer. Edit or delete anything._\n\n"
 MEMORY_SECTIONS = ("About me", "Questions I keep asking", "Mistakes I've corrected", "Still shaky")
 _MEMORY_LOCKS = {}
 _MEMORY_LOCKS_LOCK = threading.Lock()
@@ -400,6 +492,13 @@ def known_mistakes(cdir, limit=3000):
     return "\n\n".join(out)[:limit]
 
 
+def weak_points(cdir):
+    """What a grill steers towards: progress.md's weak topics and error log, and the notes' Still shaky."""
+    shaky = L.section(memory_text(cdir), "Still shaky").strip()
+    out = [known_mistakes(cdir)] + ([f"### Still shaky (tutor's notes)\n{shaky}"] if shaky and shaky != "- (nothing yet)" else [])
+    return "\n\n".join(x for x in out if x) or "(none recorded yet)"
+
+
 def voice_prompt(cdir, where_, question):
     t = re.sub(r"<!--.*?-->\s*", "", VOICE_PROMPT.read_text(encoding="utf-8"), flags=re.S).strip()
     fill = {"where": where_, "question": question, "memory": memory_text(cdir) or "(nothing yet: this is a new student)",
@@ -421,8 +520,7 @@ MEMORY_PROMPT = """Today is {today}. Here is the notebook so far:
 {memory}
 </notebook>
 
-Here is the latest spoken exchange, on deck [{tag}] slide {n}. The question came through speech recognition,
-so ignore misheard words.
+Here is the latest {exchange}, on deck [{tag}] {at}.{heard}
 
 <student>{question}</student>
 <tutor>{answer}</tutor>
@@ -464,14 +562,21 @@ MEMORY_HINT = """
 Note: the tutor's answer opens with a correction, so the student said something wrong. Record it under
 Mistakes I've corrected.
 """
+MEMORY_SPOKEN = """ The question came through speech recognition,
+so ignore misheard words."""
+MEMORY_GRILL = """ The tutor is grilling the student (asking them
+questions); the student's text is their typed answer to its last question, not a question of their own. Record
+under Mistakes I've corrected what the tutor said was wrong or missing ("Not quite", "Right, but"), and nothing
+under Questions I keep asking."""
 MEMORY_RETRY = """
 
 Your last reply put a summary in "memory". It must be the whole notebook itself: the four "## " sections with
 their bullets, as described above."""
 
 
-def remember(cdir, tag, n, question, answer):
-    """Update the tutor's notes on the student after a voice turn, in the background (nobody waits for it)."""
+def remember(cdir, tag, n, question, answer, grill=False):
+    """Update the tutor's notes on the student after a voice turn (or a grill answer: grill=True), in the
+    background (nobody waits for it)."""
     def work():
         with _MEMORY_LOCKS_LOCK:
             lock = _MEMORY_LOCKS.setdefault(cdir.name, threading.Lock())
@@ -481,7 +586,10 @@ def remember(cdir, tag, n, question, answer):
             try:
                 text, mtime = _read_memory(cdir)
                 hint = MEMORY_HINT if CORRECTION.match(answer.replace("’", "'")) else ""
-                prompt = MEMORY_PROMPT.format(today=time.strftime("%Y-%m-%d"), tag=tag, n=n, hint=hint,
+                prompt = MEMORY_PROMPT.format(today=time.strftime("%Y-%m-%d"), tag=tag, hint=hint,
+                                              exchange="grill exchange" if grill else "spoken exchange",
+                                              heard=MEMORY_GRILL if grill else MEMORY_SPOKEN,
+                                              at=f"slide {n}" if n else "(about the whole deck)",
                                               memory=memory_text(cdir, text) or "(empty: this is the first exchange)",
                                               question=question[:2000], answer=answer[:4000])
                 for attempt in (1, 2):      # Haiku now and then returns a summary instead of the notebook: once more
@@ -751,6 +859,10 @@ def _generate(cdir, req, model, web, emit=None):
                               mistake=(review or {}).get("mistake") or "a mistake",
                               problem=(review or {}).get("problem_md") or (review or {}).get("concept", ""),
                               concept=(review or {}).get("concept", ""))
+    focus = str(req.get("focus") or "").strip()[:500]
+    if focus:       # /try with the student's own words
+        task += (f'\n\nThe student asked for this problem: "{focus}". Follow it (topic, difficulty, kind of '
+                 f'question) as long as it fits the slides.')
     prompt = PRACTICE_BASE.format(style=STYLE.get(info["code"], "an exam-style question for this course"),
                                   surface=SURFACE_NEW if kind != "yourturn" else "same structure as the example.",
                                   task=task)
@@ -764,7 +876,7 @@ def _generate(cdir, req, model, web, emit=None):
            "problem_md": j["problem_md"], "solution_md": j["solution_md"], "final_answer": j["final_answer"],
            "hints": [h for h in j["hints"] if h][:2] or ["Look again at the definition on the slide."],
            "concept": j["concept"] or (review or {}).get("concept", ""), "slides": j.get("slides", ""),
-           "hints_used": 0, "attempts": [], "photos": [], "created": time.strftime("%Y-%m-%d %H:%M"),
+           "hints_used": 0, "attempts": [], "photos": [], "created": time.strftime("%Y-%m-%d %H:%M"), "focus": focus,
            "ms": r["ms"], "cost": r["cost"], "model": model}
     with _P_LOCK:
         _PRACTICE[rec["id"]] = rec
@@ -779,7 +891,7 @@ def _prefetch_key(cdir, req, model, web):
 def new_problem(cdir, req, model, web, emit=None):
     """A new problem; takes a prefetched one when it's ready (or waits for it) instead of starting over."""
     key = _prefetch_key(cdir, req, model, web)
-    if req.get("kind") in ("try", "deck", "mixed"):
+    if req.get("kind") in ("try", "deck", "mixed") and not req.get("focus"):      # a prefetched one has no focus
         with _P_LOCK:
             pf = _PREFETCH.pop(key, None)
         if pf:

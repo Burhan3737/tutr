@@ -203,6 +203,148 @@ def test_chat_turn(tmp):
         check("chat_turn: the next turn after a failure starts a chat", [m["text"] for m in chat["messages"]][0] == "Q6")
 
 
+# ---------------------------------------------------------------- chat_turn(): Talk's This slide | Whole deck
+
+def test_chat_turn_scope(tmp):
+    cdir = tmp / "Scope"
+    (cdir / "study").mkdir(parents=True)
+    state, prompts, remembered = {}, [], []
+
+    def fake_run(cdir_, system, prompt, **kw):
+        prompts.append(prompt)
+        return {"text": "an answer", "json": None, "session": "s", "ms": 1, "cost": 0}
+    f = tmp / "scope-prompt.md"
+    f.write_text("W: {where}\nQ: {question}\n", encoding="utf-8")
+    patches = Patch((T, "run_claude", fake_run), (T, "CHATS", tmp / "scope-chats"), (T, "log", lambda m: None),
+                    (T, "VOICE_PROMPT", f), (T, "remember", lambda *a: remembered.append(a)),
+                    (T, "system_prompt", lambda *a: "SYSTEM"),
+                    (T, "deck_where", lambda c, t: f"[{t}] \"Deck title\" (slides 1–9)"),
+                    (T, "where", lambda c, t, n: f"[{t} s{n}] \"Slide title\""),
+                    (L, "course_meta", lambda c: ("DEMO", "Test")),
+                    (S, "chat_for", lambda c, tag: state.get(tag)),
+                    (S, "set_chat", lambda c, tag, cid: state.__setitem__(tag, cid)))
+    with patches:
+        chat, _ = T.chat_turn(cdir, "S&D-1", 4, "voice", "what is this deck about", "m", False, whole_deck=True)
+        q = chat["messages"][0]
+        check("chat_turn scope: whole deck -> 'the whole deck [' in the prompt",
+              "W: the whole deck [S&D-1] \"Deck title\"" in prompts[-1] and "slide [" not in prompts[-1], prompts[-1])
+        check("chat_turn scope: whole deck -> new chat's title ends with the tag", chat["title"].endswith(" · S&D-1"),
+              chat["title"])
+        check("chat_turn scope: whole deck -> q message has deck True", q.get("deck") is True and q["slide"] == 4, q)
+        check("chat_turn scope: voice turn still remembered", len(remembered) == 1)
+
+        state.clear()
+        chat, _ = T.chat_turn(cdir, "S&D-1", 4, "voice", "what is this slide", "m", False)
+        q = chat["messages"][0]
+        check("chat_turn scope: this slide -> 'slide [TAG sN]' unchanged", "W: slide [S&D-1 s4] \"Slide title\"" in prompts[-1]
+              and "whole deck" not in prompts[-1], prompts[-1])
+        check("chat_turn scope: this slide -> title ends with sN", chat["title"].endswith(" · s4"), chat["title"])
+        check("chat_turn scope: this slide -> no deck key", "deck" not in q, q)
+        chat, _ = T.chat_turn(cdir, "S&D-1", 5, "voice", "and the deck?", "m", False, whole_deck=True)
+        check("chat_turn scope: existing chat keeps its title, deck q appended",
+              chat["title"].endswith(" · s4") and chat["messages"][-2].get("deck") is True, chat["messages"][-2])
+
+        state.clear()
+        chat, _ = T.chat_turn(cdir, "S&D-1", 4, "ask", "a typed question", "m", False, whole_deck=True)
+        q = chat["messages"][0]
+        check("chat_turn scope: whole_deck ignored for non-voice modes", "deck" not in q
+              and chat["title"].endswith(" · s4") and "whole deck" not in prompts[-1], (q, chat["title"]))
+
+
+# ---------------------------------------------------------------- slash commands: a mode with the student's words
+
+def test_slash_extra(tmp):
+    cdir = tmp / "Slash"
+    (cdir / "study").mkdir(parents=True)
+    state, prompts = {}, []
+
+    def fake_run(cdir_, system, prompt, **kw):
+        prompts.append(prompt)
+        return {"text": "an answer", "json": None, "session": "s", "ms": 1, "cost": 0}
+    patches = Patch((T, "run_claude", fake_run), (T, "CHATS", tmp / "slash-chats"), (T, "log", lambda m: None),
+                    (T, "remember", lambda *a, **kw: None), (T, "system_prompt", lambda *a: "SYSTEM"),
+                    (T, "weak_points", lambda c: "(none)"),
+                    (T, "deck_where", lambda c, t: f"[{t}] \"Deck title\" (slides 1–9)"),
+                    (T, "where", lambda c, t, n: f"[{t} s{n}] \"Slide title\""),
+                    (L, "course_meta", lambda c: ("DEMO", "Test")),
+                    (S, "chat_for", lambda c, tag: state.get(tag)),
+                    (S, "set_chat", lambda c, tag, cid: state.__setitem__(tag, cid)))
+    plain = lambda mode: T.CHAT_PROMPTS[mode].format(where="[S&D-1 s4] \"Slide title\"", question="", tag="S&D-1",
+                                                     deck="[S&D-1] \"Deck title\" (slides 1–9)",
+                                                     style=T.STYLE.get("DEMO", "this course's quizzes and exams"),
+                                                     mistakes="(none)")
+    last_q = lambda chat: chat["messages"][-2]["text"]
+    with patches:
+        chat, _ = T.chat_turn(cdir, "S&D-1", 4, "explain", "  focus on the equilibrium step ", "m", False)
+        check("slash: explain + words -> prompt ends with EXTRA",
+              prompts[-1] == plain("explain") + T.EXTRA.format(extra="focus on the equilibrium step"), prompts[-1][-300:])
+        check("slash: explain + words -> label 'Explain simply: …'",
+              last_q(chat) == "Explain simply: focus on the equilibrium step", last_q(chat))
+        check("slash: explain + words -> new chat title uses the label",
+              chat["title"].startswith("Explain simply: focus on the equilibrium step"), chat["title"])
+        chat, _ = T.chat_turn(cdir, "S&D-1", 4, "explain", "   ", "m", False)
+        check("slash: explain without words -> prompt unchanged", prompts[-1] == plain("explain"), prompts[-1][-300:])
+        check("slash: explain without words -> label 'Explain simply'", last_q(chat) == "Explain simply", last_q(chat))
+        for mode, q in (("ask", "what is elasticity?"), ("brush", "percentage change"), ("grill_reply", "it is a ratio")):
+            chat, _ = T.chat_turn(cdir, "S&D-1", 4, mode, q, "m", False)
+            check(f"slash: {mode} -> no EXTRA", "The student added this to the request" not in prompts[-1]
+                  and q in prompts[-1], prompts[-1][-300:])
+        msgs = T.load_chat(state["S&D-1"])["messages"]
+        check("slash: brush / grill_reply labels unchanged", msgs[-4]["text"] == "Brush up: percentage change"
+              and msgs[-2]["text"] == "it is a ratio", [m["text"] for m in msgs[-6::2]])
+        chat, _ = T.chat_turn(cdir, "S&D-1", 4, "explain_deck", "use a farmers' market", "m", False)
+        check("slash: explain_deck label", last_q(chat) == "Explain simply · whole deck: use a farmers' market", last_q(chat))
+        chat, _ = T.chat_turn(cdir, "S&D-1", 4, "explain", "what's {n} and {} and {{x}} {where}?", "m", False)
+        check("slash: braces in the words kept literally", prompts[-1].endswith(
+              T.EXTRA.format(extra="what's {n} and {} and {{x}} {where}?")) and "{n} and {} and {{x}} {where}?" in prompts[-1],
+              prompts[-1][-300:])
+        check("slash: braces in the label kept", last_q(chat) == "Explain simply: what's {n} and {} and {{x}} {where}?")
+        for mode in ("grill_end", "deeper"):
+            chat, _ = T.chat_turn(cdir, "S&D-1", 4, mode, "keep it short", "m", False)
+            check(f"slash: {mode} + words -> EXTRA appended and labelled",
+                  prompts[-1].endswith(T.EXTRA.format(extra="keep it short"))
+                  and last_q(chat) == f"{T.MODE_LABELS[mode]}: keep it short", (last_q(chat), prompts[-1][-200:]))
+
+
+def test_practice_focus(tmp):
+    cdir = tmp / "Practice"
+    (cdir / "study").mkdir(parents=True)
+    prompts = []
+    problem = {"problem_md": "Find the equilibrium price for Qd = 100 - 2P and Qs = 3P.", "solution_md": "1. Set Qd = Qs", "final_answer": "P = 20",
+               "hints": ["h1", "h2"], "concept": "equilibrium", "slides": "S&D-1 s4", "deck": "S&D-1"}
+
+    def fake_run(cdir_, system, prompt, **kw):
+        prompts.append(prompt)
+        return {"text": "", "json": dict(problem), "session": None, "ms": 1, "cost": 0}
+    patches = Patch((T, "run_claude", fake_run), (T, "PRACTICE_DIR", tmp / "practice"), (T, "log", lambda m: None),
+                    (T, "system_prompt", lambda *a: "SYSTEM"), (T, "where", lambda c, t, n: f"[{t} s{n}]"),
+                    (L, "deck", lambda c, t: {"title": "D", "slides": 9} if t == "S&D-1" else None),
+                    (L, "course_info", lambda c: {"code": "DEMO", "topics": []}))
+    with patches:
+        req = {"kind": "try", "tag": "S&D-1", "n": 4, "focus": "  harder, with {worked} numbers  "}
+        rec = T._generate(cdir, req, "m", False)
+        check("practice focus: in the prompt", 'The student asked for this problem: "harder, with {worked} numbers"'
+              in prompts[-1], prompts[-1][-300:])
+        check("practice focus: on the record", rec["focus"] == "harder, with {worked} numbers", rec.get("focus"))
+        check("practice focus: public_problem works", T.public_problem(rec)["problem_md"] == problem["problem_md"])
+        rec = T._generate(cdir, {"kind": "try", "tag": "S&D-1", "n": 4}, "m", False)
+        check("practice no focus: no focus line", "The student asked for this problem" not in prompts[-1]
+              and rec["focus"] == "")
+
+        ready = threading.Event(); ready.set()
+        pre = {"id": "prefetched01", "n": 4}
+        key = T._prefetch_key(cdir, {"kind": "try", "tag": "S&D-1"}, "m", False)
+        T._PREFETCH[key] = {"event": ready, "rec": pre}
+        try:
+            got = T.new_problem(cdir, {"kind": "try", "tag": "S&D-1", "n": 4, "focus": "with a price ceiling"}, "m", False)
+            check("new_problem focus: prefetched problem not taken", got is not pre and got["focus"] == "with a price ceiling")
+            check("new_problem focus: prefetched problem left for later", T._PREFETCH.get(key, {}).get("rec") is pre)
+            got = T.new_problem(cdir, {"kind": "try", "tag": "S&D-1", "n": 4}, "m", False)
+            check("new_problem no focus: prefetched problem taken", got is pre)
+        finally:
+            T._PREFETCH.pop(key, None)
+
+
 # ---------------------------------------------------------------- the voice models
 
 def to_16k_mono(wav_bytes):
@@ -268,6 +410,9 @@ def main():
         test_memory_text(tmp)
         test_remember(tmp)
         test_chat_turn(tmp)
+        test_chat_turn_scope(tmp)
+        test_slash_extra(tmp)
+        test_practice_focus(tmp)
     test_voice_errors()
     if "--no-models" not in sys.argv:
         test_round_trip()
