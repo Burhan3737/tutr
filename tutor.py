@@ -1,12 +1,12 @@
 """The tutor: what the Study Hub asks Claude, and what it does with the answers.
 
 How the calls are made (the Claude Agent SDK on the Claude Code login, one open conversation per
-deck, streaming, the course-folder check) lives in engine.py. This file holds the prompts and the
+course chat, streaming, the course-folder check) lives in engine.py. This file holds the prompts and the
 study logic.
 
 Modes
 - chat (explain / example / quiz / map / before / cheatsheet / grill / ask / deeper / brush / side): Markdown answers
-  streamed into the deck's chat; a grill runs over several turns (the student's answers come back as grill_reply)
+  streamed into the course's chat; a grill runs over several turns (the student's answers come back as grill_reply)
 - voice: a spoken question from the Talk tab, answered in plain spoken sentences (voice_prompt.md) in the same
   chat; afterwards the tutor's notes on the student (study/tutor-memory.md) are updated in the background
 - practice: a problem written and solved by Claude (structured output); the solution and hints stay
@@ -359,23 +359,35 @@ def deck_where(cdir, tag):
     return f"[{tag}] \"{d['title']}\" (slides 1–{d['slides']})" if d else f"[{tag}]"
 
 
-# Two questions on one deck can be in flight at once (a voice turn spoken while the last one is still being
+# Two questions in one course can be in flight at once (a voice turn spoken while the last one is still being
 # answered). Both go into the same chat: the first to start a new chat registers it at once (_PENDING until its
 # file is saved), so the second joins it, and the engine runs both on the same client, one after the other.
 # Each turn reloads the chat just before saving and appends to the fresh copy, so neither overwrites the other.
-_DECK_LOCKS = {}            # (course, tag) -> lock around picking/creating the chat and around reload→append→save
-_DECK_LOCKS_LOCK = threading.Lock()
+_COURSE_LOCKS = {}          # course -> lock around picking/creating the chat and around reload→append→save
+_COURSE_LOCKS_LOCK = threading.Lock()
 _PENDING = {}               # chat id -> the new chat's skeleton, until its first answer is saved
-_WARM_IDS = {}              # (course, tag) -> the id a warm-up opened a client for, used by the next new chat
+_WARM_IDS = {}              # course -> the id a warm-up opened a client for, used by the next new chat
 
 
-def _deck_lock(cdir, tag):
-    with _DECK_LOCKS_LOCK:
-        return _DECK_LOCKS.setdefault((cdir.name, tag), threading.Lock())
+def _course_lock(cdir):
+    with _COURSE_LOCKS_LOCK:
+        return _COURSE_LOCKS.setdefault(cdir.name, threading.Lock())
+
+
+def current_chat(cdir):
+    """The id of the course's current chat. Before there was one per course, each deck had its own: the most
+    recently updated of those that still exist becomes the course's (once)."""
+    s = S.load(cdir)
+    if "chat" in s:
+        return s["chat"]
+    old = [c for c in map(load_chat, set(s["chats"].values())) if c]
+    chat_id = max(old, key=lambda c: c.get("updated") or c.get("created") or "")["id"] if old else None
+    S.set_chat(cdir, chat_id)
+    return chat_id
 
 
 def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=False):
-    """One tutor answer inside the deck's chat. Returns the saved message and the chat id. whole_deck: a voice
+    """One tutor answer inside the course's chat, about deck tag. Returns the saved message and the chat id. whole_deck: a voice
     question asked with Talk set to Whole deck (about the deck, not slide n)."""
     whole_deck = whole_deck and mode == "voice"
     if mode not in CHAT_PROMPTS and mode != "voice":
@@ -385,19 +397,20 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=Fa
     if extra and mode in MODE_LABELS:
         label = f"{MODE_LABELS[mode]}: {extra}"
     now = time.strftime("%Y-%m-%d %H:%M")
-    lock = _deck_lock(cdir, tag)
+    lock = _course_lock(cdir)
     with lock:
-        chat_id = S.chat_for(cdir, tag)
+        chat_id = current_chat(cdir)
         chat = load_chat(chat_id) if chat_id else None
-        if chat is None and chat_id in _PENDING:       # another turn is starting this chat right now: join it
+        joined = chat is None and chat_id in _PENDING
+        if joined:      # another turn is starting this chat right now: join it
             chat = dict(_PENDING[chat_id])
         created = chat is None
         if created:     # the file is saved only once Claude has answered
-            chat = {"id": _WARM_IDS.pop((cdir.name, tag), None) or uuid.uuid4().hex[:12], "course": cdir.name,
+            chat = {"id": _WARM_IDS.pop(cdir.name, None) or uuid.uuid4().hex[:12], "course": cdir.name,
                     "code": L.course_meta(cdir)[0], "deck": tag, "created": now, "messages": [],
                     "title": f"{label[:70]} · " + (tag if mode in DECK_MODES or whole_deck else f"s{n}")}
             _PENDING[chat["id"]] = dict(chat, messages=[])
-            S.set_chat(cdir, tag, chat["id"])
+            S.set_chat(cdir, chat["id"])
     if mode == "voice":
         prompt = voice_prompt(cdir, f"the whole deck {deck_where(cdir, tag)}" if whole_deck else f"slide {where(cdir, tag, n)}",
                               question.strip())
@@ -409,16 +422,19 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=Fa
         if extra:
             prompt += EXTRA.format(extra=extra[:2000])
     try:
-        r = run_claude(cdir, system_prompt(cdir, tag, web), prompt, model=model, chat_key=(cdir.name, tag, chat["id"]),
+        r = run_claude(cdir, system_prompt(cdir, tag, web), prompt, model=model, chat_key=(cdir.name, chat["id"]),
                        session=chat.get("session"), web=web, label=f"chat:{mode}", emit=emit)
-        msg = {"role": "a", "mode": mode, "slide": n, "text": r["text"], "ms": r["ms"], "cost": r["cost"], "model": model}
+        msg = {"role": "a", "mode": mode, "deck": tag, "slide": n, "text": r["text"], "ms": r["ms"], "cost": r["cost"], "model": model}
         with lock:      # reload: another turn on this chat may have been saved while this one was answered
-            chat = load_chat(chat["id"]) or chat
+            saved = load_chat(chat["id"])
+            if saved is None and not (created or joined):       # deleted while answering: don't bring it back
+                raise TutorError("That chat was deleted while it was answering.", 410)
+            chat = saved or chat
             chat["session"] = r["session"] or chat.get("session")       # the last finished turn's
             chat["updated"] = time.strftime("%Y-%m-%d %H:%M")
-            q = {"role": "q", "mode": mode, "slide": n, "text": label}
+            q = {"role": "q", "mode": mode, "deck": tag, "slide": n, "text": label}
             if whole_deck:
-                q["deck"] = True
+                q["whole"] = True
             chat["messages"] = chat.get("messages", []) + [q, msg]
             save_chat(chat)
     finally:
@@ -433,16 +449,16 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=Fa
 
 
 def warm_chat(cdir, tag, model, web):
-    """Open the deck's chat client before the first question (the Talk tab opening): no turn is sent. A deck
+    """Open the course's chat client before the first question (the Talk tab opening): no turn is sent. A course
     with no chat yet gets its id reserved, so the next new chat uses the client opened here."""
-    with _deck_lock(cdir, tag):
-        chat_id = S.chat_for(cdir, tag)
+    with _course_lock(cdir):
+        chat_id = current_chat(cdir)
         chat = load_chat(chat_id) if chat_id else None
         if chat is None and chat_id in _PENDING:
             return      # its first turn is already opening it
         if chat is None:
-            chat = {"id": _WARM_IDS.setdefault((cdir.name, tag), uuid.uuid4().hex[:12])}
-    engine.open_chat((cdir.name, tag, chat["id"]), cdir, system_prompt(cdir, tag, web),
+            chat = {"id": _WARM_IDS.setdefault(cdir.name, uuid.uuid4().hex[:12])}
+    engine.open_chat((cdir.name, chat["id"]), cdir, system_prompt(cdir, tag, web),
                      model=model if model in MODELS else DEFAULT_MODEL, web=web, session=chat.get("session"), log=log)
 
 
@@ -619,7 +635,7 @@ def remember(cdir, tag, n, question, answer, grill=False):
 
 
 # ---------------------------------------------------------------- side questions (a term or a selection)
-# A side question forks the deck's chat: it starts from a copy of the conversation, so it knows what was said,
+# A side question forks the course's chat: it starts from a copy of the conversation, so it knows what was said,
 # and nothing it says is added to the chat. Follow-ups continue the fork. Nothing is saved; closing ends it.
 
 SIDE_TERM = """Side question: the student tapped "{anchor}" in your answer, in this passage:
@@ -657,10 +673,10 @@ def side_turn(cdir, tag, n, side_id, chat_id, anchor, para, question, model, web
         if not anchor.strip():
             raise TutorError("Nothing to ask about.", 400)
         chat = load_chat(chat_id) if chat_id else None
-        if chat and (chat.get("course") != cdir.name or chat.get("deck") != tag):
+        if chat and chat.get("course") != cdir.name:
             chat = None
         side_id = uuid.uuid4().hex[:12]
-        side = {"key": (cdir.name, tag, f"side-{side_id}"), "session": None, "tag": tag}
+        side = {"key": (cdir.name, f"side-{side_id}"), "session": None, "tag": tag}
         fill = dict(anchor=_quote(anchor, 1500), para=_quote(para, 600), where=where(cdir, tag, n), question=question.strip())
         prompt = (SIDE_SELECTION if question.strip() else SIDE_TERM).format(**fill)
         session = chat.get("session") if chat else None
@@ -734,9 +750,9 @@ def update_chat(chat_id, title=None, starred=None):
     return {"id": chat["id"], "title": chat["title"], "starred": bool(chat.get("starred"))}
 
 
-def deck_chats(cdir, tag):
-    """Every saved chat on one deck, newest first (for the 'earlier chats' list)."""
-    return [c for c in list_chats() if c.get("course") == cdir.name and c.get("deck") == tag]
+def course_chats(cdir):
+    """Every saved chat in one course, newest first (for the 'earlier chats' list)."""
+    return [c for c in list_chats() if c.get("course") == cdir.name]
 
 
 def public_chat(c):

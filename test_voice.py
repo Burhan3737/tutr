@@ -6,7 +6,7 @@
 Nothing here calls Claude (run_claude is replaced) or touches a real course: chats, memory and state live in a
 temporary folder.
 """
-import io, re, sys, tempfile, threading, time, types, wave
+import asyncio, io, re, sys, tempfile, threading, time, types, wave
 from pathlib import Path
 
 import numpy as np
@@ -156,8 +156,8 @@ def test_chat_turn(tmp):
                     (T, "system_prompt", lambda *a: "SYSTEM"), (T, "deck_where", lambda c, t: f"[{t}]"),
                     (T, "where", lambda c, t, n: f"[{t} s{n}]"),
                     (L, "course_meta", lambda c: ("DEMO", "Test")),
-                    (S, "chat_for", lambda c, tag: state.get(tag)),
-                    (S, "set_chat", lambda c, tag, cid: state.__setitem__(tag, cid)))
+                    (T, "current_chat", lambda c: state.get("chat")),
+                    (S, "set_chat", lambda c, cid: state.__setitem__("chat", cid)))
 
     def overlapped(first, second):
         DELAYS.update({first: 0.6, second: 0.1})      # the first starts first and finishes last
@@ -174,20 +174,27 @@ def test_chat_turn(tmp):
     with patches:
         overlapped("Q1", "Q2")
         files = list((tmp / "chats").glob("*.json"))
-        chat = T.load_chat(state.get("S&D-2"))
+        chat = T.load_chat(state.get("chat"))
         qs = [m["text"] for m in (chat or {}).get("messages", []) if m["role"] == "q"]
         check("chat_turn: two new overlapping turns -> one chat", len(files) == 1, [f.name for f in files])
         check("chat_turn: both Q/A pairs saved", sorted(qs) == ["Q1", "Q2"] and len(chat["messages"]) == 4, qs)
         check("chat_turn: both turns used the same chat client", calls[0][1] == calls[1][1], calls)
+        check("chat_turn: the client is the course's chat (no deck in the key)", calls[0][1] == ("Chat", chat["id"]), calls)
         check("chat_turn: session is the last finished turn's", chat["session"] == "sess-Q1", chat.get("session"))
         check("chat_turn: nothing left pending", not T._PENDING)
         overlapped("Q3", "Q4")
-        chat = T.load_chat(state.get("S&D-2"))
+        chat = T.load_chat(state.get("chat"))
         qs = [m["text"] for m in chat["messages"] if m["role"] == "q"]
         check("chat_turn: overlapping turns on an existing chat both saved", sorted(qs[:2]) == ["Q1", "Q2"]
               and sorted(qs[2:]) == ["Q3", "Q4"], qs)
         check("chat_turn: messages pair up", all(m["text"] == f"answer to {q['text']}" for q, m in
                                                  zip(chat["messages"][::2], chat["messages"][1::2])))
+        DELAYS["Q7"] = 0
+        other, _ = T.chat_turn(cdir, "S&D-3", 2, "ask", "Q7", "m", False)
+        check("chat_turn: another deck of the course continues the same chat", other["id"] == chat["id"]
+              and other["deck"] == "S&D-2" and calls[-1][1] == ("Chat", chat["id"]), (other["id"], calls[-1]))
+        check("chat_turn: each message records its deck", [m["deck"] for m in other["messages"][-4:]]
+              == ["S&D-2", "S&D-2", "S&D-3", "S&D-3"], other["messages"][-4:])
 
         def boom(*a, **kw):
             raise T.TutorError("no")
@@ -201,6 +208,165 @@ def test_chat_turn(tmp):
         DELAYS["Q6"] = 0
         chat, _ = T.chat_turn(cdir, "S&D-2", 1, "ask", "Q6", "m", False)
         check("chat_turn: the next turn after a failure starts a chat", [m["text"] for m in chat["messages"]][0] == "Q6")
+
+        def delete_meanwhile(*a, **kw):        # the student deletes the chat while it's answering
+            T.chat_file(chat["id"]).unlink()
+            return {"text": "late", "json": None, "session": "s", "ms": 1, "cost": 0}
+        with Patch((T, "run_claude", delete_meanwhile)):
+            try:
+                T.chat_turn(cdir, "S&D-2", 1, "ask", "Q8", "m", False)
+                status = None
+            except T.TutorError as e:
+                status = e.status
+        check("chat_turn: a chat deleted mid-answer isn't saved again", status == 410
+              and not T.chat_file(chat["id"]).exists(), status)
+
+
+# ---------------------------------------------------------------- engine._chat: one course chat, several decks
+
+def test_engine_turns():
+    E = T.engine
+    events, active, ANSWER = [], [], [0.3]
+
+    class FakeClient:      # a claude process: answering takes ANSWER s; disconnecting one mid-answer breaks it
+        def __init__(self, opts):
+            self.system, self.resume, self.dead = opts["system"], opts["resume"], False
+            events.append(("open", self.system, self.resume))
+
+        async def connect(self):
+            await asyncio.sleep(0.05)
+
+        async def query(self, prompt):
+            self.prompt = prompt
+
+        async def receive_response(self):
+            active.append(self)
+            events.append(("start", self.prompt))
+            try:
+                await asyncio.sleep(ANSWER[0])
+            finally:
+                active.remove(self)
+            if self.dead:
+                raise RuntimeError("process killed mid-answer")
+            events.append(("end", self.prompt))
+            yield types.SimpleNamespace(total_cost_usd=0.0, session_id=f"s-{self.prompt}")
+
+        async def disconnect(self):
+            self.dead = True
+            events.append(("disconnect", self.system, self in active))
+
+    async def consume(stream, emit, cdir, text_out=True, stats=None):
+        res = None
+        async for m in stream:
+            res = m
+        return res
+
+    async def scenario(warm):
+        key = ("Course", "abcdef123456")
+        turn = lambda system, q: E._chat(key, None, system, q, "m", False, "s-old", lambda k, d: None)
+        a = asyncio.ensure_future(turn("topic A", "QA"))
+        await asyncio.sleep(0.1)
+        if warm:        # the Talk tab opened on deck B while deck A's answer is still coming
+            await E._warm(key, None, "topic B", "m", False, "s-old")
+        else:
+            await turn("topic B", "QB")
+        res_a, _ = await a
+        await E._close(key)
+        return res_a
+
+    def reset():
+        events.clear()
+        for d in (E._TURNS, E._SESSIONS, E._CHATS, E._EPOCHS):
+            d.clear()
+
+    def outcome(coro):
+        try:
+            return asyncio.run(coro)
+        except BaseException as e:
+            return e
+    opens = lambda: [e for e in events if e[0] == "open"]
+    key = ("Course", "abcdef123456")
+    turn = lambda q, system="topic A": E._chat(key, None, system, q, "m", False, "s-old", lambda k, d: None)
+
+    async def queued():         # each answer 0.3 s, the timeout 0.5 s: the second waits 0.3 s first
+        a = asyncio.ensure_future(turn("QA"))
+        await asyncio.sleep(0.05)
+        rb = await turn("QB")
+        return (await a)[0].session_id, rb[0].session_id
+
+    async def cut_off():        # the answer outlives the timeout; then the next turn
+        ANSWER[0] = 0.8
+        try:
+            await turn("QA")
+        except TimeoutError:
+            pass
+        ANSWER[0] = 0.3
+        left = [e for e in events if e[0] == "disconnect"]
+        return left, key in E._CHATS, (await turn("QB"))[0].session_id
+
+    async def deleted():        # the chat is deleted (close_chat) mid-answer
+        a = asyncio.ensure_future(turn("QA"))
+        await asyncio.sleep(0.1)
+        await E._kill(key)
+        try:
+            await a
+            first = None
+        except E.EngineError as e:
+            first = e.status
+        return first, len(opens()), (await turn("QB"))[0].session_id
+
+    async def shut():           # the hub stops mid-answer
+        a = asyncio.ensure_future(turn("QA"))
+        await asyncio.sleep(0.1)
+        E._SHUTDOWN = True
+        await E._close(key)
+        try:
+            await a
+        except E.EngineError as e:
+            return e.status, len(opens())
+
+    with Patch((E, "ClaudeSDKClient", FakeClient), (E, "_consume", consume),
+               (E, "_options", lambda cdir, system, model, web, resume=None, fork=False, **kw: {"system": system, "resume": resume})):
+        reset()
+        try:
+            res_a, ok = asyncio.run(scenario(False)), True
+        except Exception as e:
+            ok, res_a = False, e
+        starts = [e for e in events if e[0] in ("start", "end")]
+        check("engine: two cross-deck turns 0.1 s apart both answered", ok and res_a.session_id == "s-QA"
+              and ("end", "QB") in events, events)
+        check("engine: ... one after the other", starts == [("start", "QA"), ("end", "QA"), ("start", "QB"), ("end", "QB")], starts)
+        check("engine: ... no busy client disconnected", not any(e[0] == "disconnect" and e[2] for e in events), events)
+        check("engine: ... topic B resumes the session topic A's turn ended on",
+              [e for e in events if e[0] == "open"] == [("open", "topic A", "s-old"), ("open", "topic B", "s-QA")], events)
+
+        events.clear()
+        reset()
+        try:
+            res_a, ok = asyncio.run(scenario(True)), True
+        except Exception as e:
+            ok, res_a = False, e
+        check("engine: a warm-up during a busy turn leaves it answering", ok and res_a.session_id == "s-QA"
+              and not any(e[0] == "disconnect" and e[2] for e in events), events)
+        check("engine: ... and opens nothing", [e for e in events if e[0] == "open"] == [("open", "topic A", "s-old")], events)
+        with Patch((E, "TIMEOUT", 0.5)):
+            r = outcome(queued())
+            check("engine: time queued behind another turn doesn't count against the timeout", r == ("s-QA", "s-QB"), r)
+            reset()
+            r = outcome(cut_off())
+            check("engine: a timed-out turn closes its client", isinstance(r, tuple) and len(r[0]) == 1 and not r[1], r)
+            check("engine: ... and the next turn answers on a fresh client", isinstance(r, tuple) and r[2] == "s-QB"
+                  and len(opens()) == 2, (r, events))
+        reset()
+        r = outcome(deleted())
+        check("engine: a chat closed mid-answer fails (410) without reopening", isinstance(r, tuple) and r[:2] == (410, 1),
+              (r, events))
+        check("engine: ... and the same id still works afterwards", isinstance(r, tuple) and r[2] == "s-QB", r)
+        reset()
+        with Patch((E, "_SHUTDOWN", False)):
+            r = outcome(shut())
+        check("engine: after shutdown a running turn doesn't reopen", r == (410, 1), (r, events))
+        reset()
 
 
 # ---------------------------------------------------------------- chat_turn(): Talk's This slide | Whole deck
@@ -221,8 +387,8 @@ def test_chat_turn_scope(tmp):
                     (T, "deck_where", lambda c, t: f"[{t}] \"Deck title\" (slides 1–9)"),
                     (T, "where", lambda c, t, n: f"[{t} s{n}] \"Slide title\""),
                     (L, "course_meta", lambda c: ("DEMO", "Test")),
-                    (S, "chat_for", lambda c, tag: state.get(tag)),
-                    (S, "set_chat", lambda c, tag, cid: state.__setitem__(tag, cid)))
+                    (T, "current_chat", lambda c: state.get("chat")),
+                    (S, "set_chat", lambda c, cid: state.__setitem__("chat", cid)))
     with patches:
         chat, _ = T.chat_turn(cdir, "S&D-1", 4, "voice", "what is this deck about", "m", False, whole_deck=True)
         q = chat["messages"][0]
@@ -230,7 +396,8 @@ def test_chat_turn_scope(tmp):
               "W: the whole deck [S&D-1] \"Deck title\"" in prompts[-1] and "slide [" not in prompts[-1], prompts[-1])
         check("chat_turn scope: whole deck -> new chat's title ends with the tag", chat["title"].endswith(" · S&D-1"),
               chat["title"])
-        check("chat_turn scope: whole deck -> q message has deck True", q.get("deck") is True and q["slide"] == 4, q)
+        check("chat_turn scope: whole deck -> q message has whole True", q.get("whole") is True and q["deck"] == "S&D-1"
+              and q["slide"] == 4, q)
         check("chat_turn scope: voice turn still remembered", len(remembered) == 1)
 
         state.clear()
@@ -239,15 +406,15 @@ def test_chat_turn_scope(tmp):
         check("chat_turn scope: this slide -> 'slide [TAG sN]' unchanged", "W: slide [S&D-1 s4] \"Slide title\"" in prompts[-1]
               and "whole deck" not in prompts[-1], prompts[-1])
         check("chat_turn scope: this slide -> title ends with sN", chat["title"].endswith(" · s4"), chat["title"])
-        check("chat_turn scope: this slide -> no deck key", "deck" not in q, q)
+        check("chat_turn scope: this slide -> no whole key", "whole" not in q, q)
         chat, _ = T.chat_turn(cdir, "S&D-1", 5, "voice", "and the deck?", "m", False, whole_deck=True)
         check("chat_turn scope: existing chat keeps its title, deck q appended",
-              chat["title"].endswith(" · s4") and chat["messages"][-2].get("deck") is True, chat["messages"][-2])
+              chat["title"].endswith(" · s4") and chat["messages"][-2].get("whole") is True, chat["messages"][-2])
 
         state.clear()
         chat, _ = T.chat_turn(cdir, "S&D-1", 4, "ask", "a typed question", "m", False, whole_deck=True)
         q = chat["messages"][0]
-        check("chat_turn scope: whole_deck ignored for non-voice modes", "deck" not in q
+        check("chat_turn scope: whole_deck ignored for non-voice modes", "whole" not in q
               and chat["title"].endswith(" · s4") and "whole deck" not in prompts[-1], (q, chat["title"]))
 
 
@@ -267,8 +434,8 @@ def test_slash_extra(tmp):
                     (T, "deck_where", lambda c, t: f"[{t}] \"Deck title\" (slides 1–9)"),
                     (T, "where", lambda c, t, n: f"[{t} s{n}] \"Slide title\""),
                     (L, "course_meta", lambda c: ("DEMO", "Test")),
-                    (S, "chat_for", lambda c, tag: state.get(tag)),
-                    (S, "set_chat", lambda c, tag, cid: state.__setitem__(tag, cid)))
+                    (T, "current_chat", lambda c: state.get("chat")),
+                    (S, "set_chat", lambda c, cid: state.__setitem__("chat", cid)))
     plain = lambda mode: T.CHAT_PROMPTS[mode].format(where="[S&D-1 s4] \"Slide title\"", question="", tag="S&D-1",
                                                      deck="[S&D-1] \"Deck title\" (slides 1–9)",
                                                      style=T.STYLE.get("DEMO", "this course's quizzes and exams"),
@@ -289,7 +456,7 @@ def test_slash_extra(tmp):
             chat, _ = T.chat_turn(cdir, "S&D-1", 4, mode, q, "m", False)
             check(f"slash: {mode} -> no EXTRA", "The student added this to the request" not in prompts[-1]
                   and q in prompts[-1], prompts[-1][-300:])
-        msgs = T.load_chat(state["S&D-1"])["messages"]
+        msgs = T.load_chat(state["chat"])["messages"]
         check("slash: brush / grill_reply labels unchanged", msgs[-4]["text"] == "Brush up: percentage change"
               and msgs[-2]["text"] == "it is a ratio", [m["text"] for m in msgs[-6::2]])
         chat, _ = T.chat_turn(cdir, "S&D-1", 4, "explain_deck", "use a farmers' market", "m", False)
@@ -410,6 +577,7 @@ def main():
         test_memory_text(tmp)
         test_remember(tmp)
         test_chat_turn(tmp)
+        test_engine_turns()
         test_chat_turn_scope(tmp)
         test_slash_extra(tmp)
         test_practice_focus(tmp)

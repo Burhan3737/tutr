@@ -1,12 +1,18 @@
 """How the tutor talks to Claude: the Claude Agent SDK (claude-agent-sdk), on the machine's Claude Code
 login — no API key.
 
-- Chats (Explain / Worked example / Ask / Go deeper) keep one ClaudeSDKClient open per deck. The
+- Chats (Explain / Worked example / Ask / Go deeper) keep one ClaudeSDKClient open per course chat. The
   first question starts it (about 1 s); follow-ups reuse it, so there is no start-up and the topic's
   slides stay in the prompt cache. Clients idle for IDLE_SECONDS are closed (each holds ~200 MB); the
-  next question reopens the same conversation with `resume`. `open_chat` starts a deck's client ahead of the
+  next question reopens the same conversation with `resume`. `open_chat` starts a chat's client ahead of the
   first question (the Talk tab, while the student is still speaking).
-- Side questions fork the deck's chat (`fork_session`): they start from a copy of its conversation, so
+- A course chat spans decks, and each turn's system prompt is its deck's topic: a turn on another topic reopens
+  the client (~1 s, and the prompt cache is rebuilt). Turns on one chat hold its turn lock from open to answer,
+  so they run one after another and nothing closes a client a turn is using; a warm-up skips a busy chat.
+  The answer's timeout starts once the turn holds the lock. A turn cut short (error, timeout, cancel) closes
+  its client, so the next one resumes the saved conversation instead of reading the rest of that reply; one
+  whose chat was closed (deleted) or the hub shut down meanwhile fails rather than reopening it.
+- Side questions fork the course's chat (`fork_session`): they start from a copy of its conversation, so
   they know what was said, and nothing they say is added to the chat itself.
 - Practice problems and marking are one-off queries, each with its own JSON schema (output_format).
 - Answers stream: text arrives as it's written, and every file or web lookup becomes a status line
@@ -38,7 +44,8 @@ HERE = Path(__file__).resolve().parent
 WORK = HERE / ".cache"
 PROMPTS = WORK / "prompts"
 MAX_TURNS = 25
-TIMEOUT = 420
+TIMEOUT = 420           # for the answer itself; a chat turn's wait for the one before it doesn't count
+QUEUE_TIMEOUT = 420     # how long a chat turn waits for the one before it
 IDLE_SECONDS = 600
 
 
@@ -192,36 +199,52 @@ async def _consume(stream, emit, cdir, text_out=True, stats=None):
     return result
 
 
-# ---------------------------------------------------------------- chats (one open client per deck)
+# ---------------------------------------------------------------- chats (one open client per course chat)
 
 class _Chat:
     def __init__(self, client, sig):
         self.client, self.sig = client, sig
-        self.lock = asyncio.Lock()
         self.last = time.time()
         self.seen_cost = 0.0
 
 
 _CHATS = {}
-_OPENING = {}       # key -> asyncio.Lock: two turns (or a warm-up and a turn) on one chat share one client
+_TURNS = {}         # key -> asyncio.Lock held for a whole turn (open → answer, the retry too) or a warm-up's open;
+                    # it outlives the clients, so a reopen never closes a client another turn is using
+_SESSIONS = {}      # key -> the session its last turn ended on: a turn that waited behind it resumes that one
+_EPOCHS = {}        # key -> times close_chat closed it: a turn started before a close mustn't reopen the chat
+_SHUTDOWN = False
+
+
+def _turn_lock(key):
+    return _TURNS.setdefault(key, asyncio.Lock())
 
 
 async def _open(key, cdir, system, model, web, session, fork=False, emit=None):
-    """The chat's open client, started (or restarted, if its prompt, model or web setting changed) if needed."""
+    """The chat's open client, started (or restarted, if its prompt, model or web setting changed) if needed.
+    Only with the key's turn lock held."""
     sig = (hashlib.sha1(system.encode("utf-8")).hexdigest(), model, web)
-    async with _OPENING.setdefault(key, asyncio.Lock()):
-        c = _CHATS.get(key)
-        if c and c.sig != sig:      # the slides, model or web setting changed: reopen the same conversation
-            await _close(key)
-            c = None
-        if c is None:
-            if emit:
-                emit("status", "Opening the deck's conversation")
-            client = ClaudeSDKClient(_options(cdir, system, model, web, resume=session, fork=fork))
-            await client.connect()
-            c = _CHATS[key] = _Chat(client, sig)
-        c.last = time.time()
-        return c
+    c = _CHATS.get(key)
+    if c and c.sig != sig:      # the slides, model or web setting changed: reopen the same conversation
+        await _close(key)
+        c = None
+    if c is None:
+        if emit:
+            emit("status", "Opening the conversation")
+        resume = session if fork else _SESSIONS.get(key) or session
+        client = ClaudeSDKClient(_options(cdir, system, model, web, resume=resume, fork=fork))
+        await client.connect()
+        c = _CHATS[key] = _Chat(client, sig)
+    c.last = time.time()
+    return c
+
+
+async def _warm(key, cdir, system, model, web, session):
+    lock = _turn_lock(key)
+    if lock.locked() or _SHUTDOWN:      # a turn is answering (or opening): never close or reopen its client under it
+        return
+    async with lock:
+        await _open(key, cdir, system, model, web, session)
 
 
 async def _close(key):
@@ -237,31 +260,47 @@ async def _reaper():
     while True:
         await asyncio.sleep(60)
         for key, c in list(_CHATS.items()):
-            if time.time() - c.last > IDLE_SECONDS and not c.lock.locked():
+            lock = _TURNS.get(key)
+            if time.time() - c.last > IDLE_SECONDS and not (lock and lock.locked()):
                 await _close(key)
-        for key, lock in list(_OPENING.items()):
-            if key not in _CHATS and not lock.locked():
-                _OPENING.pop(key, None)
+        for key, lock in list(_TURNS.items()):      # (_waiters: a turn about to take the lock just released)
+            if key not in _CHATS and not lock.locked() and not getattr(lock, "_waiters", None):
+                _TURNS.pop(key, None)
+                _SESSIONS.pop(key, None)
+                _EPOCHS.pop(key, None)
 
 
 async def _chat(key, cdir, system, prompt, model, web, session, emit, fork=False, stats=None):
-    for attempt in (1, 2):
-        c = await _open(key, cdir, system, model, web, session, fork, emit)
-        try:
-            async with c.lock:
-                await c.client.query(prompt)
-                res = await _consume(c.client.receive_response(), emit, cdir, stats=stats)
-            c.last = time.time()
-            total = res.total_cost_usd or 0.0
-            cost, c.seen_cost = max(0.0, total - c.seen_cost), total      # the client reports a running total
-            session = res.session_id or session
-            return res, cost
-        except EngineError:
-            raise
-        except Exception:
-            await _close(key)       # the CLI process died: start again from the saved conversation
-            if attempt == 2:
-                raise
+    epoch = _EPOCHS.get(key, 0)
+    lock = _turn_lock(key)
+    if lock.locked():
+        emit("status", "Waiting for the last answer to finish")
+    try:
+        await asyncio.wait_for(lock.acquire(), QUEUE_TIMEOUT)
+    except (asyncio.TimeoutError, TimeoutError):
+        raise EngineError("The last answer in this chat is still coming. Try again in a moment.", 504)
+    try:
+        async with asyncio.timeout(TIMEOUT):
+            for attempt in (1, 2):
+                if _SHUTDOWN or _EPOCHS.get(key, 0) != epoch:
+                    raise EngineError("That chat was closed.", 410)
+                c = await _open(key, cdir, system, model, web, session, fork, emit)
+                try:
+                    await c.client.query(prompt)
+                    res = await _consume(c.client.receive_response(), emit, cdir, stats=stats)
+                except BaseException as e:      # died, timed out or cancelled: never leave a reply half read
+                    await _close(key)           # (the next turn starts again from the saved conversation)
+                    if attempt == 2 or not isinstance(e, Exception) or isinstance(e, EngineError):
+                        raise
+                    continue
+                c.last = time.time()
+                total = res.total_cost_usd or 0.0
+                cost, c.seen_cost = max(0.0, total - c.seen_cost), total      # the client reports a running total
+                if res.session_id:
+                    _SESSIONS[key] = res.session_id
+                return res, cost
+    finally:
+        lock.release()
 
 
 async def _one_shot(cdir, system, prompt, model, web, schema, emit):
@@ -283,11 +322,11 @@ def run(cdir, system, prompt, *, model, web=True, schema=None, chat_key=None, se
         return _run_cli(cdir, system, prompt, model=model, web=web, schema=schema, session=session, fork=fork, log=log,
                         label=label)
     stats = {}
-    coro = (_chat(chat_key, cdir, system, prompt, model, web, session, emit, fork, stats) if chat_key
-            else _one_shot(cdir, system, prompt, model, web, schema, emit))
-    fut = asyncio.run_coroutine_threadsafe(asyncio.wait_for(coro, TIMEOUT), _loop())
+    coro = (_chat(chat_key, cdir, system, prompt, model, web, session, emit, fork, stats) if chat_key     # (times itself)
+            else asyncio.wait_for(_one_shot(cdir, system, prompt, model, web, schema, emit), TIMEOUT))
+    fut = asyncio.run_coroutine_threadsafe(coro, _loop())
     try:
-        res, cost = fut.result(TIMEOUT + 15)
+        res, cost = fut.result(QUEUE_TIMEOUT + TIMEOUT + 30)
     except EngineError:
         raise
     except (asyncio.TimeoutError, TimeoutError):
@@ -317,6 +356,8 @@ def run(cdir, system, prompt, *, model, web=True, schema=None, chat_key=None, se
 
 def shutdown():
     """Close every open conversation (each is a claude process), e.g. when the hub stops."""
+    global _SHUTDOWN
+    _SHUTDOWN = True        # a turn still running mustn't reopen one
     if SDK and _LOOP is not None:
         async def _all():
             for key in list(_CHATS):
@@ -329,10 +370,11 @@ def shutdown():
 
 def open_chat(chat_key, cdir, system, *, model, web=True, session=None, log=None):
     """Start a chat's client now, without sending anything (no turn, no cost), so the first question doesn't
-    wait for it. Returns at once; a failure only means the first question opens it as usual."""
+    wait for it. Skipped while a turn holds the chat. Returns at once; a failure only means the first question
+    opens it as usual."""
     if not SDK:
         return
-    fut = asyncio.run_coroutine_threadsafe(_open(chat_key, cdir, system, model, web, session), _loop())
+    fut = asyncio.run_coroutine_threadsafe(_warm(chat_key, cdir, system, model, web, session), _loop())
 
     def done(f):
         e = None if f.cancelled() else f.exception()
@@ -341,9 +383,16 @@ def open_chat(chat_key, cdir, system, *, model, web=True, session=None, log=None
     fut.add_done_callback(done)
 
 
+async def _kill(key):
+    _EPOCHS[key] = _EPOCHS.get(key, 0) + 1      # first, so a turn it cuts off doesn't retry
+    await _close(key)
+
+
 def close_chat(chat_key):
+    """Close a chat for good (deleted, or a side question closed): a turn on it now fails instead of reopening it.
+    A turn started afterwards (the same id opened again) runs as usual."""
     if SDK and _LOOP is not None:
-        asyncio.run_coroutine_threadsafe(_close(chat_key), _LOOP)
+        asyncio.run_coroutine_threadsafe(_kill(chat_key), _LOOP)
 
 
 # ---------------------------------------------------------------- fallback: one CLI process per request

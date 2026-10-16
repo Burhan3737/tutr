@@ -807,7 +807,7 @@ function chatBar(chat) {
 
 async function newChat() {
   const d = APP.deck;
-  try { await api("/api/chat/new", { course: d.course, tag: d.tag }); } catch { /* the next question still starts fresh */ }
+  try { await api("/api/chat/new", { course: d.course }); } catch { /* the next question still starts fresh */ }
   if (d.chat) d.chats = [{ id: d.chat.id, title: d.chat.title, updated: d.chat.updated }, ...(d.chats || [])].slice(0, 5);
   d.chat = null;
   d.asked = [];
@@ -824,8 +824,9 @@ async function openChat(id) {
     APP.tutor = "open";
     // The opened chat shows in the Type tab's thread.
     if (APP.talk) { APP.talk = false; store.set("talk", false); stopSpeaking(); cancelRecording(); clearVoiceTurn(); }
-    if (APP.deck && APP.deck.course === r.course && APP.deck.tag === r.deck) {
-      APP.deck = await api(`/api/deck?course=${encodeURIComponent(r.course)}&tag=${encodeURIComponent(r.deck)}`);
+    // One chat per course: in a deck of its course, it opens beside that deck; otherwise go to the deck it started on.
+    if (APP.deck && APP.deck.course === r.course) {
+      APP.deck = await api(`/api/deck?course=${encodeURIComponent(r.course)}&tag=${encodeURIComponent(APP.deck.tag)}`);
       renderTutor();
     } else go({ c: r.course, d: r.deck, s: "" });
   } catch (e) { alert(e.message); }
@@ -858,7 +859,7 @@ function renderTutor() {
       h("button", { class: "link quiet new-chat", type: "button", title: "Copy this chat as Markdown", onclick: () => copyChat(APP.deck.chat, APP.deck) }, "Copy chat"),
       h("button", { class: "link quiet new-chat", type: "button", id: "read-btn", title: "Reading view: the chat as full-width pages, like a PDF (R)", onclick: toggleReading }, "Read"),
       h("button", { class: "link quiet new-chat", type: "button", title: "Print this chat, or save it as a PDF", onclick: () => printChat(APP.deck.chat, APP.deck) }, "PDF"),
-      h("button", { class: "link quiet new-chat", type: "button", title: "Start a new chat on this deck", onclick: newChat }, "New chat"),
+      h("button", { class: "link quiet new-chat", type: "button", title: "Start a new chat in this course", onclick: newChat }, "New chat"),
       h("button", { class: "icon-btn", type: "button", "aria-label": "Close the tutor", onclick: () => { APP.tutor = "closed"; renderTutor(); } }, "×")),
     talk ? null : h("div", { class: "panel-actions" },
       scopeSwitch(),
@@ -884,7 +885,7 @@ function renderTutor() {
 
 // ------------------------------------------------------------ side questions
 // Tapping a [[term]] or asking about a selection opens a sheet over the lower part of the tutor panel. The
-// server forks the deck's chat for it, so it knows the conversation, but nothing it says joins the chat; the
+// server forks the course's chat for it, so it knows the conversation, but nothing it says joins the chat; the
 // chat underneath keeps its place (and keeps streaming). × or a tap on the chat closes it; it isn't saved.
 // A term tapped inside the sheet opens its own side on top; ‹ (or Esc) goes back to the previous one.
 
@@ -1131,15 +1132,24 @@ function drawThread() {
   if (!msgs.length) {
     th.append(h("p", { class: "empty" }, "Ask anything about this slide, or tap Try one to practise it."));
     const earlier = APP.deck.chats || [];
-    if (earlier.length) th.append(h("div", { class: "earlier" }, h("p", { class: "empty" }, "Earlier chats on this deck:"),
+    if (earlier.length) th.append(h("div", { class: "earlier" }, h("p", { class: "empty" }, "Earlier chats in this course:"),
       ...earlier.map((c) => h("button", { class: "link", type: "button", onclick: () => openChat(c.id) }, c.starred ? `★ ${c.title}` : c.title))));
   }
   msgs.forEach((m, i) => {
-    if (m.role === "q") th.append(h("p", { class: "msg-q" }, m.mode === "voice" ? `🎙 ${m.text}` : m.text, h("span", { class: "where" }, m.deck ? ` · ${APP.deck.tag}` : m.slide ? ` · s${m.slide}` : "")));
+    if (m.role === "q") th.append(h("p", { class: "msg-q" }, m.mode === "voice" ? `🎙 ${m.text}` : m.text, h("span", { class: "where" }, msgWhere(m, APP.deck.chat, APP.deck.tag))));
     else th.append(answerEl(m, i === msgs.length - 1));
   });
   th.scrollTop = th.scrollHeight;
   updateComposeHint();
+}
+
+// The deck a saved question is about: older ones carry none (the chat's own deck), and `deck: true` once meant Whole deck.
+const msgDeck = (m, chat) => (typeof m.deck === "string" ? m.deck : chat.deck) || "";
+// " · s14" on the open deck, " · S&D-2 s14" from another deck of the course, " · S&D-2" for a whole-deck question.
+function msgWhere(m, chat, tag) {
+  const deck = msgDeck(m, chat);
+  if (m.whole || m.deck === true) return ` · ${deck || tag}`;
+  return m.slide ? ` · ${deck && deck !== tag ? `${deck} ` : ""}s${m.slide}` : "";
 }
 
 function answerEl(m, isLast) {
@@ -1191,9 +1201,12 @@ async function copyText(text, btn) {
   else toast(ok ? "Copied" : "Couldn't copy");
 }
 
+// Describes the chat, not the deck open now: its one deck (with the title if that's the open one), or every deck it covers.
 function chatMeta(chat, deck) {
   const code = chat.code || (deck && deck.code) || "";
-  const where = deck ? `${deck.tag} · ${deck.title}` : (chat.deck || "");
+  const decks = [...new Set((chat.messages || []).map((m) => msgDeck(m, chat)).filter(Boolean))];
+  const one = decks.length > 1 ? "" : decks[0] || chat.deck || "";
+  const where = decks.length > 1 ? decks.join(", ") : deck && deck.tag === one ? `${deck.tag} · ${deck.title}` : one;
   return [code, where, chat.updated || chat.created || ""].filter(Boolean).join(" · ");
 }
 
@@ -1203,7 +1216,7 @@ const unmark = (t) => uncue(t).replace(/\[\[([^[\]\n]{1,120}?)\]\]/g, "$1");
 function chatMarkdown(chat, deck) {
   const out = [`# ${chat.title || "Tutor chat"}`, "", `_${chatMeta(chat, deck)}_`, ""];
   for (const m of chat.messages || []) {
-    if (m.role === "q") out.push(`**You**${m.slide ? ` (slide ${m.slide})` : ""}: ${m.text}`, "");
+    if (m.role === "q") out.push(`**You**${m.slide ? ` (${[msgDeck(m, chat), `slide ${m.slide}`].filter(Boolean).join(" ")})` : ""}: ${m.text}`, "");
     else out.push(unmark(m.text).trim(), "", "---", "");
   }
   return out.join("\n");
@@ -1221,7 +1234,7 @@ function printChat(chat, deck) {
   const root = h("article", { id: "print-root" },
     h("h1", {}, chat.title || "Tutor chat"), h("p", { class: "print-meta" }, chatMeta(chat, deck)));
   for (const m of chat.messages) {
-    if (m.role === "q") root.append(h("p", { class: "print-q" }, h("b", {}, "You"), m.slide ? ` (slide ${m.slide})` : "", ": ", m.text));
+    if (m.role === "q") root.append(h("p", { class: "print-q" }, h("b", {}, "You"), m.slide ? ` (${[msgDeck(m, chat), `slide ${m.slide}`].filter(Boolean).join(" ")})` : "", ": ", m.text));
     else { const b = renderMd(m.text, courseId); b.className = "print-a"; $$("details", b).forEach((x) => { x.open = true; }); root.append(b); }
   }
   $("#print-root")?.remove();
@@ -1285,7 +1298,7 @@ async function tutorAsk(mode, question = "") {
       },
     });
     const chat = d.chat || { id: r.chat, title: askText(mode, question), updated: "", messages: [] };
-    chat.messages.push({ role: "q", mode, slide: n, text: askText(mode, question) }, r.message);
+    chat.messages.push({ role: "q", mode, deck: d.tag, slide: n, text: askText(mode, question) }, r.message);
     chat.updated = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
     d.chat = chat;
     if (!d.asked.includes(n)) d.asked.push(n);
@@ -1307,7 +1320,7 @@ async function tutorAsk(mode, question = "") {
 // ------------------------------------------------------------ talk (voice)
 // The Talk tab: tap the mic (or hold Space), ask out loud, and hear the answer. The recording is decoded here to
 // 16 kHz mono WAV and transcribed on the hub (faster-whisper, local); the text goes to the tutor as mode "voice"
-// in the deck's chat, the same conversation as the Type tab. The answer is spoken a sentence at a time as it
+// in the course's chat, the same conversation as the Type tab. The answer is spoken a sentence at a time as it
 // streams in (Kokoro, local), so the tutor starts talking early. Instead of a written thread the tab shows a
 // canvas: when a picture helps, the tutor draws one there and then talks it through (voice_prompt.md).
 
@@ -1418,7 +1431,7 @@ async function warmVoice() {
   if (!$("#talk-mic")) return;        // the Talk tab was closed meanwhile
   const calm = () => ["idle", "loading", "off"].includes(VOICE.state);   // never over a turn in progress
   let st;
-  // With the deck, the hub also opens the deck's conversation now, so the first answer skips that step.
+  // With the deck, the hub also opens the course's conversation now, so the first answer skips that step.
   try { st = await api("/api/voice/warm", APP.deck ? { course: APP.deck.course, tag: APP.deck.tag, model: APP.model, slides_only: slidesOnly(APP.deck.course) } : {}); } catch (e) { if (calm()) talkSet("off", e.message); return; }
   if (st.error) { if (calm()) talkSet("off", st.error); return; }
   if (!st.ready) {
@@ -1520,12 +1533,13 @@ function cleanSvgEl(el) {
   return out;
 }
 
-// The most recent drawing in this deck's run of spoken answers, to put back on the canvas after a reload.
+// The most recent drawing in this deck's run of spoken answers, to put back on the canvas after a reload
+// (the course's chat also holds other decks' answers: those are skipped).
 function lastDrawing() {
-  const msgs = (APP.deck && APP.deck.chat && APP.deck.chat.messages) || [];
+  const chat = APP.deck && APP.deck.chat, msgs = (chat && chat.messages) || [];
   for (let i = msgs.length - 1; i >= 0; i--) {
     const m = msgs[i];
-    if (m.role === "q") continue;
+    if (m.role === "q" || msgDeck(m, chat) !== APP.deck.tag) continue;
     if (m.mode !== "voice") return "";
     const f = m.text.match(/(```|~~~)(?:mermaid|svg|plot)\b[\s\S]*?\1/);
     if (f) return f[0];
@@ -1811,9 +1825,9 @@ async function talkAsk(question) {
     if (!isAbort(e) && gen === VOICE.gen) { stopSpeaking(); talkSet("idle", e.message); }
     return;          // aborted (cut in, Stop, left the deck): nothing more to do; the hub saves what it has
   }
-  // The server saved the turn, so it joins the deck's chat (and the Type tab shows it) even if it was cut short here.
+  // The server saved the turn, so it joins the course's chat (and the Type tab shows it) even if it was cut short here.
   const chat = d.chat || { id: r.chat, title: question, updated: "", messages: [] };
-  chat.messages.push({ role: "q", mode: "voice", slide: n, text: question, ...(deck ? { deck: true } : {}) }, r.message);
+  chat.messages.push({ role: "q", mode: "voice", deck: d.tag, slide: n, text: question, ...(deck ? { whole: true } : {}) }, r.message);
   chat.updated = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
   d.chat = chat;
   if (!d.asked.includes(n)) d.asked.push(n);

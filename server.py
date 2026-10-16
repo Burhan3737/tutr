@@ -68,12 +68,14 @@ def deck_view(cdir, tag):
     if not d:
         return None
     s = S.load(cdir)
-    chat = T.load_chat(s["chats"].get(tag)) if s["chats"].get(tag) else None
-    asked = sorted({m["slide"] for m in (chat or {}).get("messages", []) if m.get("slide")})
+    chat_id = T.current_chat(cdir)
+    chat = T.load_chat(chat_id) if chat_id else None
+    asked = sorted({m["slide"] for m in (chat or {}).get("messages", [])       # older messages carry no deck: the chat's
+                    if m.get("slide") and (m["deck"] if isinstance(m.get("deck"), str) else chat.get("deck")) == tag})
     info = L.course_info(cdir)
     topic = next((t for t in info["topics"] if t["name"] == d["topic"]),
                  {"read_more": "", "decks": info["practice"]})       # a practice deck: its siblings are the practice decks
-    chats = [c for c in T.deck_chats(cdir, tag) if not chat or c["id"] != chat["id"]][:5]
+    chats = [c for c in T.course_chats(cdir) if not chat or c["id"] != chat["id"]][:5]
     return {**_deck_public(d), "course": cdir.name, "code": info["code"], "read_more": topic["read_more"], "chats": chats,
             "topic_decks": topic["decks"],
             "slides_text": [{"n": x["n"], "title": x["title"], "md": x["md"], "raw": x.get("raw", False)}
@@ -254,7 +256,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/voice/warm":        # the Talk tab opened: load the speech models now
             V.warm()
             c = self._course(req.get("course"))
-            if c and L.deck(c, str(req.get("tag") or "")):     # and open the deck's conversation, if it says which
+            if c and L.deck(c, str(req.get("tag") or "")):     # and open the course's conversation, if it says which deck
                 T.warm_chat(c, str(req["tag"]), model, web)
             return self._json(V.status())
         if path == "/api/voice/speak":       # one sentence of an answer -> WAV
@@ -293,21 +295,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             f = T.chat_file(str(req.get("id", "")))
             if f and f.exists():
                 ch = T.load_chat(req.get("id"))
-                if ch and ch.get("deck"):
-                    T.engine.close_chat((ch["course"], ch["deck"], ch["id"]))
+                if ch and ch.get("course"):
+                    T.engine.close_chat((ch["course"], ch["id"]))
                     c = self._course(ch["course"])
-                    if c and S.chat_for(c, ch["deck"]) == ch["id"]:
-                        S.set_chat(c, ch["deck"], None)
+                    if c and T.current_chat(c) == ch["id"]:
+                        S.set_chat(c, None)
                 f.unlink()
             return self._json({"ok": True})
         if path == "/api/chat/update":       # rename and/or star
             return self._json(T.update_chat(str(req.get("id", "")), req.get("title"), req.get("starred")))
-        if path == "/api/chat/open":         # make a saved chat the deck's current one
+        if path == "/api/chat/open":         # make a saved chat the course's current one
             ch = T.load_chat(str(req.get("id", "")))
             c = self._course(ch["course"]) if ch else None
             if not c or not ch.get("deck"):
                 return self._json({"error": "That chat can't be continued."}, 404)
-            S.set_chat(c, ch["deck"], ch["id"])
+            S.set_chat(c, ch["id"])
             return self._json({"course": ch["course"], "deck": ch["deck"]})
         if path == "/api/client-log":        # a drawing that failed in the browser (visuals.js)
             clip = lambda k, n: json.dumps(str(req.get(k) or "")[:n], ensure_ascii=False)
@@ -337,8 +339,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         c = self._course(req.get("course"))
         if not c:
             return self._json({"error": "Unknown course."}, 404)
-        if path == "/api/chat/new":          # the next question on this deck starts a fresh conversation
-            S.set_chat(c, str(req.get("tag", "")), None)
+        if path == "/api/chat/new":          # the next question in this course starts a fresh conversation
+            S.set_chat(c, None)
             return self._json({"ok": True})
         if path == "/api/seen":
             ds = S.mark_seen(c, str(req.get("tag", "")), _int(req.get("n")))

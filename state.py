@@ -3,7 +3,8 @@
 - decks:   which slides were seen, where the student stopped, read (reached the end) and solved
            (a problem from the deck answered correctly with no hint)
 - reviews: saved mistakes and warm-ups, brought back on a 1 → 3 → 7 → 14 → 30 day schedule
-- chats:   the tutor chat for each deck
+- chat:    the course's current tutor chat, whichever deck is open (`chats`, the old pointer per deck, is
+           kept but no longer used)
 
 The open review items are also mirrored into `study/progress.md` (between hub markers) so that
 mocks and cheat sheets made in Claude Code can see them.
@@ -199,16 +200,16 @@ def get_review(cdir, rid):
     return next((x for x in load(cdir)["reviews"] if x["id"] == rid), None)
 
 
-# ---------------------------------------------------------------- chats per deck
+# ---------------------------------------------------------------- the course's chat
 
-def chat_for(cdir, tag):
-    return load(cdir)["chats"].get(tag)
+def chat_for(cdir):
+    return load(cdir).get("chat")
 
 
-def set_chat(cdir, tag, chat_id):
+def set_chat(cdir, chat_id):
     with _LOCK:
         s = load(cdir)
-        s["chats"][tag] = chat_id
+        s["chat"] = chat_id
         save(cdir, s)
 
 
