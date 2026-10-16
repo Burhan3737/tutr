@@ -355,7 +355,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self._json({"error": "Type a question first."}, 400)
             def work(emit):
                 chat, msg = T.chat_turn(c, tag, _int(req.get("n")), mode, q, model, web, emit,
-                                        whole_deck=req.get("scope") == "deck")
+                                        whole_deck=req.get("scope") == "deck", spoken=req.get("spoken") is True)
                 return {"chat": chat["id"], "message": msg}
             return self._answer(req, work)
         if path == "/api/side":              # a side question about a term or a selection (forks the chat)

@@ -473,6 +473,41 @@ def test_slash_extra(tmp):
                   and last_q(chat) == f"{T.MODE_LABELS[mode]}: keep it short", (last_q(chat), prompts[-1][-200:]))
 
 
+def test_drawing_first_prompts():
+    s = T.SYSTEM
+    check("prompts: system prompt has the cue rule", "[#id]" in s and "before the text that explains it" in s)
+    check("prompts: system prompt has the SVG viewBox rule", "viewBox on the opening <svg> tag" in s and "marker-end" in s)
+    ex = T.CHAT_PROMPTS["explain"]
+    check("prompts: worked example's drawing comes before its steps",
+          0 < ex.index("<one drawing") < ex.index("**Let's work through it:**"))
+    late = [m for m, p in T.CHAT_PROMPTS.items() if m != "explain" and "drawing" in p and p.index("drawing") > len(p) // 2
+            and m != "map_deck"]
+    check("prompts: no other template puts a drawing after its explanation", not late, late)
+
+
+def test_spoken_flag(tmp):
+    cdir = tmp / "Spoken"
+    (cdir / "study").mkdir(parents=True)
+    state, remembered = {}, []
+
+    def fake_run(cdir_, system, prompt, **kw):
+        return {"text": "an answer", "json": None, "session": "s", "ms": 1, "cost": 0}
+    patches = Patch((T, "run_claude", fake_run), (T, "CHATS", tmp / "spoken-chats"), (T, "log", lambda m: None),
+                    (T, "remember", lambda *a, **kw: remembered.append((a, kw))), (T, "system_prompt", lambda *a: "SYSTEM"),
+                    (T, "where", lambda c, t, n: f"[{t} s{n}]"),
+                    (L, "course_meta", lambda c: ("DEMO", "Test")),
+                    (T, "current_chat", lambda c: state.get("chat")),
+                    (S, "set_chat", lambda c, cid: state.__setitem__("chat", cid)))
+    with patches:
+        chat, _ = T.chat_turn(cdir, "S&D-1", 4, "ask", " said aloud ", "m", False, spoken=True)
+        check("spoken: question saved with spoken True", chat["messages"][0].get("spoken") is True, chat["messages"][0])
+        check("spoken: ask remembered", len(remembered) == 1 and remembered[0][0][3:] == ("said aloud", "an answer"),
+              remembered)
+        chat, _ = T.chat_turn(cdir, "S&D-1", 4, "ask", "typed", "m", False)
+        check("spoken: typed ask has no spoken key", "spoken" not in chat["messages"][-2], chat["messages"][-2])
+        check("spoken: typed ask not remembered", len(remembered) == 1, remembered)
+
+
 def test_practice_focus(tmp):
     cdir = tmp / "Practice"
     (cdir / "study").mkdir(parents=True)
@@ -580,6 +615,8 @@ def main():
         test_engine_turns()
         test_chat_turn_scope(tmp)
         test_slash_extra(tmp)
+        test_drawing_first_prompts()
+        test_spoken_flag(tmp)
         test_practice_focus(tmp)
     test_voice_errors()
     if "--no-models" not in sys.argv:

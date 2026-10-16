@@ -96,6 +96,12 @@ Style:
     x: 1..64
     y: log                      (optional: log scale, or a range such as 0..5000)
     title: Demand and supply
+  The drawing comes before the text that explains it. Give each part the text will talk about a short id:
+  a mermaid node id (L[Left half] -> L); in svg an id on its element, or on a <g id> around a multi-shape part.
+  In the text, end the sentence about a part with [#id] (one or two per sentence, only ids the drawing defines;
+  never shown or read aloud). svg: viewBox on the opening <svg> tag; each part its own top-level element (no
+  one <g> around everything); no <defs>, <marker> or <style> (use marker-end="url(#arrow)", which the hub
+  provides); write & as &amp;.
 - If the student says a question is from a live graded quiz or exam, add one short line noting the course's
   rule on AI use during assessments (CLAUDE.md), then help fully.
 
@@ -174,21 +180,22 @@ Then stop and wait for the answer: no answer, no hint, no list of the questions 
 CHAT_PROMPTS = {
     "explain": """Tutor the student through the idea on slide {where} so they actually understand it, as a good tutor
 would at a whiteboard. If that slide is a title, outline or admin slide, use the main idea of the slides around
-it. Teach through ONE concrete example and a picture: the example comes first, and the general rule is drawn out
-of it afterwards. This shape, about 350 words plus the drawing:
+it. Teach through ONE concrete example and a picture: the picture comes first, then the example that walks
+through it, and the general rule is drawn out of it afterwards. This shape, about 350 words plus the drawing:
 
 **The problem:** <1–2 sentences in everyday words: what goal or question this slide answers and why it matters.
 Use a simple real-life situation if one captures it.>
 
-**Let's work through it:** <one small, concrete example with tiny numbers: the slide's own example if it is
-small enough, otherwise one like it. Start from the raw input; if the slide uses a table, matrix or count, show
-how it is built from that input. Then short numbered steps, each saying what we are about to do and why, doing
-it, and saying what the result tells us. Every number is either given or computed in front of the student; no
-number from the slide appears without where it comes from and what it means.>
-
-<one drawing of that same example, labelled with its numbers: the state at each step of a process or
+<one drawing of the example below, labelled with its numbers: the state at each step of a process or
 calculation (```svg, or a table with one row per step), a structure or flow (```mermaid), or a curve
 (```plot). For a history or motivation slide, a simple timeline or flow.>
+
+**Let's work through it:** <one small, concrete example with tiny numbers: the slide's own example if it is
+small enough, otherwise one like it. Start from the raw input; if the slide uses a table, matrix or count, show
+how it is built from that input. Then short numbered steps that walk through the drawing, each saying what we
+are about to do and why, doing it, and saying what the result tells us. Every number is either given or
+computed in front of the student; no number from the slide appears without where it comes from and what it
+means.>
 
 **So the idea is:** <the general rule in 2–3 plain sentences, pointing back at the example ("that's why step 3
 started over"). Spell out every abbreviation at first use; the one or two terms the slide rests on get a
@@ -386,7 +393,7 @@ def current_chat(cdir):
     return chat_id
 
 
-def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=False):
+def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=False, spoken=False):
     """One tutor answer inside the course's chat, about deck tag. Returns the saved message and the chat id. whole_deck: a voice
     question asked with Talk set to Whole deck (about the deck, not slide n)."""
     whole_deck = whole_deck and mode == "voice"
@@ -435,6 +442,8 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=Fa
             q = {"role": "q", "mode": mode, "deck": tag, "slide": n, "text": label}
             if whole_deck:
                 q["whole"] = True
+            if spoken:
+                q["spoken"] = True
             chat["messages"] = chat.get("messages", []) + [q, msg]
             save_chat(chat)
     finally:
@@ -443,6 +452,8 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=Fa
                 _PENDING.pop(chat["id"], None)
     if mode == "voice":
         remember(cdir, tag, None if whole_deck else n, question.strip(), r["text"])
+    elif spoken and mode == "ask":      # a spoken question typed into Ask is remembered like a voice turn
+        remember(cdir, tag, n, question.strip(), r["text"])
     elif mode == "grill_reply":     # a missed point in a grill goes into the same notes as a corrected voice mistake
         remember(cdir, tag, n, question.strip(), r["text"], grill=True)
     return chat, msg
