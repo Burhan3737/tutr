@@ -383,7 +383,7 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 .thread { flex: 1; min-height: 0; overflow: auto; padding: 8px 20px 16px; }
 /* Text | Board. Board view: the current answer on a board under the thread, its drawings pinned on top while
    the text scrolls under them; an empty strip until there is one. The Read view shows it in the thread instead. */
-.ask-area { border-top: 1px solid var(--line); }
+.ask-area { flex: none; border-top: 1px solid var(--line); }
 .ask-area .compose { border-top: 0; padding-top: 8px; }
 /* While an answer is read aloud (or the browser wouldn't play it): what's happening, Stop, voice and speed. */
 .voice-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: -8px; padding: 0 16px 12px; font-size: 13px; }
@@ -392,9 +392,18 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   font: inherit; padding: 4px 6px; }
 .voice-row .link { font-size: 13px; min-height: 30px; }
 .view-switch { margin: 10px 16px 0; }
-.panel.boarded .thread { flex: 2 1 0; }
-/* An answer always gets room to be read: the thread above gives way first. */
-.board { flex: 3 1 0; min-height: min(300px, 45vh); overflow: auto; padding: 0 20px 12px; border-top: 1px solid var(--line-strong); }
+/* Board view: the actions go on one sideways-scrolling row (as on a phone), so the thread keeps room for the newest
+   question and the board for the answer. */
+.panel.boarded .panel-actions { flex-direction: row; align-items: center; gap: 8px; padding: 6px 12px; overflow-x: auto;
+  scrollbar-width: thin; border-bottom: 1px solid var(--line); }
+.panel.boarded .panel-actions .scope-switch { flex: none; margin: 0; }
+.panel.boarded .panel-actions .scope-switch button { padding: 0 10px; white-space: nowrap; min-height: 28px; }
+.panel.boarded .panel-actions .btn.block { width: auto; flex: none; min-height: 34px; padding: 0 14px; font-size: 14px; }
+.panel.boarded .panel-actions .links { flex-wrap: nowrap; flex: none; gap: 2px; }
+.panel.boarded .panel-actions .link { min-height: 34px; white-space: nowrap; font-size: 14px; padding: 0 6px; }
+.panel.boarded .thread { flex: 2 1 0; min-height: 72px; }
+/* An answer always gets room to be read: the thread above gives way first (down to its last question). */
+.board { flex: 3 1 0; min-height: clamp(140px, 35vh, 300px); overflow: auto; padding: 0 20px 12px; border-top: 1px solid var(--line-strong); }
 .board.empty { flex: none; min-height: 0; padding: 10px 20px; }
 .board-empty { margin: 0; color: var(--text-2); font-size: 13px; }
 .board-draw { position: sticky; top: 0; z-index: 1; padding-top: 8px; background: var(--surface); border-bottom: 1px solid var(--line); }
@@ -633,6 +642,8 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   .viewer.ask-open .compose textarea { font-size: 16px; min-height: 44px; padding: 10px 12px; }
   .viewer.ask-open .compose .btn { min-height: 44px; }
   .viewer.ask-open .side-sheet { height: 85%; }
+  /* Board view under the slide: the thread and the board share what's left. */
+  .panel.boarded .board { min-height: 120px; }
   /* Reading view still takes the whole screen. */
   .viewer.ask-open.reading .stage { display: none; }
 }
