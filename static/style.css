@@ -381,46 +381,36 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 .panel-actions { padding: 16px 20px 8px; display: flex; flex-direction: column; gap: 0; }
 .panel-actions .links { display: flex; gap: 12px; flex-wrap: wrap; }
 .thread { flex: 1; min-height: 0; overflow: auto; padding: 8px 20px 16px; }
-/* Type | Talk, and the Talk tab: a canvas for the tutor's drawing, a caption of what it is saying, the mic. */
+/* Text | Board. Board view: the current answer on a board under the thread, its drawings pinned on top while
+   the text scrolls under them; an empty strip until there is one. The Read view shows it in the thread instead. */
 .ask-area { border-top: 1px solid var(--line); }
 .ask-area .compose { border-top: 0; padding-top: 8px; }
-.talk-switch { margin: 10px 16px 0; }
-.talk-modes { display: flex; gap: 8px; margin: 10px 16px 0; }
-.talk-modes .scope-switch { flex: 1; margin: 0; }
-.talk-stage { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; padding: 14px 20px; overflow: auto; }
-.talk-heard { margin: 0; font-size: 14px; color: var(--text-2); }
-.talk-canvas { flex: 1; min-height: 220px; display: grid; place-items: center; padding: 12px; overflow: auto;
-  border: 1px dashed var(--line-strong); border-radius: var(--r); }
-.talk-canvas > * { max-width: 100%; }
-.talk-canvas .diagram { margin: 0; width: 100%; }
-.talk-canvas .mermaid-box svg { display: block; width: 100%; height: auto; max-width: 100% !important; margin: 0 auto; }
-.talk-canvas .svg-box img { width: 100%; height: auto; }
-.talk-canvas .svg-box svg { display: block; width: 100%; height: auto; margin: 0 auto; }
+.view-switch { margin: 10px 16px 0; }
+.panel.boarded .thread { flex: 2 1 0; }
+.board { flex: 3 1 0; min-height: 0; overflow: auto; padding: 0 20px 12px; border-top: 1px solid var(--line-strong); }
+.board.empty { flex: none; padding: 10px 20px; }
+.board-empty { margin: 0; color: var(--text-2); font-size: 13px; }
+.board-draw { position: sticky; top: 0; z-index: 1; padding-top: 12px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.board-draw:empty { display: none; }
+.board-draw .diagram { margin: 0 0 12px; width: 100%; }
+.board-draw .mermaid-box svg { display: block; width: 100%; height: auto; max-width: 100% !important; margin: 0 auto; }
+.board-draw .svg-box img { width: 100%; height: auto; }
+.board-draw .svg-box svg { display: block; width: 100%; height: auto; margin: 0 auto; }
+.board-text { padding-top: 12px; }
+.board .copy-one { opacity: 1; }
+.on-board { margin: 0 0 4px; text-align: right; font-size: 13px; color: var(--text-2); }
+.viewer.reading .board { display: none; }
 /* Cues: parts of a drawing appear as they're named; the one being talked about glows and the rest fade back. */
-.talk-canvas .cue-part, .talk-canvas .flowchart-link, .talk-canvas .edgeLabel { transition: opacity .45s var(--ease), filter .3s var(--ease); }
-.talk-canvas .cue-hide { opacity: 0 !important; }
+.board-draw .cue-part, .board-draw .flowchart-link, .board-draw .edgeLabel { transition: opacity .45s var(--ease), filter .3s var(--ease); }
+.board-draw .cue-hide { opacity: 0 !important; }
 /* Not a part inside the lit one either: fading it there would muddy the part being talked about. */
-.talk-canvas.cueing .cue-part:not(.cue-on):not(:has(.cue-on)):not(.cue-on *), .talk-canvas.cueing .cue-dim { opacity: .35; }
-.talk-canvas .cue-on { filter: drop-shadow(0 0 2px #e8a317) drop-shadow(0 0 6px #e8a317); }
-.talk-canvas .mermaid-box .cue-on :is(rect, circle, ellipse, polygon, path) { stroke: #e8a317 !important; stroke-width: 3px !important; }
+.board-draw.cueing .cue-part:not(.cue-on):not(:has(.cue-on)):not(.cue-on *), .board-draw.cueing .cue-dim { opacity: .35; }
+.board-draw .cue-on { filter: drop-shadow(0 0 2px #e8a317) drop-shadow(0 0 6px #e8a317); }
+.board-draw .mermaid-box .cue-on :is(rect, circle, ellipse, polygon, path) { stroke: #e8a317 !important; stroke-width: 3px !important; }
 /* Safari may skip filter on SVG groups: the lit part's outlines turn amber too (the inlined SVG has no inline styles). */
-.talk-canvas .cue-svg :is(.cue-on, .cue-on *):is(rect, circle, ellipse, polygon, path, line, polyline) { stroke: #e8a317; stroke-width: 3px; }
-.talk-canvas .empty { text-align: center; max-width: 260px; }
-.talk-caption { margin: 0; min-height: 3em; font-size: 16px; line-height: 1.5; }
-.talk { display: flex; align-items: center; gap: 14px; padding: 12px 16px 16px; }
-.mic { flex: none; width: 60px; height: 60px; border: 0; border-radius: 50%; background: var(--accent); color: var(--on-accent);
-  font-size: 24px; cursor: pointer; }
-.mic:hover:not(:disabled) { background: var(--accent-hover); }
-.mic.on { background: #c0392b; animation: talk-pulse 1.2s infinite; }
-.mic:disabled { opacity: .45; cursor: default; }
-@keyframes talk-pulse { 0% { box-shadow: 0 0 0 0 rgba(192, 57, 43, .5); } 70% { box-shadow: 0 0 0 14px rgba(192, 57, 43, 0); } 100% { box-shadow: 0 0 0 0 rgba(192, 57, 43, 0); } }
-.talk-main { flex: 1; min-width: 0; }
-.talk-state { margin: 0 0 6px; font-size: 14px; color: var(--text-2); }
-.talk-opts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.talk-opts select { border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); color: var(--text);
-  font: inherit; font-size: 13px; padding: 4px 6px; }
-.talk-opts .link { font-size: 13px; min-height: 30px; }
-@media (prefers-reduced-motion: reduce) { .mic.on, .compose .dictate.on { animation: none; } .talk-canvas * { transition: none !important; } }
+.board-draw .cue-svg :is(.cue-on, .cue-on *):is(rect, circle, ellipse, polygon, path, line, polyline) { stroke: #e8a317; stroke-width: 3px; }
+@keyframes rec-pulse { 0% { box-shadow: 0 0 0 0 rgba(192, 57, 43, .5); } 70% { box-shadow: 0 0 0 14px rgba(192, 57, 43, 0); } 100% { box-shadow: 0 0 0 0 rgba(192, 57, 43, 0); } }
+@media (prefers-reduced-motion: reduce) { .compose .dictate.on { animation: none; } .board-draw * { transition: none !important; } }
 .thread .empty { color: var(--text-2); font-size: 13px; }
 /* Your messages: right-aligned bubbles; the tutor's answers stay full width on the left. */
 .msg-q { width: fit-content; max-width: 85%; margin: 20px 0 10px auto; padding: 8px 12px;
@@ -455,7 +445,7 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 .compose textarea::placeholder, .answer::placeholder { color: var(--text-2); }
 .compose .btn { padding: 0 16px; }
 .compose .dictate { padding: 0 12px; font-size: 18px; }
-.compose .dictate.on { color: var(--on-accent); background: #c0392b; border-color: #c0392b; animation: talk-pulse 1.2s infinite; }
+.compose .dictate.on { color: var(--on-accent); background: #c0392b; border-color: #c0392b; animation: rec-pulse 1.2s infinite; }
 
 /* ---------- reading view: the chat fills the viewer as one long page on a grey desk, like a PDF */
 .new-chat[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); }

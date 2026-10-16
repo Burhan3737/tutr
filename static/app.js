@@ -87,7 +87,7 @@ const STEPS = [["review", "Review"], ["new", "New slides"], ["practise", "Practi
 
 // ------------------------------------------------------------ markdown + math
 
-// A cue in a spoken answer, [#left]: lights up that part of the Talk canvas's drawing (speaker()). Never shown as text.
+// A cue in an answer, [#left]: lights up that part of the board's drawing. Never shown as text.
 const CUE = /\[#([A-Za-z][\w-]{0,40})\]/g;
 const uncue = (t) => String(t || "").replace(/[ \t]?\[#[A-Za-z][\w-]{0,40}\]/g, "");
 
@@ -206,7 +206,7 @@ async function route() {
   closeMenu();
   renderSessionBar();
   // A recording never outlives the page; speech only carries on while staying on the same deck (e.g. a citation).
-  cancelRecording();
+  cancelDictation();
   if (!(APP.deck && p.c === APP.deck.course && p.d === APP.deck.tag)) stopSpeaking();
   const main = $("#main");
   try {
@@ -707,7 +707,8 @@ function keepPlace(change) {
 }
 
 function toggleReading() {
-  const th = keepPlace(() => store.set("reading", !store.get("reading", false)));
+  // Board view: the board hides in the Read view and its answer joins the thread inline.
+  const th = keepPlace(() => { store.set("reading", !store.get("reading", false)); if (APP.view === "board") drawThread(); });
   if (th && $(".viewer.reading")) th.focus({ preventScroll: true });
 }
 
@@ -813,8 +814,6 @@ async function newChat() {
   d.asked = [];
   cancelDictation();
   stopSpeaking();
-  clearVoiceTurn();
-  if ($("#talk-stage")) talkRefresh();
   drawThread();
   $("#ask-input")?.focus();
 }
@@ -823,8 +822,6 @@ async function openChat(id) {
   try {
     const r = await api("/api/chat/open", { id });
     APP.tutor = "open";
-    // The opened chat shows in the Type tab's thread.
-    if (APP.talk) { APP.talk = false; store.set("talk", false); stopSpeaking(); cancelRecording(); clearVoiceTurn(); }
     // One chat per course: in a deck of its course, it opens beside that deck; otherwise go to the deck it started on.
     if (APP.deck && APP.deck.course === r.course) {
       APP.deck = await api(`/api/deck?course=${encodeURIComponent(r.course)}&tag=${encodeURIComponent(APP.deck.tag)}`);
@@ -839,30 +836,26 @@ function renderTutor() {
   if (APP.tutor === "closed") {
     closeSide();
     stopSpeaking();
-    cancelRecording();
+    cancelDictation();
     setTutor("closed");
     t.replaceChildren(h("div", { class: "rail" },
       h("button", { class: "primary", type: "button", onclick: () => startPracticeInPanel({ kind: tryKind() }), title: "A problem on this slide (or the whole deck, if chosen in the panel)" },
         h("span", { class: "go", "aria-hidden": "true" }, "✎"), "Try one"),
-      h("button", { type: "button", onclick: () => { APP.tutor = "open"; setTalk(false); $("#ask-input")?.focus(); } },
+      h("button", { type: "button", onclick: () => { APP.tutor = "open"; renderTutor(); $("#ask-input")?.focus(); } },
         h("span", { class: "glyph", "aria-hidden": "true" }, "💬"), "Ask"),
-      h("button", { type: "button", title: "Talk it through: ask out loud, hear the answer", onclick: () => { APP.tutor = "open"; setTalk(true); } },
-        h("span", { class: "glyph", "aria-hidden": "true" }, "🎙"), "Talk"),
       h("button", { type: "button", onclick: () => tutorAsk("example") },
         h("span", { class: "glyph", "aria-hidden": "true" }, "▤"), "Example")));
     return;
   }
   setTutor("open");
-  const talk = APP.talk;
-  const thread = talk ? talkStage() : h("div", { class: "thread", id: "thread", "aria-live": "polite", tabindex: "-1" });
-  t.replaceChildren(h("div", { class: "panel" + (talk ? " talking" : "") },
+  t.replaceChildren(h("div", { class: "panel" + (APP.view === "board" ? " boarded" : "") },
     h("div", { class: "panel-head" }, h("h2", {}, "Tutor"), h("span", { class: "muted small", id: "tutor-where" }), readTools(),
       h("button", { class: "link quiet new-chat", type: "button", title: "Copy this chat as Markdown", onclick: () => copyChat(APP.deck.chat, APP.deck) }, "Copy chat"),
       h("button", { class: "link quiet new-chat", type: "button", id: "read-btn", title: "Reading view: the chat as full-width pages, like a PDF (R)", onclick: toggleReading }, "Read"),
       h("button", { class: "link quiet new-chat", type: "button", title: "Print this chat, or save it as a PDF", onclick: () => printChat(APP.deck.chat, APP.deck) }, "PDF"),
       h("button", { class: "link quiet new-chat", type: "button", title: "Start a new chat in this course", onclick: newChat }, "New chat"),
       h("button", { class: "icon-btn", type: "button", "aria-label": "Close the tutor", onclick: () => { APP.tutor = "closed"; renderTutor(); } }, "×")),
-    talk ? null : h("div", { class: "panel-actions" },
+    h("div", { class: "panel-actions" },
       scopeSwitch(),
       h("button", { class: "btn block", type: "button", onclick: () => startPracticeInPanel({ kind: tryKind() }) }, "Try one"),
       h("div", { class: "links" },
@@ -873,11 +866,12 @@ function renderTutor() {
         h("button", { class: "link", type: "button", onclick: () => tutorAsk("quiz") }, "Quiz prep"),
         h("button", { class: "link", type: "button", title: "What to know first: prerequisites, rules and symbols", onclick: () => tutorAsk("before") }, "Before you start"),
         h("button", { class: "link", type: "button", title: "Methods, formulas and shortcuts to copy onto your sheet (always the whole deck)", onclick: () => tutorAsk("cheatsheet_deck") }, "Cheat sheet"))),
-    thread,
-    h("div", { class: "ask-area" }, talk ? h("div", { class: "talk-modes" }, talkSwitch(), scopeSwitch()) : talkSwitch(),
-      talk ? talkBar() : composeBox(composeHint(), (q, spoken) => tutorAsk(grilling() ? "grill_reply" : "ask", q, { spoken })))));
+    h("div", { class: "thread", id: "thread", "aria-live": "polite", tabindex: "-1" }),
+    APP.view === "board" ? h("div", { class: "board empty", id: "board", "aria-live": "polite" }) : null,
+    h("div", { class: "ask-area" }, viewSwitch(),
+      composeBox(composeHint(), (q, spoken) => tutorAsk(grilling() ? "grill_reply" : "ask", q, { spoken })))));
   updateTutorWhere();
-  if (talk) talkRefresh(); else drawThread();
+  drawThread();
   applyReading();
   // A side question survives the panel being redrawn (e.g. the scope switch), but not a change of deck.
   if (APP.side && APP.deck && APP.side.course === APP.deck.course && APP.side.tag === APP.deck.tag) $(".panel", t).append(APP.side.el);
@@ -1141,11 +1135,14 @@ function drawThread() {
     if (earlier.length) th.append(h("div", { class: "earlier" }, h("p", { class: "empty" }, "Earlier chats in this course:"),
       ...earlier.map((c) => h("button", { class: "link", type: "button", onclick: () => openChat(c.id) }, c.starred ? `★ ${c.title}` : c.title))));
   }
+  const top = boardMsg();
   msgs.forEach((m, i) => {
-    if (m.role === "q") th.append(h("p", { class: "msg-q" }, m.spoken || m.mode === "voice" ? `🎙 ${m.text}` : m.text, h("span", { class: "where" }, msgWhere(m, APP.deck.chat, APP.deck.tag))));
+    if (m === top) th.append(onBoardMark());
+    else if (m.role === "q") th.append(h("p", { class: "msg-q" }, m.spoken || m.mode === "voice" ? `🎙 ${m.text}` : m.text, h("span", { class: "where" }, msgWhere(m, APP.deck.chat, APP.deck.tag))));
     else th.append(answerEl(m, i === msgs.length - 1));
   });
   th.scrollTop = th.scrollHeight;
+  drawBoard(top);
   updateComposeHint();
 }
 
@@ -1161,22 +1158,121 @@ function msgWhere(m, chat, tag) {
 function answerEl(m, isLast) {
   const body = renderMdCached(m.text, APP.deck.course);
   body.className = "msg-a";
-  const wrap = h("div", { class: "ans" }, body,
-    h("button", { class: "copy-one", type: "button", title: "Copy this answer", onclick: (e) => copyText(unmark(m.text), e.currentTarget) }, "Copy"));
-  if (m.mode === "voice") wrap.append(h("button", { class: "link quiet", type: "button", title: "Hear this answer again",
+  return h("div", { class: "ans" }, body, answerTools(m, isLast));
+}
+
+// Under an answer, in the thread or on the board: Copy, ▶ Play again (spoken answers), and what to do next (the last one).
+function answerTools(m, isLast) {
+  const out = [h("button", { class: "copy-one", type: "button", title: "Copy this answer", onclick: (e) => copyText(unmark(m.text), e.currentTarget) }, "Copy")];
+  if (m.mode === "voice") out.push(h("button", { class: "link quiet", type: "button", title: "Hear this answer again",
     onclick: (e) => { if (VOICE.playBtn === e.currentTarget) { stopSpeaking(); talkSet("idle"); } else speakAll(m.text, e.currentTarget); } }, "▶ Play again"));
   if (isLast && GRILL_MODES.includes(m.mode)) {
-    wrap.append(h("div", { class: "msg-foot" },
+    out.push(h("div", { class: "msg-foot" },
       h("button", { class: "link", type: "button", title: "Stop here: what held up and what's shaky", onclick: () => tutorAsk("grill_end") }, "End the grill: summary ›")));
   } else if (isLast) {
     const deckWide = (m.mode || "").endsWith("_deck");
     const next = (m.mode || "").startsWith("example")
       ? h("button", { class: "link", type: "button", onclick: () => startPracticeInPanel({ kind: "yourturn", example_md: m.text }) }, "Your turn: finish from here ›")
       : h("button", { class: "link", type: "button", onclick: () => startPracticeInPanel({ kind: deckWide ? "deck" : "try" }) }, deckWide ? "Try one on this deck ›" : "Try one on this ›");
-    wrap.append(h("div", { class: "msg-foot" }, next,
+    out.push(h("div", { class: "msg-foot" }, next,
       m.mode !== "deeper" ? h("button", { class: "link quiet", type: "button", onclick: () => tutorAsk("deeper") }, "Go deeper") : null));
   }
-  return wrap;
+  return out;
+}
+
+// ---- Text | Board
+// Two views of the same panel. Text: answers in the thread. Board: the current answer is written and drawn on a
+// board under the thread, and moves up into the thread on the next send. The Read view shows everything inline.
+APP.view = store.get("view", "text");
+const boardOn = () => APP.view === "board" && !store.get("reading", false);
+
+function viewSwitch() {
+  const mk = (v, label) => h("button", { type: "button", role: "radio", "aria-checked": String(APP.view === v),
+    class: APP.view === v ? "on" : "", onclick: () => { if (APP.view !== v) { APP.view = v; store.set("view", v); renderTutor(); } } }, label);
+  return h("div", { class: "scope-switch view-switch", role: "radiogroup", "aria-label": "Show answers as" }, mk("text", "Text"), mk("board", "Board"));
+}
+
+// The answer on the board: the chat's last message, if it is an answer asked on the open deck.
+function boardMsg() {
+  const chat = APP.deck && APP.deck.chat, msgs = (chat && chat.messages) || [];
+  const m = msgs[msgs.length - 1];
+  return boardOn() && m && m.role !== "q" && msgDeck(m, chat) === APP.deck.tag ? m : null;
+}
+const onBoardMark = () => h("p", { class: "on-board" }, "↓ On the board");
+
+// The board drawn from the chat: its answer whole, or the empty strip.
+function drawBoard(m) {
+  const b = $("#board");
+  if (!b) return;
+  if (!m) {
+    b.classList.add("empty");
+    b.replaceChildren(h("p", { class: "board-empty" }, "The tutor's answer is written and drawn here."));
+    return;
+  }
+  boardWriter(APP.deck.course)(m.text, true);
+  b.append(answerTools(m, true));
+}
+
+// Clears the board and returns paint(text, final), which puts the answer so far on it. Drawings go up whole in
+// .board-draw once their block closes; the rest is written in .board-text, finished blocks rendered once (as in
+// tutorAsk). The one place the board's answer is rendered.
+const DRAWING = /^ {0,3}(```|~~~)\s*(mermaid|svg|plot)\b/;
+function boardWriter(course) {
+  const b = $("#board");
+  const draw = h("div", { class: "board-draw" }), done = h("div"), tail = h("div");
+  b.classList.remove("empty");
+  b.replaceChildren(draw, h("div", { class: "board-text msg-a" }, done, tail));
+  let taken = 0, seen = "";
+  const write = (md) => { if (md.trim()) done.append(...renderMd(md, course).childNodes); };
+  return (text, final = false) => {
+    if (!text.startsWith(seen)) { draw.replaceChildren(); done.replaceChildren(); taken = 0; }   // not the text streamed: start over
+    tail.replaceChildren();
+    for (;;) {
+      const rest = text.slice(taken), f = rest.search(/^ {0,3}(```|~~~)/m);
+      if (f < 0) {             // finished: everything before the last blank line that isn't inside $$…$$
+        let cut = final ? rest.length : 0;
+        for (let i = rest.lastIndexOf("\n\n"); !final && i > 0; i = rest.lastIndexOf("\n\n", i - 1)) {
+          if ((rest.slice(0, i).split("$$").length - 1) % 2 === 0) { cut = i + 2; break; }
+        }
+        write(rest.slice(0, cut));
+        taken += cut;
+        tail.replaceChildren(...renderMd(text.slice(taken), course).childNodes);
+        break;
+      }
+      write(rest.slice(0, f));
+      taken += f;
+      const block = text.slice(taken), mark = block.trimStart().slice(0, 3);
+      const close = block.slice(1).match(new RegExp(`\\n {0,3}${mark}[ \\t]*(?:\\n|$)`));
+      if (!close) {            // still streaming in: it goes up once it closes
+        if (final) { write(block); taken = text.length; }
+        break;
+      }
+      const end = 1 + close.index + close[0].length, src = block.slice(0, end);
+      taken += end;
+      if (DRAWING.test(src)) { draw.append(h("div", { class: "board-fig" }, ...renderMd(src, course).childNodes)); fitDrawings(draw); }
+      else write(src);         // a code block is text
+    }
+    seen = text.slice(0, taken);
+  };
+}
+
+// Board drawings go in as live (cleaned) SVG, so cues can reach their parts, and are scaled to the board rather
+// than to their text (Mermaid sets a max-width in px). Resolves once any Mermaid diagram is drawn.
+function fitDrawings(c) {
+  $$(".svg-box[data-src]", c).forEach((fig) => {
+    const img = $("img", fig), svg = img && inlineSvg(fig.dataset.src);
+    if (svg) img.replaceWith(svg);
+  });
+  applyCues();
+  return drawMermaid().then(() => {
+    const max = `${Math.max(96, ($("#board")?.clientHeight || 400) * 0.4)}px`;   // room left for the text under it
+    $$(".mermaid-box svg, .svg-box svg", c).forEach((s) => {
+      s.style.removeProperty("max-width");
+      s.removeAttribute("height");
+      s.style.maxHeight = max;
+    });
+    applyCues();
+  });
 }
 
 
@@ -1216,7 +1312,7 @@ function chatMeta(chat, deck) {
   return [code, where, chat.updated || chat.created || ""].filter(Boolean).join(" · ");
 }
 
-// Copied Markdown shows terms as plain words, without the [[…]] that makes them buttons (or any canvas cues).
+// Copied Markdown shows terms as plain words, without the [[…]] that makes them buttons (or any cues).
 const unmark = (t) => uncue(t).replace(/\[\[([^[\]\n]{1,120}?)\]\]/g, "$1");
 
 function chatMarkdown(chat, deck) {
@@ -1259,24 +1355,29 @@ function metaText(m) {
 
 async function tutorAsk(mode, question = "", { spoken = false } = {}) {
   if (APP.scope === "deck" && DECK_MODES.includes(mode)) mode += "_deck";
-  // Written answers go in the Type tab's thread (switched to straight away: the Talk tab isn't drawn on the way).
-  if (APP.talk) { APP.talk = false; store.set("talk", false); stopSpeaking(); cancelRecording(); }
   if (APP.tutor !== "open" || !$("#thread")) { APP.tutor = "open"; renderTutor(); }
   const th = $("#thread");
   const d = APP.deck;
   const n = Math.min(APP.n, d.slides);
+  // Board view: the answer on the board moves up into the thread, and the board is cleared for this one.
+  const board = boardOn() ? $("#board") : null;
+  const prev = board && boardMsg();
+  if (prev) $(".on-board", th)?.replaceWith(answerEl(prev, false));
   $(".empty", th)?.remove();
   th.append(h("p", { class: "msg-q" }, (spoken ? "🎙 " : "") + askText(mode, question), h("span", { class: "where" }, mode.endsWith("_deck") ? ` · ${d.tag}` : ` · s${n}`)));
+  const mark = board ? th.appendChild(onBoardMark()) : null;
+  const paintBoard = board && boardWriter(d.course);
   const wait = h("p", { class: "waiting" }, mode.startsWith("example") ? "Writing a worked example…" : mode.endsWith("_deck") ? "Reading the whole deck…" : "Thinking…");
-  th.append(wait);
+  (board || th).append(wait);
   th.scrollTop = th.scrollHeight;
   $$("#thread .msg-foot").forEach((f) => f.remove());
   const live = h("div", { class: "msg-a" });
   const doneBlocks = h("div"), tailBlock = h("div");
   live.append(doneBlocks, tailBlock);
-  let acc = "", done = 0, queued = false, cost = 0, follow = true;
-  const onScroll = () => { follow = th.scrollHeight - th.scrollTop - th.clientHeight < 80; };
-  th.addEventListener("scroll", onScroll, { passive: true });
+  const sc = board || th;           // what scrolls as the answer is written
+  let acc = "", done = 0, queued = false, cost = 0, follow = true, over = false;
+  const onScroll = () => { follow = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 80; };
+  sc.addEventListener("scroll", onScroll, { passive: true });
   // Everything before the last blank line that isn't inside $$…$$ or a ``` block is finished text.
   const cutPoint = (text) => {
     for (let i = text.lastIndexOf("\n\n"); i > done; i = text.lastIndexOf("\n\n", i - 1)) {
@@ -1287,118 +1388,60 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
   };
   const paint = () => {
     queued = false;
+    if (over) return;
     const t0 = performance.now();
-    const cut = cutPoint(acc);
-    if (cut > done) { doneBlocks.append(...renderMd(acc.slice(done, cut), d.course).childNodes); done = cut; }
-    tailBlock.replaceChildren(...renderMd(acc.slice(done), d.course).childNodes);
+    if (board) paintBoard(acc);
+    else {
+      const cut = cutPoint(acc);
+      if (cut > done) { doneBlocks.append(...renderMd(acc.slice(done, cut), d.course).childNodes); done = cut; }
+      tailBlock.replaceChildren(...renderMd(acc.slice(done), d.course).childNodes);
+    }
     cost = performance.now() - t0;
-    if (follow) th.scrollTop = th.scrollHeight;
+    if (follow) sc.scrollTop = sc.scrollHeight;
   };
   try {
     const r = await apiStream("/api/tutor", { course: d.course, tag: d.tag, n, mode, question, spoken, model: APP.model, slides_only: slidesOnly(d.course) }, {
       status: (t) => { wait.textContent = `${t}…`; },
       text: (t) => {
-        if (!acc) { wait.before(live); wait.textContent = "Writing…"; }
+        if (!acc) { if (!board) wait.before(live); wait.textContent = "Writing…"; }
         acc += t;
         if (!queued) { queued = true; setTimeout(() => requestAnimationFrame(paint), Math.max(50, cost * 4)); }
       },
     });
+    over = true;
     const chat = d.chat || { id: r.chat, title: askText(mode, question), updated: "", messages: [] };
     chat.messages.push({ role: "q", mode, deck: d.tag, slide: n, text: askText(mode, question), ...(spoken ? { spoken } : {}) }, r.message);
     chat.updated = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
     d.chat = chat;
     if (!d.asked.includes(n)) d.asked.push(n);
-    th.removeEventListener("scroll", onScroll);
+    sc.removeEventListener("scroll", onScroll);
     if (APP.deck !== d) return;
-    if (chat.messages.length <= 2) { drawThread(); return; }     // first answer: also adds the chat bar
+    // The first answer (it also adds the chat bar), or the panel was redrawn meanwhile: draw it all from the chat.
+    if (chat.messages.length <= 2 || !wait.isConnected) { drawThread(); return; }
     // Swap in just the finished answer; the rest of the thread stays as it is.
     wait.remove();
-    live.replaceWith(answerEl(r.message, true));
+    if (board) { paintBoard(r.message.text, true); board.append(answerTools(r.message, true)); }
+    else live.replaceWith(answerEl(r.message, true));
     updateComposeHint();
-    if (follow) th.scrollTop = th.scrollHeight;
+    if (follow) sc.scrollTop = sc.scrollHeight;
   } catch (e) {
-    th.removeEventListener("scroll", onScroll);
+    over = true;
+    sc.removeEventListener("scroll", onScroll);
     live.remove();
-    wait.replaceWith(h("p", { class: "err" }, e.message));
+    const err = h("p", { class: "err" }, e.message);
+    if (!board) wait.replaceWith(err);
+    else { if (wait.isConnected) drawBoard(null); mark.replaceWith(err); }
   }
 }
 
-// ------------------------------------------------------------ talk (voice)
-// The Talk tab: tap the mic (or hold Space), ask out loud, and hear the answer. The recording is decoded here to
-// 16 kHz mono WAV and transcribed on the hub (faster-whisper, local); the text goes to the tutor as mode "voice"
-// in the course's chat, the same conversation as the Type tab. The answer is spoken a sentence at a time as it
-// streams in (Kokoro, local), so the tutor starts talking early. Instead of a written thread the tab shows a
-// canvas: when a picture helps, the tutor draws one there and then talks it through (voice_prompt.md).
+// ------------------------------------------------------------ voice
+// Answers read aloud a sentence at a time (Kokoro, local, on the hub): ▶ Play again on spoken answers. Speech is
+// transcribed on the hub too (faster-whisper), for dictation. Cues ([#id]) light up parts of the board's drawing.
 
-APP.talk = store.get("talk", false);
-const VOICE = { rec: null, stream: null, chunks: [], recDone: null, recGen: 0, recTimer: 0, state: "idle", gen: 0, ctrl: null,
-  el: null, voices: null, poll: 0, tick: 0, thinkT0: 0, thinkMsg: "", playBtn: null,
-  starting: false, releaseEarly: false, spaceHeld: false, owner: "", heard: "", drawing: "", caption: "", last: "", cue: null };
+const VOICE = { state: "idle", gen: 0, ctrl: null, el: null, voices: null, poll: 0, tick: 0, thinkT0: 0, thinkMsg: "", playBtn: null, cue: null };
 const micOk = () => window.isSecureContext && !!navigator.mediaDevices?.getUserMedia && !!window.MediaRecorder;
-const TALK_STATES = { idle: "Tap the mic (or hold Space), ask, then tap again (or let go).",
-  listening: "Listening… tap again, or let go of Space, to send.", hearing: "Working out what you said…",
-  thinking: "Thinking…", speaking: "Speaking… tap the mic to cut in." };
+const TALK_STATES = { thinking: "Thinking…", speaking: "Speaking…" };
 const MAX_RECORDING_MS = 120000;
-
-function setTalk(on) {
-  APP.talk = on;
-  store.set("talk", on);
-  if (!on) { silence(); cancelRecording(); }   // an answer being written still finishes, into the Type tab
-  else cancelDictation();                      // the Type tab's 🎙 goes away with it
-  renderTutor();
-}
-
-function talkSwitch() {
-  const mk = (on, label) => h("button", { type: "button", role: "radio", "aria-checked": String(APP.talk === on),
-    class: APP.talk === on ? "on" : "", onclick: () => { if (APP.talk !== on) setTalk(on); } }, label);
-  return h("div", { class: "scope-switch talk-switch", role: "radiogroup", "aria-label": "Ask by" }, mk(false, "Type"), mk(true, "Talk"));
-}
-
-function talkStage() {
-  return h("div", { class: "talk-stage", id: "talk-stage" },
-    h("p", { class: "talk-heard", id: "talk-heard" }),
-    h("div", { class: "talk-canvas", id: "talk-canvas", "aria-label": "Canvas" }),
-    h("p", { class: "talk-caption", id: "talk-caption", "aria-live": "polite" }));
-}
-
-function talkBar() {
-  const voice = h("select", { id: "talk-voice", "aria-label": "Voice", onchange: (e) => store.set("voice", e.target.value) });
-  const speed = h("select", { "aria-label": "Speed", onchange: (e) => store.set("voiceSpeed", +e.target.value) },
-    ...[0.85, 1, 1.1, 1.2, 1.35].map((s) => h("option", { value: s }, `${s}×`)));
-  speed.value = store.get("voiceSpeed", 1);
-  return h("div", { class: "talk" },
-    h("button", { class: "mic", id: "talk-mic", type: "button", "aria-label": "Talk", "aria-pressed": "false", onclick: micTap }, "🎙"),
-    h("div", { class: "talk-main" },
-      h("p", { class: "talk-state", id: "talk-state" }),
-      h("div", { class: "talk-opts" }, voice, speed,
-        h("button", { class: "link quiet", id: "talk-replay", type: "button", title: "Hear the last answer again", onclick: () => VOICE.last && speakAll(VOICE.last) }, "▶ Replay"),
-        h("button", { class: "link quiet", id: "talk-stop", type: "button", onclick: () => { stopSpeaking(); talkSet("idle"); } }, "■ Stop"))));
-}
-
-// What the Talk tab shows (heard / drawing / caption / last answer) belongs to one deck; another deck starts blank.
-function voiceDeck(d) {
-  const key = d ? `${d.course}\u0000${d.tag}` : "";
-  if (VOICE.owner !== key) { VOICE.owner = key; clearVoiceTurn(); }
-}
-function clearVoiceTurn() { Object.assign(VOICE, { heard: "", drawing: "", caption: "", last: "" }); }
-
-// Fill the Talk tab from VOICE after it is (re)drawn, and get the models loading.
-function talkRefresh() {
-  voiceDeck(APP.deck);
-  if (!VOICE.last) {       // after a reload: Replay plays the chat's last spoken answer
-    const msgs = (APP.deck && APP.deck.chat && APP.deck.chat.messages) || [];
-    VOICE.last = [...msgs].reverse().find((m) => m.role !== "q" && m.mode === "voice")?.text || "";
-  }
-  if (!VOICE.drawing) VOICE.drawing = lastDrawing();
-  $("#talk-heard").textContent = VOICE.heard ? `You: ${VOICE.heard}` : "";
-  paintCanvas(VOICE.drawing);
-  $("#talk-caption").textContent = VOICE.caption;
-  fillVoices();
-  if (!micOk()) return talkSet("off", window.isSecureContext ? "This browser can't record audio. Try Chrome or Edge."
-    : "The microphone only works on a secure page: open the hub on this computer (start option 1), or through the Cloudflare link (option 3), not the Wi-Fi address.");
-  talkSet(VOICE.state === "off" ? "idle" : VOICE.state, VOICE.state === "thinking" ? VOICE.thinkMsg : undefined);
-  if (!VOICE.voices) warmVoice();
-}
 
 function talkSet(state, msg) {
   // Thinking shows the seconds waited (the first answer on a deck can take most of a minute), after any status text.
@@ -1414,15 +1457,9 @@ function talkSet(state, msg) {
   } else if (VOICE.tick) { clearInterval(VOICE.tick); VOICE.tick = 0; }
   VOICE.state = state;
   if (state !== "speaking" && VOICE.playBtn) { VOICE.playBtn.textContent = "▶ Play again"; VOICE.playBtn = null; }
-  const line = $("#talk-state"), mic = $("#talk-mic");
+  const line = $("#talk-state");
   if (line) line.textContent = msg || TALK_STATES[state] || "";
-  if (mic) {
-    mic.classList.toggle("on", state === "listening");
-    mic.setAttribute("aria-pressed", String(state === "listening"));
-    mic.disabled = ["hearing", "loading", "off"].includes(state);
-  }
   $("#talk-stop")?.toggleAttribute("hidden", !["thinking", "speaking"].includes(state));
-  $("#talk-replay")?.toggleAttribute("hidden", !VOICE.last || ["thinking", "speaking", "listening"].includes(state));
 }
 
 function fillVoices() {
@@ -1434,7 +1471,7 @@ function fillVoices() {
 
 async function warmVoice() {
   clearTimeout(VOICE.poll);
-  if (!$("#talk-mic")) return;        // the Talk tab was closed meanwhile
+  if (!$("#talk-voice")) return;      // no voice row showing
   const calm = () => ["idle", "loading", "off"].includes(VOICE.state);   // never over a turn in progress
   let st;
   // With the deck, the hub also opens the course's conversation now, so the first answer skips that step.
@@ -1449,29 +1486,6 @@ async function warmVoice() {
   VOICE.voices = st;
   fillVoices();
   if (VOICE.state === "loading") talkSet("idle");
-}
-
-// Resolves once any Mermaid diagram on the canvas is drawn (so cues can find its nodes).
-function paintCanvas(md) {
-  const c = $("#talk-canvas");
-  if (!c) return Promise.resolve();
-  if (!md) { c.replaceChildren(h("p", { class: "empty" }, "When a picture helps, the tutor draws it here and talks you through it.")); return Promise.resolve(); }
-  c.replaceChildren(...renderMd(md, APP.deck.course).childNodes);
-  // An SVG goes in as live (cleaned) markup rather than an <img>, so cues can reach its parts.
-  $$(".svg-box[data-src]", c).forEach((fig) => {
-    const svg = inlineSvg(fig.dataset.src), img = $("img", fig);
-    if (svg && img) img.replaceWith(svg);
-  });
-  applyCues();
-  // Mermaid sizes its SVG to the text (max-width in px): on the narrow canvas, scale drawings to fill the canvas instead.
-  return drawMermaid().then(() => {
-    $$(".mermaid-box svg, .svg-box svg", c).forEach((s) => {
-      s.style.removeProperty("max-width");
-      s.removeAttribute("height");
-      s.style.maxHeight = `${Math.max(200, c.clientHeight - 24)}px`;
-    });
-    applyCues();
-  });
 }
 
 // The tutor's SVG as live markup, rebuilt from an allowlist: SVG shapes and text with drawing attributes only, so
@@ -1539,21 +1553,7 @@ function cleanSvgEl(el) {
   return out;
 }
 
-// The most recent drawing in this deck's run of spoken answers, to put back on the canvas after a reload
-// (the course's chat also holds other decks' answers: those are skipped).
-function lastDrawing() {
-  const chat = APP.deck && APP.deck.chat, msgs = (chat && chat.messages) || [];
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    const m = msgs[i];
-    if (m.role === "q" || msgDeck(m, chat) !== APP.deck.tag) continue;
-    if (m.mode !== "voice") return "";
-    const f = m.text.match(/(```|~~~)(?:mermaid|svg|plot)\b[\s\S]*?\1/);
-    if (f) return f[0];
-  }
-  return "";
-}
-
-// Cues ([#id] in the spoken text) and the canvas. While an answer is spoken over a new drawing, its named parts
+// Cues ([#id] in the spoken text) and the board's drawing. While an answer is spoken over a new drawing, its named parts
 // start hidden and appear when the sentence that names them starts; the part being talked about is lit and the
 // rest fade back. Everything shows once the answer ends or is cut short, so a missed cue never hides a part.
 // A follow-up answer can cue the drawing that's already there without drawing it again.
@@ -1582,8 +1582,9 @@ function cueParts(c) {
   return { parts, edges };
 }
 
+const cueRoot = () => $("#board .board-draw");
 function applyCues() {
-  const c = $("#talk-canvas");
+  const c = cueRoot();
   if (!c) return;
   const { parts, edges } = cueParts(c), st = VOICE.cue;
   const on = new Set(st ? st.on.filter((id) => parts.has(id)) : []);
@@ -1605,9 +1606,9 @@ function applyCues() {
 }
 
 // A piece of speech is starting: the parts it names appear (if hidden) and light up. Cues naming no part on the
-// canvas are ignored; returns how many did name one.
+// board are ignored; returns how many did name one.
 function showCues(ids) {
-  const c = $("#talk-canvas"), parts = c ? cueParts(c).parts : new Map();
+  const c = cueRoot(), parts = c ? cueParts(c).parts : new Map();
   ids = ids.filter((id) => parts.has(id));
   if (!ids.length) return 0;
   const st = VOICE.cue || (VOICE.cue = { build: false, shown: new Set(), on: [] });
@@ -1620,83 +1621,9 @@ function showCues(ids) {
 function buildCues() { VOICE.cue = { build: true, shown: new Set(), on: [] }; }
 function endCues() { if (VOICE.cue) { VOICE.cue = null; applyCues(); } }
 
-async function micTap() {
-  if (VOICE.state === "listening") { unlockAudio(); return finishRecording(); }
-  if (VOICE.starting || ["hearing", "loading", "off"].includes(VOICE.state)) return;
-  stopSpeaking();
-  unlockAudio();                      // inside the tap: lets the answer play later (iOS, autoplay rules)
-  const tok = ++VOICE.recGen;
-  VOICE.starting = true;
-  VOICE.releaseEarly = false;
-  let stream;
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
-  } catch {
-    if (tok !== VOICE.recGen) return;
-    VOICE.starting = false;
-    return talkSet("idle", "The microphone is blocked. Allow it from the site settings next to the address bar, then try again.");
-  }
-  if (tok !== VOICE.recGen) { stream.getTracks().forEach((t) => t.stop()); return; }   // cancelled meanwhile
-  const chunks = [];
-  let rec;
-  try {
-    rec = new MediaRecorder(stream);
-    rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
-    VOICE.recDone = new Promise((res) => { rec.onstop = () => res(); rec.onerror = () => res(); });
-    rec.start();
-  } catch {
-    VOICE.starting = false;
-    stream.getTracks().forEach((t) => t.stop());
-    return talkSet("idle", "This browser couldn't start recording. Try Chrome or Edge.");
-  }
-  Object.assign(VOICE, { rec, stream, chunks, starting: false });
-  talkSet("listening");
-  VOICE.recTimer = setTimeout(() => { if (VOICE.rec === rec) finishRecording(); }, MAX_RECORDING_MS);   // forgot to stop
-  if (VOICE.releaseEarly) finishRecording();
-}
-
-// Stop a recording (or one about to start) without sending it: leaving the tab, the deck or the page.
-function cancelRecording() {
-  cancelDictation();
-  VOICE.recGen++;
-  clearTimeout(VOICE.recTimer);
-  const rec = VOICE.rec;
-  if (rec) {
-    rec.onstop = rec.onerror = rec.ondataavailable = null;
-    if (rec.state !== "inactive") { try { rec.stop(); } catch { /* already stopping */ } }
-  }
-  VOICE.stream?.getTracks().forEach((t) => t.stop());
-  Object.assign(VOICE, { rec: null, stream: null, chunks: [], recDone: null, starting: false, releaseEarly: false, spaceHeld: false });
-  if (["listening", "hearing"].includes(VOICE.state)) talkSet("idle");
-}
-
-async function finishRecording() {
-  const { rec, stream, chunks, recDone, recGen: tok } = VOICE;
-  if (!rec) return;
-  clearTimeout(VOICE.recTimer);
-  Object.assign(VOICE, { rec: null, stream: null, recDone: null });
-  talkSet("hearing");
-  const d = APP.deck;
-  let text = "", msg = "Didn't catch that. Tap the mic and try again.";
-  try {
-    if (rec.state !== "inactive") { rec.stop(); await recDone; }
-    stream.getTracks().forEach((t) => t.stop());
-    if (tok !== VOICE.recGen) return;
-    const wav = await toWav16k(new Blob(chunks, { type: rec.mimeType }));
-    if (tok !== VOICE.recGen) return;
-    try {
-      text = (await api("/api/voice/transcribe", { course: d.course, tag: d.tag, n: Math.min(APP.n, d.slides), scope: APP.scope, audio: await blobBase64(wav) })).text.trim();
-    } catch (e) { msg = e.message; }
-  } catch { /* couldn't decode the recording: msg says so */ } finally {
-    stream.getTracks().forEach((t) => t.stop());
-    if (tok === VOICE.recGen && VOICE.state === "hearing" && !text) talkSet("idle", msg);
-  }
-  if (text && tok === VOICE.recGen && APP.deck === d) talkAsk(text);
-}
-
-// ------------------------------------------------------------ dictation (the Type tab)
+// ------------------------------------------------------------ dictation
 // 🎙 next to Ask: speak a question, and what the hub heard is typed into the box to check and edit before sending.
-// Same local speech recognition as Talk; nothing is sent until Ask.
+// Nothing is sent until Ask.
 // While you talk, the words so far appear in the box every ~1.5 s as a draft (one request at a time, a sequence
 // number drops a late reply); stopping replaces the draft with one pass over the whole clip. `before`/`after` are
 // the text either side of the cursor when dictation began, so they stay untouched. `spoken` marks the question
@@ -1853,37 +1780,6 @@ function pcmWav(pcm, rate) {
 }
 const blobBase64 = (b) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(b); });
 
-async function talkAsk(question) {
-  const d = APP.deck, n = Math.min(APP.n, d.slides), deck = APP.scope === "deck";
-  stopSpeaking();
-  const ctrl = VOICE.ctrl = new AbortController();
-  const gen = VOICE.gen;
-  voiceDeck(d);
-  Object.assign(VOICE, { heard: question, caption: "" });     // the drawing stays: a follow-up can point at it
-  if ($("#talk-stage")) talkRefresh();
-  talkSet("thinking");
-  const sp = speaker(gen, ctrl.signal);
-  let r;
-  try {
-    r = await apiStream("/api/tutor", { course: d.course, tag: d.tag, n, mode: "voice", question, model: APP.model, slides_only: slidesOnly(d.course), scope: deck ? "deck" : "slide" },
-      { status: (t) => { if (gen === VOICE.gen && VOICE.state === "thinking") talkSet("thinking", `${t}…`); }, text: sp.feed }, ctrl.signal);
-  } catch (e) {
-    if (!isAbort(e) && gen === VOICE.gen) { stopSpeaking(); talkSet("idle", e.message); }
-    return;          // aborted (cut in, Stop, left the deck): nothing more to do; the hub saves what it has
-  }
-  // The server saved the turn, so it joins the course's chat (and the Type tab shows it) even if it was cut short here.
-  const chat = d.chat || { id: r.chat, title: question, updated: "", messages: [] };
-  chat.messages.push({ role: "q", mode: "voice", deck: d.tag, slide: n, text: question, ...(deck ? { whole: true } : {}) }, r.message);
-  chat.updated = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
-  d.chat = chat;
-  if (!d.asked.includes(n)) d.asked.push(n);
-  if (gen === VOICE.gen) {
-    VOICE.last = r.message.text;
-    sp.end();
-  } else VOICE.drawing = "";      // went quiet (left Talk) before its drawing went up: lastDrawing() finds it
-  if (APP.deck === d && !APP.talk && $("#thread")) drawThread();
-}
-
 function speakAll(text, btn = null) {
   stopSpeaking();
   unlockAudio();
@@ -1896,8 +1792,8 @@ function speakAll(text, btn = null) {
 }
 
 // Speaks streamed Markdown a few sentences at a time, in order: each piece is synthesised while the previous
-// one plays. A ``` drawing block isn't read out; once it is complete it goes on the canvas. stopSpeaking()
-// (a new question, Stop, closing the tab) makes every queued piece of this answer drop out.
+// one plays. A ``` drawing block isn't read out. stopSpeaking() (a new question, Stop, closing the panel) makes
+// every queued piece of this answer drop out.
 const ABBREV = /(?:^|[\s(])(?:e\.g|i\.e|vs|etc|dr|fig)\.$/i;
 function speaker(gen, signal) {
   let acc = "", taken = 0, first = true, ended = false, pending = 0, blocked = false, building = false, uncued = 0;
@@ -1906,12 +1802,12 @@ function speaker(gen, signal) {
   const check = () => {
     if (ended && !pending && live()) {
       endCues();
-      talkSet("idle", blocked ? "Tap ▶ Replay to hear the answer." : undefined);
+      talkSet("idle", blocked ? "Tap ▶ Play again to hear the answer." : undefined);
     }
   };
   // Cues take effect as the piece naming them starts. A new drawing whose explanation names none of its parts
   // in the next two pieces was drawn without cues: show it whole rather than wait for the end.
-  // Cues naming nothing on the canvas count as none.
+  // Cues naming nothing on the board count as none.
   const cueUp = (cues) => {
     if (showCues(cues)) building = false;
     else if (building && ++uncued >= 2) { building = false; endCues(); }
@@ -1923,9 +1819,6 @@ function speaker(gen, signal) {
       const url = await audio;
       if (live()) cueUp(cues);
       if (url && live() && !blocked) {
-        VOICE.caption = text;
-        const cap = $("#talk-caption");
-        if (cap) cap.textContent = text;
         talkSet("speaking");
         if (!(await playUrl(url)) && live()) blocked = true;    // the browser refused to play (no tap to unlock)
       } else if (url) URL.revokeObjectURL(url);
@@ -1933,25 +1826,7 @@ function speaker(gen, signal) {
       check();
     });
   };
-  // The drawing goes up when the speech reaches it, not when it arrives, with its parts waiting for their cues.
-  // Counted in pending, so an answer ending on a drawing still shows it whole; the next piece waits (up to 2 s)
-  // for a Mermaid diagram to be drawn, so its cues land on the nodes. With no canvas showing (▶ Play again in
-  // the Type tab), the Talk drawing is forgotten and lastDrawing() finds the latest when Talk opens.
-  const draw = (block) => {
-    pending++;
-    play = play.then(async () => {
-      if (live() && !$("#talk-canvas")) VOICE.drawing = "";
-      else if (live()) {
-        VOICE.drawing = block;
-        buildCues();
-        building = true;
-        uncued = 0;
-        await Promise.race([paintCanvas(block), new Promise((res) => setTimeout(res, 2000))]);
-      }
-      pending--;
-      check();
-    });
-  };
+  const draw = () => {};        // drawings are the board's to put up, not the speaker's
   const say = (chunk) => {      // a piece per cued sentence (so a cue lands as it is said); none over 1000 characters
     for (const { text: part, cues } of cueSplit(chunk)) {
       let text = speakable(part), lead = cues;
@@ -2103,26 +1978,9 @@ function silence() {
   else if (VOICE.playBtn) { VOICE.playBtn.textContent = "▶ Play again"; VOICE.playBtn = null; }
 }
 
-// Hold Space to talk while the Talk tab is open (not while typing in a field).
+// Hold Space to dictate into the Ask box (not while typing in a field or on a button).
 document.addEventListener("keydown", (e) => {
-  if (e.key !== " " || !APP.talk || APP.tutor !== "open" || !$("#talk-mic") || e.target.closest("input, textarea, select, [contenteditable], .spoiler")) return;
-  e.preventDefault();
-  if (e.repeat || VOICE.spaceHeld) return;
-  VOICE.spaceHeld = true;
-  if (VOICE.state !== "listening") micTap();
-});
-document.addEventListener("keyup", (e) => {
-  if (e.key !== " " || !VOICE.spaceHeld) return;
-  e.preventDefault();
-  VOICE.spaceHeld = false;
-  if (!$("#talk-mic")) return cancelRecording();      // the Talk tab went away while Space was held
-  if (VOICE.state === "listening") finishRecording();
-  else if (VOICE.starting) VOICE.releaseEarly = true;
-});
-
-// Hold Space to dictate into the Ask box (not while typing in a field, on a button, or on the Talk tab).
-document.addEventListener("keydown", (e) => {
-  if (e.key !== " " || e.ctrlKey || e.metaKey || e.altKey || APP.talk || APP.tutor !== "open" || !$("#dict-mic") || !micOk()
+  if (e.key !== " " || e.ctrlKey || e.metaKey || e.altKey || APP.tutor !== "open" || !$("#dict-mic") || !micOk()
     || e.target.closest("input, textarea, select, button, a, summary, [contenteditable], .spoiler")) return;
   e.preventDefault();
   if (e.repeat || DICT.spaceHeld) return;
@@ -2165,7 +2023,7 @@ function restoreStage() {
 function startPracticeInPanel(p) {
   const d = APP.deck;
   if (!d) return;
-  cancelRecording();
+  cancelDictation();
   if (APP.session && APP.session.course === d.course && APP.session.step === 1 && ["try", "deck", "yourturn"].includes(p.kind)) {
     setSessionStep(2);
   }

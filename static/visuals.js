@@ -60,7 +60,7 @@ function svgImage(src) {
     .replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[\da-f]+);)/gi, "&amp;");
   const fig = document.createElement("figure");
   fig.className = "diagram svg-box";
-  fig.dataset.src = s;         // the fixed-up source, for the Talk canvas to inline (inlineSvg in app.js)
+  fig.dataset.src = s;         // the fixed-up source, for the board to inline (inlineSvg in app.js)
   const img = document.createElement("img");
   img.alt = (s.match(/<title>([^<]*)<\/title>/i) || [])[1] || "Drawing";
   img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(s);
