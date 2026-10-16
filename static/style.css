@@ -416,6 +416,8 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 @keyframes pen-fade { from { opacity: 0; } }
 .board-draw .pen { stroke-dasharray: var(--len); animation: pen .6s var(--ease) both, pen-fill .6s var(--ease) both; }
 .board-draw .pen-fade { animation: pen-fade .6s var(--ease) both; }
+/* A part drawn on as its cue reveals it is there at once: its stroke, not a fade, brings it in. */
+.board-draw .cue-part:is(.pen, .pen-fade) { transition: filter .3s var(--ease); }
 .board-text [data-cues] { cursor: pointer; }
 @keyframes rec-pulse { 0% { box-shadow: 0 0 0 0 rgba(192, 57, 43, .5); } 70% { box-shadow: 0 0 0 14px rgba(192, 57, 43, 0); } 100% { box-shadow: 0 0 0 0 rgba(192, 57, 43, 0); } }
 @media (prefers-reduced-motion: reduce) { .compose .dictate.on { animation: none; } .board-draw * { transition: none !important; }

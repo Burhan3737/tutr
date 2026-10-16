@@ -1235,6 +1235,13 @@ function boardAnswer(course, { paced = false } = {}) {
   const st = VOICE.cue = { build: true, shown: new Set(), on: [], named: new Set() };
   // taken: the raw text already written or drawn; open: the svg drawing streaming in at `taken`; figs: drawings done.
   let acc = "", taken = 0, upto = 0, ended = false, all = false, live = false, open = null, figs = [];
+  let fresh = [];         // svg parts drawn while streaming, not yet stroked on: each is, once it is first in view
+  const got = (n) => { if (live) fresh.push(n); };
+  const pens = () => {
+    if (!draw.isConnected) return;
+    let k = 0;
+    fresh = fresh.filter((n) => { const r = penOn(n, k); if (r.did) k++; return r.left; });
+  };
   const shownTo = () => (all || !paced ? acc.length : Math.min(upto, acc.length));
   const write = (md) => { if (md.trim()) done.append(...cueMd(md, course).childNodes); };
   const paint = () => {
@@ -1263,7 +1270,7 @@ function boardAnswer(course, { paced = false } = {}) {
         if (!isDraw) { if (final) write(block); else tail.replaceChildren(...cueMd(block, course).childNodes); }
         else if (/^\s*(```|~~~)\s*svg/.test(block)) {
           if (!open) open = svgStream();
-          if (nl > 0 && open.feed(block.slice(nl + 1), live)) {
+          if (nl > 0 && open.feed(block.slice(nl + 1), got)) {
             open.el = draw.appendChild(h("div", { class: "board-fig" }, open.fig));
             fitDrawings(draw).then(cues);
           }
@@ -1280,17 +1287,20 @@ function boardAnswer(course, { paced = false } = {}) {
       taken += end;
       if (!isDraw) { write(src); continue; }       // a code block is text
       let el = open && open.el;
-      if (el) open.feed(block.slice(nl + 1, 1 + close.index), live);
-      if (!el || !open.count) {   // nothing streamed (no viewBox, unreadable, or it arrived whole): drawn whole
-        const fig = h("div", { class: "board-fig" }, ...renderMd(src, course).childNodes), pen = live;
-        if (el) el.replaceWith(fig); else draw.append(fig);
+      if (el) open.feed(block.slice(nl + 1, 1 + close.index), got);
+      // Nothing streamed (no viewBox, or it arrived whole), or a piece it couldn't read: drawn whole.
+      if (!el || !open.count || !open.sound()) {
+        const fig = h("div", { class: "board-fig" }, ...renderMd(src, course).childNodes);
+        if (el) { fresh = fresh.filter((n) => !el.contains(n)); el.replaceWith(fig); } else draw.append(fig);
         el = fig;
-        fitDrawings(draw).then(() => { if (pen) $$(".cue-svg", fig).forEach((s) => [...s.children].forEach(penOn)); cues(); });
+        fitDrawings(draw).then(cues);       // (inlines the svg at once; Mermaid draws later)
+        $$(".cue-svg", fig).forEach((s) => [...s.children].forEach((n) => { if (n.localName !== "defs") got(n); }));
       }
       open = null;
       figs.push({ el, end: taken });
     }
     cues();
+    pens();       // after the cues, so a part waiting for its sentence is drawn on when it appears
   };
   // Which parts show and which are lit, from the text revealed so far (while this answer has the board's cues).
   const cues = () => {
@@ -1315,6 +1325,7 @@ function boardAnswer(course, { paced = false } = {}) {
     all = true;
     paint();
     if (VOICE.cue === st) endCues();
+    pens();
   };
   return {
     feed: (chunk) => { acc += chunk; live = true; paint(); },
@@ -1334,24 +1345,30 @@ function boardAnswer(course, { paced = false } = {}) {
 
 // An ```svg drawing as it streams in: a scanner over the block's body that tracks tag depth (skipping comments and
 // quoted ">") puts up the root once its opening tag is complete, then each top-level element once it closes.
-// Every piece goes through inlineSvg's allowlist; the root also gets the hub's arrowhead. A root without a viewBox
-// is left to be drawn whole (off). feed(body so far, pen) returns true when the root has just gone up.
+// Every piece goes through inlineSvg's allowlist; the root also gets the hub's arrowhead (unless the drawing defines
+// its own, as in svgImage). A root without a viewBox is left to be drawn whole (off), and so is a drawing with a
+// piece that wouldn't parse or whose tags didn't add up (!sound()). feed(body so far, got) calls got(element) for
+// each element put up, and returns true when the root has just gone up.
 function svgStream() {
-  let pos = 0, depth = 0, start = -1, over = false;
-  const s = { fig: null, root: null, count: 0, off: false };
-  const piece = (src) => inlineSvg(svgFix(`<svg xmlns:xlink="${XLINK_NS}">${src}</svg>`));
-  s.feed = (src, pen) => {
-    let up = false, k = 0;
+  let pos = 0, depth = 0, start = -1, over = false, bad = false, hub = null, last = "";
+  // Sound: the root closed with nothing after it (a lost count would end it early, or never), every piece read.
+  const s = { fig: null, root: null, count: 0, off: false, sound: () => over && !bad && !last.slice(pos).includes("<") };
+  const piece = (src) => inlineSvg(svgFix(`<svg xmlns="${SVG_NS}" xmlns:xlink="${XLINK_NS}">${src}</svg>`));
+  s.feed = (src, got) => {
+    let up = false;
+    last = src;
     const add = (part) => {
       const w = piece(part);
-      if (!w) return;
-      for (const n of [...w.children]) { s.root.append(n); s.count++; if (pen) penOn(n, k++); }
+      if (!w) { bad = true; return; }
+      if (hub && w.querySelector("#tsvg-arrow")) { hub.remove(); hub = null; }
+      for (const n of [...w.children]) { s.root.append(n); s.count++; got(n); }
     };
     while (!s.off && !over) {
       const lt = src.indexOf("<", pos);
       if (lt < 0) { pos = src.length; break; }
       if (src.length - lt < 4) break;                // "<!-" or a name: wait for more
       if (src.startsWith("<!--", lt)) { const e = src.indexOf("-->", lt + 4); if (e < 0) break; pos = e + 3; continue; }
+      if (src.startsWith("<![CDATA[", lt)) { const e = src.indexOf("]]>", lt + 9); if (e < 0) break; pos = e + 3; continue; }
       if (src[lt + 1] === "!" || src[lt + 1] === "?") { const e = src.indexOf(">", lt); if (e < 0) break; pos = e + 1; continue; }
       let q = "", e = -1;
       for (let i = lt + 1; i < src.length; i++) {
@@ -1365,7 +1382,8 @@ function svgStream() {
         if (closing || !/^<svg[\s/>]/i.test(tag)) continue;
         const r = inlineSvg(svgFix(`${tag.replace(/\/\s*>$/, ">")}</svg>`));
         if (!r || !r.hasAttribute("viewBox")) { s.off = true; break; }
-        r.prepend(...piece(SVG_ARROW).children);
+        hub = piece(SVG_ARROW).firstElementChild;
+        r.prepend(hub);
         s.root = r;
         s.fig = h("figure", { class: "diagram svg-box" }, r);
         up = true;
@@ -1382,20 +1400,28 @@ function svgStream() {
   return s;
 }
 
-// Pen: a part just drawn is stroked on (stroke-dashoffset from its length, --len, to 0); fills and text fade in.
-// k staggers the parts that go up together.
+// Pen: a part is stroked on (stroke-dashoffset from its length, --len, to 0) as it comes into view; fills fade in,
+// and so do text and dashed lines (which keep their dashes). Elements still hidden by a cue wait: { did: any drawn
+// now, left: how many still wait }. k staggers the parts that go up together.
+const PENNED = new WeakSet();
 function penOn(node, k = 0) {
-  if (node.nodeType !== 1 || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return { did: false, left: 0 };
+  let did = false, left = 0;
   for (const el of [node, ...node.querySelectorAll("*")]) {
+    if (PENNED.has(el) || el.closest("defs")) continue;
+    if (el.closest(".cue-hide")) { left++; continue; }
+    PENNED.add(el);
+    did = true;
     el.style.animationDelay = `${Math.min(k, 8) * 0.15}s`;
-    if (el.localName === "text") el.classList.add("pen-fade");
-    else if (el instanceof SVGGeometryElement && !el.hasAttribute("stroke-dasharray")) {   // a dashed line keeps its dashes
+    if (el.localName === "text" || el.hasAttribute("stroke-dasharray")) el.classList.add("pen-fade");
+    else if (el instanceof SVGGeometryElement) {
       let len = 0;
       try { len = +el.getAttribute("pathLength") || el.getTotalLength(); } catch { /* not laid out */ }
       if (len > 0) { el.style.setProperty("--len", len); el.classList.add("pen"); }
     }
   }
-  node.addEventListener("animationend", (e) => e.target.classList.remove("pen", "pen-fade"));
+  if (did) node.addEventListener("animationend", (e) => e.target.classList.remove("pen", "pen-fade"));
+  return { did, left };
 }
 
 // The board's text keeps its cues, as data-cues on the paragraph (or item) that carried them, for a tap to light.
