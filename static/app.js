@@ -811,6 +811,7 @@ async function newChat() {
   if (d.chat) d.chats = [{ id: d.chat.id, title: d.chat.title, updated: d.chat.updated }, ...(d.chats || [])].slice(0, 5);
   d.chat = null;
   d.asked = [];
+  cancelDictation();
   stopSpeaking();
   clearVoiceTurn();
   if ($("#talk-stage")) talkRefresh();
@@ -874,7 +875,7 @@ function renderTutor() {
         h("button", { class: "link", type: "button", title: "Methods, formulas and shortcuts to copy onto your sheet (always the whole deck)", onclick: () => tutorAsk("cheatsheet_deck") }, "Cheat sheet"))),
     thread,
     h("div", { class: "ask-area" }, talk ? h("div", { class: "talk-modes" }, talkSwitch(), scopeSwitch()) : talkSwitch(),
-      talk ? talkBar() : composeBox(composeHint(), (q) => tutorAsk(grilling() ? "grill_reply" : "ask", q)))));
+      talk ? talkBar() : composeBox(composeHint(), (q, spoken) => tutorAsk(grilling() ? "grill_reply" : "ask", q, { spoken })))));
   updateTutorWhere();
   if (talk) talkRefresh(); else drawThread();
   applyReading();
@@ -1039,8 +1040,11 @@ function composeBox(placeholder, onSend) {
     if (!q) return;
     const slash = q.startsWith("/") ? slashCommand(q) : null;
     if (slash && slash.error) return toast(slash.error);
+    const spoken = DICT.spoken;                     // dictated (even in part)
+    cancelDictation();                              // sending while still listening drops the recording
+    DICT.spoken = false;
     ta.value = ""; autosize(); send.classList.add("ghost"); slashMenu();
-    if (slash) slash.run(); else onSend(q);
+    if (slash) slash.run(spoken); else onSend(q, spoken);
   } }, menu, ta, micOk() ? dictateButton(ta) : null, send);
   const autosize = () => { ta.style.height = "auto"; ta.style.height = Math.min(160, ta.scrollHeight + 2) + "px"; };
   // Typing "/" at the start lists the modes; up/down pick, Tab (or Enter) fills one in, then add your own words.
@@ -1057,7 +1061,7 @@ function composeBox(placeholder, onSend) {
     if (shown.length) { ta.setAttribute("aria-activedescendant", `slash-${shown[pick].cmd}`); menu.children[pick].scrollIntoView({ block: "nearest" }); }
     else ta.removeAttribute("aria-activedescendant");
   };
-  ta.addEventListener("input", () => { autosize(); send.classList.toggle("ghost", !ta.value.trim()); pick = 0; slashMenu(); });
+  ta.addEventListener("input", () => { autosize(); send.classList.toggle("ghost", !ta.value.trim()); pick = 0; slashMenu(); if (!ta.value.trim()) DICT.spoken = false; });
   ta.addEventListener("blur", () => { menu.hidden = true; ta.setAttribute("aria-expanded", "false"); });
   ta.addEventListener("keydown", (e) => {
     if (!menu.hidden && shown.length) {
@@ -1096,7 +1100,7 @@ function slashCommand(text) {
   const extra = m[2].trim();
   if (c.needs && !extra) return { error: c.needs };
   if (!c.mode) return { run: () => startPracticeInPanel({ kind: tryKind(), focus: extra }) };
-  return { run: () => tutorAsk(c.mode, extra) };
+  return { run: (spoken) => tutorAsk(c.mode, extra, { spoken }) };
 }
 
 const MODE_LABEL = { explain: "Explain simply", example: "Worked example", deeper: "Go deeper", quiz: "Quiz prep",
@@ -1136,7 +1140,7 @@ function drawThread() {
       ...earlier.map((c) => h("button", { class: "link", type: "button", onclick: () => openChat(c.id) }, c.starred ? `★ ${c.title}` : c.title))));
   }
   msgs.forEach((m, i) => {
-    if (m.role === "q") th.append(h("p", { class: "msg-q" }, m.mode === "voice" ? `🎙 ${m.text}` : m.text, h("span", { class: "where" }, msgWhere(m, APP.deck.chat, APP.deck.tag))));
+    if (m.role === "q") th.append(h("p", { class: "msg-q" }, m.spoken || m.mode === "voice" ? `🎙 ${m.text}` : m.text, h("span", { class: "where" }, msgWhere(m, APP.deck.chat, APP.deck.tag))));
     else th.append(answerEl(m, i === msgs.length - 1));
   });
   th.scrollTop = th.scrollHeight;
@@ -1251,7 +1255,7 @@ function metaText(m) {
   return [who ? who.label.split(" — ")[0] : "", m.ms ? `${(m.ms / 1000).toFixed(0)} s` : "", m.cost != null ? `$${(+m.cost).toFixed(2)}` : ""].filter(Boolean).join(" · ");
 }
 
-async function tutorAsk(mode, question = "") {
+async function tutorAsk(mode, question = "", { spoken = false } = {}) {
   if (APP.scope === "deck" && DECK_MODES.includes(mode)) mode += "_deck";
   // Written answers go in the Type tab's thread (switched to straight away: the Talk tab isn't drawn on the way).
   if (APP.talk) { APP.talk = false; store.set("talk", false); stopSpeaking(); cancelRecording(); }
@@ -1260,7 +1264,7 @@ async function tutorAsk(mode, question = "") {
   const d = APP.deck;
   const n = Math.min(APP.n, d.slides);
   $(".empty", th)?.remove();
-  th.append(h("p", { class: "msg-q" }, askText(mode, question), h("span", { class: "where" }, mode.endsWith("_deck") ? ` · ${d.tag}` : ` · s${n}`)));
+  th.append(h("p", { class: "msg-q" }, (spoken ? "🎙 " : "") + askText(mode, question), h("span", { class: "where" }, mode.endsWith("_deck") ? ` · ${d.tag}` : ` · s${n}`)));
   const wait = h("p", { class: "waiting" }, mode.startsWith("example") ? "Writing a worked example…" : mode.endsWith("_deck") ? "Reading the whole deck…" : "Thinking…");
   th.append(wait);
   th.scrollTop = th.scrollHeight;
@@ -1289,7 +1293,7 @@ async function tutorAsk(mode, question = "") {
     if (follow) th.scrollTop = th.scrollHeight;
   };
   try {
-    const r = await apiStream("/api/tutor", { course: d.course, tag: d.tag, n, mode, question, model: APP.model, slides_only: slidesOnly(d.course) }, {
+    const r = await apiStream("/api/tutor", { course: d.course, tag: d.tag, n, mode, question, spoken, model: APP.model, slides_only: slidesOnly(d.course) }, {
       status: (t) => { wait.textContent = `${t}…`; },
       text: (t) => {
         if (!acc) { wait.before(live); wait.textContent = "Writing…"; }
@@ -1298,7 +1302,7 @@ async function tutorAsk(mode, question = "") {
       },
     });
     const chat = d.chat || { id: r.chat, title: askText(mode, question), updated: "", messages: [] };
-    chat.messages.push({ role: "q", mode, deck: d.tag, slide: n, text: askText(mode, question) }, r.message);
+    chat.messages.push({ role: "q", mode, deck: d.tag, slide: n, text: askText(mode, question), ...(spoken ? { spoken } : {}) }, r.message);
     chat.updated = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
     d.chat = chat;
     if (!d.asked.includes(n)) d.asked.push(n);
@@ -1691,7 +1695,13 @@ async function finishRecording() {
 // ------------------------------------------------------------ dictation (the Type tab)
 // 🎙 next to Ask: speak a question, and what the hub heard is typed into the box to check and edit before sending.
 // Same local speech recognition as Talk; nothing is sent until Ask.
-const DICT = { rec: null, stream: null, chunks: [], gen: 0, timer: 0, state: "idle" };
+// While you talk, the words so far appear in the box every ~1.5 s as a draft (one request at a time, a sequence
+// number drops a late reply); stopping replaces the draft with one pass over the whole clip. `before`/`after` are
+// the text either side of the cursor when dictation began, so they stay untouched. `spoken` marks the question
+// as dictated when it is sent.
+const DICT = { rec: null, stream: null, chunks: [], gen: 0, timer: 0, state: "idle", tick: 0, seq: 0, busy: false,
+  before: "", after: "", draft: "", spoken: false, spaceHeld: false };
+const PARTIAL_MS = 1500;
 const DICT_TITLE = { idle: "Dictate: speak your question, then edit it before sending", listening: "Stop and type out what you said",
   hearing: "Writing down what you said…" };
 
@@ -1709,6 +1719,7 @@ function dictShow(b = $("#dict-mic"), ta = $("#ask-input")) {
   b.setAttribute("aria-pressed", String(st === "listening"));
   b.classList.toggle("on", st === "listening");
   b.disabled = st === "hearing";
+  if (ta) ta.readOnly = st !== "idle";              // the draft is being rewritten: typing would be overwritten
   if (ta) ta.placeholder = st === "listening" ? "Listening… tap ■ to stop" : st === "hearing" ? "Writing down what you said…" : composeHint();
 }
 function dictSet(state) { DICT.state = state; dictShow(); }
@@ -1730,9 +1741,13 @@ async function dictTap() {
   try {
     const rec = new MediaRecorder(stream), chunks = [];
     rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
-    rec.start();
-    Object.assign(DICT, { rec, stream, chunks });
+    rec.start(250);                                 // chunks arrive as we go, for the live draft
+    // Where the draft goes: at the cursor, replacing a selection (it keeps its place after tapping 🎙 takes the focus).
+    const ta = $("#ask-input"), at = ta ? ta.selectionStart ?? ta.value.length : 0;
+    Object.assign(DICT, { rec, stream, chunks, seq: 0, busy: false, draft: "",
+      before: ta ? ta.value.slice(0, at) : "", after: ta ? ta.value.slice(ta.selectionEnd ?? at) : "" });
     DICT.timer = setTimeout(() => { if (DICT.rec === rec) dictFinish(); }, MAX_RECORDING_MS);
+    DICT.tick = setInterval(() => dictPartial(rec, tok), PARTIAL_MS);
   } catch {
     stream.getTracks().forEach((t) => t.stop());
     dictSet("idle");
@@ -1744,36 +1759,65 @@ async function dictFinish() {
   const { rec, stream, chunks, gen: tok } = DICT;
   if (!rec) { DICT.gen++; return dictSet("idle"); }   // tapped again before the mic had started: don't start it
   clearTimeout(DICT.timer);
+  clearInterval(DICT.tick);
+  DICT.seq++;                                       // a draft still being written down is now stale
   Object.assign(DICT, { rec: null, stream: null, chunks: [] });
   dictSet("hearing");
   const d = APP.deck;
-  let text = "", msg = "Didn't catch that. Tap 🎙 and try again.";
+  let text = "", msg = "Didn't catch that. Tap 🎙 and try again.", failed = false;
   try {
     if (rec.state !== "inactive") await new Promise((res) => { rec.onstop = res; rec.onerror = res; rec.stop(); setTimeout(res, 3000); });   // never stuck on "…"
     const wav = await toWav16k(new Blob(chunks, { type: rec.mimeType }));
     if (tok !== DICT.gen) return;
-    text = (await api("/api/voice/transcribe", { course: d.course, tag: d.tag, n: Math.min(APP.n, d.slides), scope: APP.scope, audio: await blobBase64(wav) })).text.trim();
-  } catch (e) { if (e && e.message && !(e instanceof DOMException)) msg = e.message; } finally {   // a recording that won't decode: "didn't catch that"
+    text = (await dictTranscribe(d, wav)).trim();
+  } catch (e) { failed = true; if (e && e.message && !(e instanceof DOMException)) msg = e.message; } finally {   // a recording that won't decode: "didn't catch that"
     stream.getTracks().forEach((t) => t.stop());
   }
   if (tok !== DICT.gen) return;
   dictSet("idle");
   const ta = $("#ask-input");
-  if (!text || !ta || APP.deck !== d) { if (!text) toast(msg); return; }
-  // Into the box where the cursor was (it keeps its place after tapping 🎙 takes the focus), for checking before Ask.
-  const at = ta.selectionStart ?? ta.value.length, end = ta.selectionEnd ?? at;
-  const before = ta.value.slice(0, at), after = ta.value.slice(end);
+  const keep = text || DICT.draft;                  // no final text: the last draft stays
+  if (!keep) toast(msg);
+  else if (!text && failed) toast("The last words may be missing: the text so far is in the box.");
+  if (keep && ta && APP.deck === d) dictDraft(keep, true);     // the whole clip replaces the draft; nothing is sent
+}
+
+const dictTranscribe = async (d, wav) => (await api("/api/voice/transcribe",
+  { course: d.course, tag: d.tag, n: Math.min(APP.n, d.slides), scope: APP.scope, audio: await blobBase64(wav) })).text;
+
+// Put `text` in the box between `before` and `after`: the draft region is replaced each time. `final` ends with the
+// cursor after it and the focus in the box.
+function dictDraft(text, final = false) {
+  const ta = $("#ask-input");
+  if (!ta) return;
+  const { before, after } = DICT;
   const ins = (before && !/\s$/.test(before) ? " " : "") + text + (after && !/^\s/.test(after) ? " " : "");
+  DICT.spoken = true;
+  DICT.draft = text;
   ta.value = before + ins + after;
-  ta.focus();
+  if (final) ta.focus();
   ta.setSelectionRange(before.length + ins.length, before.length + ins.length);
   ta.dispatchEvent(new Event("input"));            // resize the box and light up Ask
+}
+
+// One draft at a time: a tick while the last request is still out is skipped, and a reply older than the newest
+// request (or than the final pass) is dropped. An empty result changes nothing.
+async function dictPartial(rec, tok) {
+  if (DICT.busy || DICT.rec !== rec || tok !== DICT.gen || !DICT.chunks.length) return;
+  const seq = ++DICT.seq, d = APP.deck;
+  DICT.busy = true;
+  try {
+    const text = (await dictTranscribe(d, await toWav16k(new Blob(DICT.chunks.slice(), { type: rec.mimeType })))).trim();
+    if (text && seq === DICT.seq && tok === DICT.gen && DICT.rec === rec && APP.deck === d) dictDraft(text);
+  } catch { /* the next tick or the final pass tries again */ } finally { if (tok === DICT.gen) DICT.busy = false; }
 }
 
 // Leaving the deck, closing the panel, starting practice: stop listening and drop what was recorded.
 function cancelDictation() {
   DICT.gen++;
+  DICT.spaceHeld = false;
   clearTimeout(DICT.timer);
+  clearInterval(DICT.tick);
   const rec = DICT.rec;
   if (rec) {
     rec.onstop = rec.onerror = rec.ondataavailable = null;
@@ -2072,6 +2116,22 @@ document.addEventListener("keyup", (e) => {
   if (!$("#talk-mic")) return cancelRecording();      // the Talk tab went away while Space was held
   if (VOICE.state === "listening") finishRecording();
   else if (VOICE.starting) VOICE.releaseEarly = true;
+});
+
+// Hold Space to dictate into the Ask box (not while typing in a field, on a button, or on the Talk tab).
+document.addEventListener("keydown", (e) => {
+  if (e.key !== " " || e.ctrlKey || e.metaKey || e.altKey || APP.talk || APP.tutor !== "open" || !$("#dict-mic") || !micOk()
+    || e.target.closest("input, textarea, select, button, a, summary, [contenteditable], .spoiler")) return;
+  e.preventDefault();
+  if (e.repeat || DICT.spaceHeld) return;
+  DICT.spaceHeld = true;
+  if (DICT.state === "idle") dictTap();
+});
+document.addEventListener("keyup", (e) => {
+  if (e.key !== " " || !DICT.spaceHeld) return;
+  e.preventDefault();
+  DICT.spaceHeld = false;
+  if (DICT.state === "listening") dictFinish();      // let go before the mic started: dictFinish cancels the start
 });
 
 function showAskedMark() { /* deliberately no marker on the slide */ }
