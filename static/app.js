@@ -867,7 +867,7 @@ function renderTutor() {
         h("button", { class: "link", type: "button", title: "What to know first: prerequisites, rules and symbols", onclick: () => tutorAsk("before") }, "Before you start"),
         h("button", { class: "link", type: "button", title: "Methods, formulas and shortcuts to copy onto your sheet (always the whole deck)", onclick: () => tutorAsk("cheatsheet_deck") }, "Cheat sheet"))),
     h("div", { class: "thread", id: "thread", "aria-live": "polite", tabindex: "-1" }),
-    APP.view === "board" ? h("div", { class: "board empty", id: "board", "aria-live": "polite" }) : null,
+    APP.view === "board" ? h("div", { class: "board empty", id: "board", "aria-live": "polite", tabindex: "-1" }) : null,
     h("div", { class: "ask-area" }, viewSwitch(),
       composeBox(composeHint(), (q, spoken) => tutorAsk(grilling() ? "grill_reply" : "ask", q, { spoken })), voiceRow())));
   fillVoices();
@@ -1129,27 +1129,28 @@ function updateComposeHint() {
 function drawThread() {
   const th = $("#thread");
   if (!th) return;
-  // A turn still being written lost its place: it draws the panel again when it ends, and stops being read aloud.
-  // (A finished answer's voice carries on, the board showing it whole.)
-  if (BOARD.turn) stopSpeaking();
-  BOARD.turn = null;
   th.replaceChildren();
+  // Turns still being written go back at the end, in order (place): the one on the board keeps it, voice and all,
+  // unless the board is gone (Text, Read), when it carries on in the thread. Another deck's turns are gone.
+  for (const t of TURNS) if (t.d !== APP.deck) TURNS.delete(t);
+  if (BOARD.turn && (!TURNS.has(BOARD.turn) || !boardOn())) BOARD.turn.demote();
   const msgs = APP.deck.chat ? APP.deck.chat.messages : [];
   if (APP.deck.chat && msgs.length) th.append(chatBar(APP.deck.chat));
-  if (!msgs.length) {
+  if (!msgs.length && !TURNS.size) {
     th.append(h("p", { class: "empty" }, "Ask anything about this slide, or tap Try one to practise it."));
     const earlier = APP.deck.chats || [];
     if (earlier.length) th.append(h("div", { class: "earlier" }, h("p", { class: "empty" }, "Earlier chats in this course:"),
       ...earlier.map((c) => h("button", { class: "link", type: "button", onclick: () => openChat(c.id) }, c.starred ? `★ ${c.title}` : c.title))));
   }
-  const top = boardMsg();
+  const top = TURNS.size ? null : boardMsg();      // (while a question is out, the board waits for its answer)
   msgs.forEach((m, i) => {
     if (m === top) th.append(onBoardMark());
     else if (m.role === "q") th.append(h("p", { class: "msg-q" }, m.spoken || m.mode === "voice" ? `🎙 ${m.text}` : m.text, h("span", { class: "where" }, msgWhere(m, APP.deck.chat, APP.deck.tag))));
-    else th.append(answerEl(m, i === msgs.length - 1));
+    else th.append(answerEl(m, i === msgs.length - 1 && !TURNS.size));
   });
+  for (const t of TURNS) t.place(th);
   th.scrollTop = th.scrollHeight;
-  drawBoard(top);
+  if (!BOARD.turn) drawBoard(top);
   updateComposeHint();
 }
 
@@ -1171,7 +1172,11 @@ function answerEl(m, isLast) {
 // Under an answer, in the thread or on the board: Copy, ▶ Play, and what to do next (the last one).
 function answerTools(m, isLast) {
   const out = [h("button", { class: "copy-one", type: "button", title: "Copy this answer", onclick: (e) => copyText(unmark(m.text), e.currentTarget) }, "Copy")];
-  out.push(h("button", { class: "link quiet play", type: "button", title: "Read this answer aloud", onclick: (e) => playAnswer(m, e.currentTarget) }, "▶ Play"));
+  const play = h("button", { class: "link quiet play", type: "button", title: "Read this answer aloud", onclick: (e) => playAnswer(m, e.currentTarget) }, "▶ Play");
+  play.msg = m;
+  // Drawn again while it is read aloud: this one is its ■ Stop now.
+  if (VOICE.playBtn && VOICE.playBtn.msg === m) { VOICE.playBtn = play; play.textContent = "■ Stop"; }
+  out.push(play);
   if (isLast && GRILL_MODES.includes(m.mode)) {
     out.push(h("div", { class: "msg-foot" },
       h("button", { class: "link", type: "button", title: "Stop here: what held up and what's shaky", onclick: () => tutorAsk("grill_end") }, "End the grill: summary ›")));
@@ -1190,9 +1195,11 @@ function answerTools(m, isLast) {
 // Two views of the same panel. Text: answers in the thread. Board: the current answer is written and drawn on a
 // board under the thread, and moves up into the thread on the next send. The Read view shows everything inline.
 APP.view = store.get("view", "text");
-// turn: the answer being written on the board (tutorAsk's handle: { answer: its boardAnswer, demote() }), so a newer
-// question can move it up into the thread.
+// turn: the answer being written on the board (one of TURNS), so a newer question can move it up into the thread.
+// TURNS: the questions still being answered, oldest first (tutorAsk's handles: { d: its deck, demote(), place(thread) }),
+// so a redraw of the thread puts them back.
 const BOARD = { turn: null };
+const TURNS = new Set();
 const boardOn = () => APP.view === "board" && !store.get("reading", false);
 
 function viewSwitch() {
@@ -1239,8 +1246,9 @@ function boardAnswer(course, { paced = false } = {}) {
   b.classList.remove("empty");
   b.replaceChildren(draw, h("div", { class: "board-text msg-a", onclick: (e) => tapCues(e, draw) }, done, tail));
   const st = VOICE.cue = { build: true, shown: new Set(), on: [], named: new Set() };
-  // taken: the raw text already written or drawn; open: the svg drawing streaming in at `taken`; figs: drawings done.
-  let acc = "", taken = 0, upto = 0, ended = false, all = false, live = false, open = null, figs = [];
+  // taken: the raw text already written or drawn; open: the svg drawing streaming in at `taken`; figs: drawings done;
+  // live: drawn on as it goes up (streamed in, or paced: even an answer that arrived whole before its first paint).
+  let acc = "", taken = 0, upto = 0, ended = false, all = false, live = paced, open = null, figs = [];
   let fresh = [];         // svg parts drawn while streaming, not yet stroked on: each is, once it is first in view
   let drawn = Promise.resolve();      // the drawings put up so far are drawn (Mermaid renders later)
   const got = (n) => { if (live) fresh.push(n); };
@@ -1257,7 +1265,9 @@ function boardAnswer(course, { paced = false } = {}) {
     tail.replaceChildren();
     for (;;) {
       const rest = acc.slice(taken), f = rest.search(/^ {0,3}(```|~~~)/m);
-      if (f < 0 || taken + f > lim) {    // text: everything before the last blank line that isn't inside $$…$$
+      // (Paced, nothing goes up before the first reveal: a drawing the answer opens with waits for the first piece
+      // said, so the cues streamed by then decide which of its parts wait for their sentence.)
+      if (f < 0 || taken + f > lim || (paced && !all && !upto)) {    // text: everything before the last blank line that isn't inside $$…$$
         const txt = acc.slice(taken, lim);
         let cut = final ? txt.length : 0;
         for (let i = txt.lastIndexOf("\n\n"); !final && i > 0; i = txt.lastIndexOf("\n\n", i - 1)) {
@@ -1273,9 +1283,11 @@ function boardAnswer(course, { paced = false } = {}) {
       taken += f;
       const block = acc.slice(taken), nl = block.indexOf("\n"), isDraw = DRAWING.test(block), mark = block.trimStart().slice(0, 3);
       const close = block.slice(1).match(new RegExp(`\\n {0,3}${mark}[ \\t]*(?:\\n|$)`));
-      if (!close) {            // still streaming in: an svg drawing goes up as its elements close, code shows as it comes
+      // Still streaming in: an svg drawing goes up as its elements close, code shows as it comes. (Paced, a drawing
+      // goes up whole once it is complete, every part decided then, with all the cues streamed so far.)
+      if (!close) {
         if (!isDraw) { if (final) write(block); else tail.replaceChildren(...cueMd(block, course).childNodes); }
-        else if (/^\s*(```|~~~)\s*svg/.test(block)) {
+        else if (/^\s*(```|~~~)\s*svg/.test(block) && (all || !paced)) {
           if (!open) open = svgStream();
           if (nl > 0 && open.feed(block.slice(nl + 1), got)) {
             open.el = draw.appendChild(h("div", { class: "board-fig" }, open.fig));
@@ -1347,6 +1359,7 @@ function boardAnswer(course, { paced = false } = {}) {
     },
     revealTo: (i) => { if (i > upto) { upto = i; paint(); } return drawn; },
     showAll,
+    el: () => (draw.isConnected ? b : null),      // the board, while this answer is the one on it
   };
 }
 
@@ -1558,7 +1571,7 @@ let askSeq = 0;     // the newest question: only its answer gets the "what next"
 async function tutorAsk(mode, question = "", { spoken = false } = {}) {
   if (APP.scope === "deck" && DECK_MODES.includes(mode)) mode += "_deck";
   if (APP.tutor !== "open" || !$("#thread")) { APP.tutor = "open"; renderTutor(); }
-  const th = $("#thread");
+  let th = $("#thread");
   const d = APP.deck;
   const n = Math.min(APP.n, d.slides);
   const seq = ++askSeq;
@@ -1572,14 +1585,14 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
   }
   $(".empty", th)?.remove();
   $(".earlier", th)?.remove();
-  th.append(h("p", { class: "msg-q" }, (spoken ? "🎙 " : "") + askText(mode, question), h("span", { class: "where" }, mode.endsWith("_deck") ? ` · ${d.tag}` : ` · s${n}`)));
+  const q = th.appendChild(h("p", { class: "msg-q" }, (spoken ? "🎙 " : "") + askText(mode, question), h("span", { class: "where" }, mode.endsWith("_deck") ? ` · ${d.tag}` : ` · s${n}`)));
   const mark = board ? th.appendChild(onBoardMark()) : null;
   // Read aloud, the board keeps pace with the voice; without it (models still loading, or failed), it shows the
   // answer as it streams.
   const voiced = !!board && VOICE.tts === "ready";
   if (board && !voiced) {
     if (VOICE.tts === "off") { if (!VOICE.warned) toast(VOICE_OFF); VOICE.warned = true; }
-    else toast("The voice is still loading; showing the answer without it.");
+    else { if (!VOICE.loadWarned) toast("The voice is still loading; showing the answer without it."); VOICE.loadWarned = true; }
   }
   const ans = board && boardAnswer(d.course, { paced: voiced });
   const sp = voiced && readAloud(null, ans), spoke = VOICE.gen;     // (unlocks the audio in this tap)
@@ -1591,10 +1604,11 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
   const live = h("div", { class: "msg-a" });
   const doneBlocks = h("div"), tailBlock = h("div");
   live.append(doneBlocks, tailBlock);
-  let sc = board || th;             // what scrolls as the answer is written
+  let sc = null;                    // what scrolls as the answer is written
   let acc = "", done = 0, fed = 0, queued = false, cost = 0, follow = true, over = false;
   const onScroll = () => { follow = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 80; };
-  sc.addEventListener("scroll", onScroll, { passive: true });
+  const scrollOn = (el) => { sc?.removeEventListener("scroll", onScroll); sc = el; sc?.addEventListener("scroll", onScroll, { passive: true }); };
+  scrollOn(board || th);
   // Everything before the last blank line that isn't inside $$…$$ or a ``` block is finished text.
   const cutPoint = (text) => {
     for (let i = text.lastIndexOf("\n\n"); i > done; i = text.lastIndexOf("\n\n", i - 1)) {
@@ -1616,17 +1630,28 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
     cost = performance.now() - t0;
     if (follow) sc.scrollTop = sc.scrollHeight;
   };
-  // A newer question took the board: this answer carries on in the thread, where its "On the board" line was.
-  const me = board ? (BOARD.turn = { answer: ans, demote: () => {
-    BOARD.turn = null;
-    board = null;
-    sc.removeEventListener("scroll", onScroll);
-    sc = th;
-    sc.addEventListener("scroll", onScroll, { passive: true });
-    mark.replaceWith(live, wait);
-    paint();
-  } }) : null;
-  const release = () => { if (me && BOARD.turn === me) BOARD.turn = null; };
+  const me = { d,
+    // The board is no longer this answer's (a newer question took it, or the view has none): it carries on in the
+    // thread, where its "On the board" line was (or where place() puts it), no longer read aloud.
+    demote: () => {
+      if (BOARD.turn === me) BOARD.turn = null;
+      board = null;
+      if (speaking()) stopSpeaking();
+      scrollOn(th);
+      if (mark.isConnected) mark.replaceWith(live, wait);
+      paint();
+    },
+    // The thread was drawn again (scope switch, Read, the panel reopened…): the question and its answer so far go
+    // back at its end, the answer on the board if it still has it (the same board, so its voice carries on).
+    place: (into) => {
+      th = into;
+      th.append(q);
+      if (board) { th.append(mark); $("#board")?.replaceWith(board); }
+      else { th.append(live, wait); scrollOn(th); }
+    } };
+  TURNS.add(me);
+  if (board) BOARD.turn = me;
+  const release = () => { TURNS.delete(me); if (BOARD.turn === me) BOARD.turn = null; };
   try {
     const r = await apiStream("/api/tutor", { course: d.course, tag: d.tag, n, mode, question, spoken, model: APP.model, slides_only: slidesOnly(d.course) }, {
       status: (t) => { wait.textContent = `${t}…`; },
@@ -1645,10 +1670,15 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
     chat.updated = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
     d.chat = chat;
     if (!d.asked.includes(n)) d.asked.push(n);
-    sc.removeEventListener("scroll", onScroll);
+    scrollOn(null);
     if (APP.deck !== d) return;
-    // The panel was redrawn meanwhile (view switch, New chat, Read): draw it all from the chat.
-    if (!wait.isConnected) { drawThread(); return; }
+    // Not in the panel any more (New chat, practice), or written in the thread while the view has a board: the
+    // newest question draws the panel from the chat; an older one never redraws over it (its answer is in the
+    // thread where it was, or in the chat for the next redraw).
+    if (!wait.isConnected || (!board && boardOn())) {
+      if (seq === askSeq) return drawThread();
+      if (!wait.isConnected) return;
+    }
     // Swap in just the finished answer; the rest of the thread stays as it is.
     if (!$(".chat-bar", th)) th.prepend(chatBar(chat));      // the chat's first answer
     wait.remove();
@@ -1656,7 +1686,7 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
       const tools = answerTools(r.message, true);
       ans.end(r.message.text);
       board.append(tools);
-      if (speaking()) { VOICE.playBtn = tools.find((x) => x.classList.contains("play")); VOICE.playBtn.textContent = "■ Stop"; }
+      if (speaking()) { VOICE.playBtn = tools.find((x) => x.classList.contains("play")); VOICE.playBtn.textContent = "■ Stop"; }   // (its msg: r.message)
       else if (follow) board.scrollTop = 0;
     } else {
       live.replaceWith(answerEl(r.message, seq === askSeq));
@@ -1667,7 +1697,7 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
     over = true;
     release();
     if (speaking()) stopSpeaking();
-    sc.removeEventListener("scroll", onScroll);
+    scrollOn(null);
     live.remove();
     const err = h("p", { class: "err" }, e.message);
     if (!board) wait.replaceWith(err);
@@ -1679,13 +1709,18 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
 // Answers read aloud a sentence at a time (Kokoro, local, on the hub): every answer in Board view, any answer on
 // ▶ Play. Speech is transcribed on the hub too (faster-whisper), for dictation. Cues ([#id]) light up parts of the
 // board's drawing.
-//   state: the voice row's (idle: hidden, speaking, blocked: the browser wouldn't play without a tap)
+//   state: the voice row's (idle: hidden, waiting: to be read aloud, nothing playing yet, speaking, blocked: the
+//   browser wouldn't play without a tap)
 //   tts: the speech models (undefined: not asked yet, loading, ready, off); done: what ends the speech in progress
-//   (the board answer it reveals shows whole); warned: "Voice isn't available" was said once already.
+//   (the board answer it reveals shows whole); warned / loadWarned: "Voice isn't available" / "still loading" was
+//   said once already (until the voice is ready); playBtn: the ▶ Play reading ■ Stop (its .msg: the answer).
 
-const VOICE = { state: "idle", gen: 0, ctrl: null, el: null, voices: null, tts: undefined, poll: 0, playBtn: null, cue: null, done: null, warned: false };
+const VOICE = { state: "idle", gen: 0, ctrl: null, el: null, voices: null, tts: undefined, poll: 0, playBtn: null, cue: null, done: null,
+  warned: false, loadWarned: false };
+const talking = () => VOICE.state === "waiting" || VOICE.state === "speaking";
 const micOk = () => window.isSecureContext && !!navigator.mediaDevices?.getUserMedia && !!window.MediaRecorder;
-const VOICE_LINE = { speaking: "Speaking…", blocked: "Tap ▶ Play to hear the answer." };
+const VOICE_LINE = { waiting: "Getting the voice ready…", speaking: "Speaking…",
+  blocked: "The browser blocked the voice: tap ▶ Play under the answer (once it's written) to hear it." };
 const VOICE_OFF = "Voice isn't available; showing the answer without it.";
 const MAX_RECORDING_MS = 120000;
 
@@ -1702,12 +1737,12 @@ function voiceRow() {
 
 function voiceSet(state) {
   VOICE.state = state;
-  if (state !== "speaking" && VOICE.playBtn) { VOICE.playBtn.textContent = "▶ Play"; VOICE.playBtn = null; }
+  if (!talking() && VOICE.playBtn) { VOICE.playBtn.textContent = "▶ Play"; VOICE.playBtn = null; }
   const row = $("#voice-row");
   if (!row) return;
   row.hidden = state === "idle";
   $("#voice-state").textContent = VOICE_LINE[state] || "";
-  $("#voice-stop").hidden = state !== "speaking";
+  $("#voice-stop").hidden = !talking();
 }
 
 function fillVoices() {
@@ -1728,7 +1763,7 @@ async function warmVoice() {
   try { st = await api("/api/voice/warm", APP.deck ? { course: APP.deck.course, tag: APP.deck.tag, model: APP.model, slides_only: slidesOnly(APP.deck.course) } : {}); } catch { VOICE.tts = "off"; return; }
   if (st.error) { VOICE.tts = "off"; return; }
   if (!st.ready) { VOICE.poll = setTimeout(warmVoice, 2000); return; }
-  Object.assign(VOICE, { tts: "ready", warned: false, voices: st });
+  Object.assign(VOICE, { tts: "ready", warned: false, loadWarned: false, voices: st });
   fillVoices();
 }
 const warmOnce = () => { if (VOICE.tts !== "ready" && VOICE.tts !== "loading") warmVoice(); };
@@ -1918,6 +1953,7 @@ async function dictTap() {
   if (DICT.state !== "idle") return;
   stopSpeaking();                                   // so the mic doesn't hear the tutor
   const tok = ++DICT.gen;
+  DICT.last = $("#ask-input")?.value || "";         // a redraw before the mic starts keeps what's in the box
   dictSet("listening");
   api("/api/voice/warm", {}).catch(() => {});       // the speech models load while you talk (the first time ~10 s)
   let stream;
@@ -2053,9 +2089,9 @@ function readAloud(btn = null, board = null) {
   unlockAudio();
   const ctrl = VOICE.ctrl = new AbortController();
   VOICE.done = board && (() => board.showAll());
-  voiceSet("speaking");
+  voiceSet("waiting");                              // "Speaking…" once the first piece plays
   if (btn) { VOICE.playBtn = btn; btn.textContent = "■ Stop"; }
-  return speaker(VOICE.gen, ctrl.signal, board);
+  return speaker(VOICE.gen, ctrl.signal, board, !!btn);
 }
 
 // Speaks streamed Markdown a few sentences at a time, in order: each piece is synthesised while the previous
@@ -2064,25 +2100,26 @@ function readAloud(btn = null, board = null) {
 // reaches it, a Mermaid diagram getting up to 2 s to be drawn before the next piece. stopSpeaking() (a new
 // question, Stop, closing the panel) makes every queued piece drop out. The voice failing stops it, with a toast.
 const ABBREV = /(?:^|[\s(])(?:e\.g|i\.e|vs|etc|dr|fig)\.$/i;
-function speaker(gen, signal, board = null) {
+function speaker(gen, signal, board = null, asked = false) {     // asked: by ▶ Play
   let acc = "", taken = 0, first = true, ended = false, pending = 0;
   let synth = Promise.resolve(), play = Promise.resolve();
   const live = () => gen === VOICE.gen;
-  const reveal = (i) => {      // (following the text down, unless the student scrolled up)
-    const b = $("#board"), follow = b && b.scrollHeight - b.scrollTop - b.clientHeight < 80;
+  const reveal = (i) => {      // (following the text down, unless the student scrolled up; not once it's off the board)
+    const b = board.el(), follow = b && b.scrollHeight - b.scrollTop - b.clientHeight < 80;
     const drawn = board.revealTo(i);
     if (follow) b.scrollTop = b.scrollHeight;
     return drawn;
   };
   const queue = (step) => {
     pending++;
-    play = play.then(step).catch(reportError).then(() => { if (--pending === 0 && ended && live()) stopSpeaking(); });
+    play = play.then(step).catch((e) => console.error(e)).then(() => { if (--pending === 0 && ended && live()) stopSpeaking(); });
   };
   const failed = () => {
     if (!live() || signal.aborted) return;
     VOICE.tts = "off";
     stopSpeaking();
-    if (!board || !VOICE.warned) toast(board ? VOICE_OFF : "Voice isn't available right now.");
+    if (asked || !board) toast("Voice isn't available right now.");      // ▶ Play always says so
+    else if (!VOICE.warned) toast(VOICE_OFF);
     if (board) VOICE.warned = true;
   };
   const sayOne = (text, end) => {
@@ -2091,7 +2128,9 @@ function speaker(gen, signal, board = null) {
       const url = await audio;
       if (!live()) { if (url) URL.revokeObjectURL(url); return; }
       if (board) reveal(end);
-      if (url && !(await playUrl(url)) && live()) { stopSpeaking(); voiceSet("blocked"); }   // the browser refused (no tap)
+      if (!url) return;
+      if (VOICE.state === "waiting") voiceSet("speaking");
+      if (!(await playUrl(url)) && live()) { stopSpeaking(); voiceSet("blocked"); }   // the browser refused (no tap)
     });
   };
   const drawAt = (end) => queue(() => live() && Promise.race([reveal(end), new Promise((res) => setTimeout(res, 2000))]));
@@ -2113,6 +2152,8 @@ function speaker(gen, signal, board = null) {
     for (;;) {
       const rest = acc.slice(taken);
       if (!rest.trim()) return;
+      const ws = rest.search(/\S/);
+      if (ws > 0) { taken += ws; continue; }      // (a blank isn't a piece: it shows with the next one)
       const fence = rest.search(/```|~~~/);
       if (fence === 0) {          // a drawing: wait until it is complete, then show it
         const mark = rest.slice(0, 3), close = rest.indexOf(mark, 3);
@@ -2122,7 +2163,7 @@ function speaker(gen, signal, board = null) {
           return;
         }
         taken += close + 3;
-        if (board) drawAt(taken);
+        if (board && !first) drawAt(taken);     // (one the answer opens with goes up with the first piece said)
         continue;
       }
       const scan = fence > 0 ? rest.slice(0, fence) : rest;
@@ -2251,10 +2292,11 @@ function stopSpeaking() {
   voiceSet("idle");
 }
 
-// Hold Space to dictate into the Ask box (not while typing in a field or on a button).
+// Hold Space to dictate into the Ask box (not while typing in a field or on a button, nor where Space scrolls: the
+// Read view, the thread, the board).
 document.addEventListener("keydown", (e) => {
-  if (e.key !== " " || e.ctrlKey || e.metaKey || e.altKey || APP.tutor !== "open" || !$("#dict-mic") || !micOk()
-    || e.target.closest("input, textarea, select, button, a, summary, [contenteditable], .spoiler")) return;
+  if (e.key !== " " || e.ctrlKey || e.metaKey || e.altKey || APP.tutor !== "open" || !$("#dict-mic") || !micOk() || $(".viewer.reading")
+    || e.target.closest("input, textarea, select, button, a, summary, [contenteditable], .spoiler, #thread, #board, .side-sheet")) return;
   e.preventDefault();
   if (e.repeat || DICT.spaceHeld) return;
   DICT.spaceHeld = true;
@@ -2297,6 +2339,7 @@ function startPracticeInPanel(p) {
   const d = APP.deck;
   if (!d) return;
   cancelDictation();
+  stopSpeaking();
   if (APP.session && APP.session.course === d.course && APP.session.step === 1 && ["try", "deck", "yourturn"].includes(p.kind)) {
     setSessionStep(2);
   }
