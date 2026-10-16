@@ -1126,6 +1126,7 @@ function updateComposeHint() {
 function drawThread() {
   const th = $("#thread");
   if (!th) return;
+  BOARD.turn = null;          // a turn still being written lost its place: it draws the panel again when it ends
   th.replaceChildren();
   const msgs = APP.deck.chat ? APP.deck.chat.messages : [];
   if (APP.deck.chat && msgs.length) th.append(chatBar(APP.deck.chat));
@@ -1184,6 +1185,8 @@ function answerTools(m, isLast) {
 // Two views of the same panel. Text: answers in the thread. Board: the current answer is written and drawn on a
 // board under the thread, and moves up into the thread on the next send. The Read view shows everything inline.
 APP.view = store.get("view", "text");
+// turn: the answer being written on the board (tutorAsk's handle), so a newer question can move it up into the thread.
+const BOARD = { turn: null };
 const boardOn = () => APP.view === "board" && !store.get("reading", false);
 
 function viewSwitch() {
@@ -1243,8 +1246,9 @@ function boardWriter(course) {
       taken += f;
       const block = text.slice(taken), mark = block.trimStart().slice(0, 3);
       const close = block.slice(1).match(new RegExp(`\\n {0,3}${mark}[ \\t]*(?:\\n|$)`));
-      if (!close) {            // still streaming in: it goes up once it closes
+      if (!close) {            // still streaming in: a drawing goes up once it closes, code shows as it comes
         if (final) { write(block); taken = text.length; }
+        else if (!DRAWING.test(block)) tail.replaceChildren(...renderMd(block, course).childNodes);
         break;
       }
       const end = 1 + close.index + close[0].length, src = block.slice(0, end);
@@ -1265,8 +1269,10 @@ function fitDrawings(c) {
   });
   applyCues();
   return drawMermaid().then(() => {
-    const max = `${Math.max(96, ($("#board")?.clientHeight || 400) * 0.4)}px`;   // room left for the text under it
-    $$(".mermaid-box svg, .svg-box svg", c).forEach((s) => {
+    // The drawings together (with their frames, ~24px each) take at most 40% of the board: the text gets the rest.
+    const svgs = $$(".mermaid-box svg, .svg-box svg", c);
+    const max = `${Math.max(56, (($("#board")?.clientHeight || 400) * 0.4) / svgs.length - 24)}px`;
+    svgs.forEach((s) => {
       s.style.removeProperty("max-width");
       s.removeAttribute("height");
       s.style.maxHeight = max;
@@ -1353,17 +1359,23 @@ function metaText(m) {
   return [who ? who.label.split(" — ")[0] : "", m.ms ? `${(m.ms / 1000).toFixed(0)} s` : "", m.cost != null ? `$${(+m.cost).toFixed(2)}` : ""].filter(Boolean).join(" · ");
 }
 
+let askSeq = 0;     // the newest question: only its answer gets the "what next" links
 async function tutorAsk(mode, question = "", { spoken = false } = {}) {
   if (APP.scope === "deck" && DECK_MODES.includes(mode)) mode += "_deck";
   if (APP.tutor !== "open" || !$("#thread")) { APP.tutor = "open"; renderTutor(); }
   const th = $("#thread");
   const d = APP.deck;
   const n = Math.min(APP.n, d.slides);
-  // Board view: the answer on the board moves up into the thread, and the board is cleared for this one.
-  const board = boardOn() ? $("#board") : null;
-  const prev = board && boardMsg();
-  if (prev) $(".on-board", th)?.replaceWith(answerEl(prev, false));
+  const seq = ++askSeq;
+  // Board view: the board is this question's. Whatever is on it moves up into the thread: an answer still being
+  // written carries on there; a finished one is drawn whole in place of its "On the board" line.
+  let board = boardOn() ? $("#board") : null;
+  if (board) {
+    if (BOARD.turn) BOARD.turn.demote();
+    else { const prev = boardMsg(); if (prev) $(".on-board", th)?.replaceWith(answerEl(prev, false)); }
+  }
   $(".empty", th)?.remove();
+  $(".earlier", th)?.remove();
   th.append(h("p", { class: "msg-q" }, (spoken ? "🎙 " : "") + askText(mode, question), h("span", { class: "where" }, mode.endsWith("_deck") ? ` · ${d.tag}` : ` · s${n}`)));
   const mark = board ? th.appendChild(onBoardMark()) : null;
   const paintBoard = board && boardWriter(d.course);
@@ -1374,7 +1386,7 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
   const live = h("div", { class: "msg-a" });
   const doneBlocks = h("div"), tailBlock = h("div");
   live.append(doneBlocks, tailBlock);
-  const sc = board || th;           // what scrolls as the answer is written
+  let sc = board || th;             // what scrolls as the answer is written
   let acc = "", done = 0, queued = false, cost = 0, follow = true, over = false;
   const onScroll = () => { follow = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 80; };
   sc.addEventListener("scroll", onScroll, { passive: true });
@@ -1399,6 +1411,17 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
     cost = performance.now() - t0;
     if (follow) sc.scrollTop = sc.scrollHeight;
   };
+  // A newer question took the board: this answer carries on in the thread, where its "On the board" line was.
+  const me = board ? (BOARD.turn = { demote: () => {
+    BOARD.turn = null;
+    board = null;
+    sc.removeEventListener("scroll", onScroll);
+    sc = th;
+    sc.addEventListener("scroll", onScroll, { passive: true });
+    mark.replaceWith(live, wait);
+    paint();
+  } }) : null;
+  const release = () => { if (me && BOARD.turn === me) BOARD.turn = null; };
   try {
     const r = await apiStream("/api/tutor", { course: d.course, tag: d.tag, n, mode, question, spoken, model: APP.model, slides_only: slidesOnly(d.course) }, {
       status: (t) => { wait.textContent = `${t}…`; },
@@ -1409,6 +1432,7 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
       },
     });
     over = true;
+    release();
     const chat = d.chat || { id: r.chat, title: askText(mode, question), updated: "", messages: [] };
     chat.messages.push({ role: "q", mode, deck: d.tag, slide: n, text: askText(mode, question), ...(spoken ? { spoken } : {}) }, r.message);
     chat.updated = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
@@ -1416,16 +1440,23 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
     if (!d.asked.includes(n)) d.asked.push(n);
     sc.removeEventListener("scroll", onScroll);
     if (APP.deck !== d) return;
-    // The first answer (it also adds the chat bar), or the panel was redrawn meanwhile: draw it all from the chat.
-    if (chat.messages.length <= 2 || !wait.isConnected) { drawThread(); return; }
+    // The panel was redrawn meanwhile (view switch, New chat, Read): draw it all from the chat.
+    if (!wait.isConnected) { drawThread(); return; }
     // Swap in just the finished answer; the rest of the thread stays as it is.
+    if (!$(".chat-bar", th)) th.prepend(chatBar(chat));      // the chat's first answer
     wait.remove();
-    if (board) { paintBoard(r.message.text, true); board.append(answerTools(r.message, true)); }
-    else live.replaceWith(answerEl(r.message, true));
+    if (board) {      // the board shows the answer from its start, under its drawing
+      paintBoard(r.message.text, true);
+      board.append(answerTools(r.message, true));
+      if (follow) board.scrollTop = 0;
+    } else {
+      live.replaceWith(answerEl(r.message, seq === askSeq));
+      if (follow) sc.scrollTop = sc.scrollHeight;
+    }
     updateComposeHint();
-    if (follow) sc.scrollTop = sc.scrollHeight;
   } catch (e) {
     over = true;
+    release();
     sc.removeEventListener("scroll", onScroll);
     live.remove();
     const err = h("p", { class: "err" }, e.message);

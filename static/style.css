@@ -387,16 +387,17 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 .ask-area .compose { border-top: 0; padding-top: 8px; }
 .view-switch { margin: 10px 16px 0; }
 .panel.boarded .thread { flex: 2 1 0; }
-.board { flex: 3 1 0; min-height: 0; overflow: auto; padding: 0 20px 12px; border-top: 1px solid var(--line-strong); }
-.board.empty { flex: none; padding: 10px 20px; }
+/* An answer always gets room to be read: the thread above gives way first. */
+.board { flex: 3 1 0; min-height: min(300px, 45vh); overflow: auto; padding: 0 20px 12px; border-top: 1px solid var(--line-strong); }
+.board.empty { flex: none; min-height: 0; padding: 10px 20px; }
 .board-empty { margin: 0; color: var(--text-2); font-size: 13px; }
-.board-draw { position: sticky; top: 0; z-index: 1; padding-top: 12px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.board-draw { position: sticky; top: 0; z-index: 1; padding-top: 8px; background: var(--surface); border-bottom: 1px solid var(--line); }
 .board-draw:empty { display: none; }
-.board-draw .diagram { margin: 0 0 12px; width: 100%; }
+.board-draw .diagram { margin: 0 0 8px; padding: 4px 8px; width: 100%; }
 .board-draw .mermaid-box svg { display: block; width: 100%; height: auto; max-width: 100% !important; margin: 0 auto; }
 .board-draw .svg-box img { width: 100%; height: auto; }
 .board-draw .svg-box svg { display: block; width: 100%; height: auto; margin: 0 auto; }
-.board-text { padding-top: 12px; }
+.board-text { padding-top: 10px; }
 .board .copy-one { opacity: 1; }
 .on-board { margin: 0 0 4px; text-align: right; font-size: 13px; color: var(--text-2); }
 .viewer.reading .board { display: none; }
