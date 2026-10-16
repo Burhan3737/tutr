@@ -1422,7 +1422,8 @@ async function warmVoice() {
   try { st = await api("/api/voice/warm", APP.deck ? { course: APP.deck.course, tag: APP.deck.tag, model: APP.model, slides_only: slidesOnly(APP.deck.course) } : {}); } catch (e) { if (calm()) talkSet("off", e.message); return; }
   if (st.error) { if (calm()) talkSet("off", st.error); return; }
   if (!st.ready) {
-    if (calm()) talkSet("loading", "Loading the voice models (the very first time this downloads about 600 MB)…");
+    if (calm()) talkSet("loading", st.downloaded ? "Loading the voice models (a few seconds)…"
+      : "Downloading the voice models (about 600 MB, first time only)…");
     VOICE.poll = setTimeout(warmVoice, 2000);
     return;
   }

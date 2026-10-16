@@ -95,9 +95,24 @@ def warm():
         threading.Thread(target=run, daemon=True).start()
 
 
+def downloaded():
+    """True when both models are already on disk, so loading them is a few seconds from disk, not a download."""
+    if _m.get("downloaded"):
+        return True
+    if not all((DIR / n).is_file() for n in KOKORO_FILES):
+        return False
+    try:
+        from faster_whisper.utils import download_model
+        download_model(WHISPER_MODEL, local_files_only=True)        # raises if it isn't in the Hugging Face cache
+    except Exception:
+        return False
+    _m["downloaded"] = True
+    return True
+
+
 def status():
     return {"ready": bool(_m["stt"] and _m["tts"]), "loading": _m["loading"], "error": _m["error"],
-            "voices": VOICES, "default_voice": DEFAULT_VOICE}
+            "downloaded": downloaded(), "voices": VOICES, "default_voice": DEFAULT_VOICE}
 
 
 def transcribe(wav_bytes, hint=""):
