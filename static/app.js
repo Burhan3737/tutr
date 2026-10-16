@@ -869,7 +869,10 @@ function renderTutor() {
     h("div", { class: "thread", id: "thread", "aria-live": "polite", tabindex: "-1" }),
     APP.view === "board" ? h("div", { class: "board empty", id: "board", "aria-live": "polite" }) : null,
     h("div", { class: "ask-area" }, viewSwitch(),
-      composeBox(composeHint(), (q, spoken) => tutorAsk(grilling() ? "grill_reply" : "ask", q, { spoken })))));
+      composeBox(composeHint(), (q, spoken) => tutorAsk(grilling() ? "grill_reply" : "ask", q, { spoken })), voiceRow())));
+  fillVoices();
+  voiceSet(VOICE.state);
+  if (APP.view === "board") warmOnce();       // Board view reads answers aloud: the voice loads meanwhile
   updateTutorWhere();
   drawThread();
   applyReading();
@@ -1126,7 +1129,10 @@ function updateComposeHint() {
 function drawThread() {
   const th = $("#thread");
   if (!th) return;
-  BOARD.turn = null;          // a turn still being written lost its place: it draws the panel again when it ends
+  // A turn still being written lost its place: it draws the panel again when it ends, and stops being read aloud.
+  // (A finished answer's voice carries on, the board showing it whole.)
+  if (BOARD.turn) stopSpeaking();
+  BOARD.turn = null;
   th.replaceChildren();
   const msgs = APP.deck.chat ? APP.deck.chat.messages : [];
   if (APP.deck.chat && msgs.length) th.append(chatBar(APP.deck.chat));
@@ -1162,11 +1168,10 @@ function answerEl(m, isLast) {
   return h("div", { class: "ans" }, body, answerTools(m, isLast));
 }
 
-// Under an answer, in the thread or on the board: Copy, ▶ Play again (spoken answers), and what to do next (the last one).
+// Under an answer, in the thread or on the board: Copy, ▶ Play, and what to do next (the last one).
 function answerTools(m, isLast) {
   const out = [h("button", { class: "copy-one", type: "button", title: "Copy this answer", onclick: (e) => copyText(unmark(m.text), e.currentTarget) }, "Copy")];
-  if (m.mode === "voice") out.push(h("button", { class: "link quiet", type: "button", title: "Hear this answer again",
-    onclick: (e) => { if (VOICE.playBtn === e.currentTarget) { stopSpeaking(); talkSet("idle"); } else speakAll(m.text, e.currentTarget); } }, "▶ Play again"));
+  out.push(h("button", { class: "link quiet play", type: "button", title: "Read this answer aloud", onclick: (e) => playAnswer(m, e.currentTarget) }, "▶ Play"));
   if (isLast && GRILL_MODES.includes(m.mode)) {
     out.push(h("div", { class: "msg-foot" },
       h("button", { class: "link", type: "button", title: "Stop here: what held up and what's shaky", onclick: () => tutorAsk("grill_end") }, "End the grill: summary ›")));
@@ -1192,7 +1197,7 @@ const boardOn = () => APP.view === "board" && !store.get("reading", false);
 
 function viewSwitch() {
   const mk = (v, label) => h("button", { type: "button", role: "radio", "aria-checked": String(APP.view === v),
-    class: APP.view === v ? "on" : "", onclick: () => { if (APP.view !== v) { APP.view = v; store.set("view", v); renderTutor(); } } }, label);
+    class: APP.view === v ? "on" : "", onclick: () => { if (APP.view !== v) { APP.view = v; store.set("view", v); stopSpeaking(); renderTutor(); } } }, label);
   return h("div", { class: "scope-switch view-switch", role: "radiogroup", "aria-label": "Show answers as" }, mk("text", "Text"), mk("board", "Board"));
 }
 
@@ -1219,9 +1224,10 @@ function drawBoard(m) {
 }
 
 // The board's answer. boardAnswer(course, { paced }) clears the board and returns { feed(chunk), end(text?),
-// revealTo(i), showAll() }. Drawings go up in .board-draw, one figure each in order: an ```svg drawing element by
-// element as it streams (svgStream), Mermaid and plots whole once their block closes. The rest is written in
-// .board-text, finished blocks rendered once (as in tutorAsk). The one place the board's answer is rendered.
+// revealTo(i) (resolves once the drawings shown are drawn), showAll() }. Drawings go up in .board-draw, one figure
+// each in order: an ```svg drawing element by element as it streams (svgStream), Mermaid and plots whole once their
+// block closes. The rest is written in .board-text, finished blocks rendered once (as in tutorAsk). The one place
+// the board's answer is rendered.
 // Unpaced, the answer shows as it streams. Paced (read aloud), only up to revealTo(i), an offset in the raw text
 // (cues included): the text up to there, and a drawing once i reaches its fence; showAll() shows the rest.
 // Cues: a part named by a cue already seen in the stream when it is drawn waits, hidden, until that cue's text is
@@ -1236,6 +1242,7 @@ function boardAnswer(course, { paced = false } = {}) {
   // taken: the raw text already written or drawn; open: the svg drawing streaming in at `taken`; figs: drawings done.
   let acc = "", taken = 0, upto = 0, ended = false, all = false, live = false, open = null, figs = [];
   let fresh = [];         // svg parts drawn while streaming, not yet stroked on: each is, once it is first in view
+  let drawn = Promise.resolve();      // the drawings put up so far are drawn (Mermaid renders later)
   const got = (n) => { if (live) fresh.push(n); };
   const pens = () => {
     if (!draw.isConnected) return;
@@ -1272,7 +1279,7 @@ function boardAnswer(course, { paced = false } = {}) {
           if (!open) open = svgStream();
           if (nl > 0 && open.feed(block.slice(nl + 1), got)) {
             open.el = draw.appendChild(h("div", { class: "board-fig" }, open.fig));
-            fitDrawings(draw).then(cues);
+            drawn = fitDrawings(draw).then(cues);
           }
         } else if (/mermaid/.test(block.slice(0, nl < 0 ? 20 : nl))) loadMermaid().catch(() => {});   // it loads meanwhile
         if (final) {           // never closed: what was drawn of it stays, otherwise its source is text
@@ -1293,7 +1300,7 @@ function boardAnswer(course, { paced = false } = {}) {
         const fig = h("div", { class: "board-fig" }, ...renderMd(src, course).childNodes);
         if (el) { fresh = fresh.filter((n) => !el.contains(n)); el.replaceWith(fig); } else draw.append(fig);
         el = fig;
-        fitDrawings(draw).then(cues);       // (inlines the svg at once; Mermaid draws later)
+        drawn = fitDrawings(draw).then(cues);       // (inlines the svg at once; Mermaid draws later)
         $$(".cue-svg", fig).forEach((s) => [...s.children].forEach((n) => { if (n.localName !== "defs") got(n); }));
       }
       open = null;
@@ -1338,7 +1345,7 @@ function boardAnswer(course, { paced = false } = {}) {
       ended = true;
       if (paced) paint(); else showAll();
     },
-    revealTo: (i) => { if (i > upto) { upto = i; paint(); } },
+    revealTo: (i) => { if (i > upto) { upto = i; paint(); } return drawn; },
     showAll,
   };
 }
@@ -1555,6 +1562,7 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
   const d = APP.deck;
   const n = Math.min(APP.n, d.slides);
   const seq = ++askSeq;
+  stopSpeaking();
   // Board view: the board is this question's. Whatever is on it moves up into the thread: an answer still being
   // written carries on there; a finished one is drawn whole in place of its "On the board" line.
   let board = boardOn() ? $("#board") : null;
@@ -1566,7 +1574,16 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
   $(".earlier", th)?.remove();
   th.append(h("p", { class: "msg-q" }, (spoken ? "🎙 " : "") + askText(mode, question), h("span", { class: "where" }, mode.endsWith("_deck") ? ` · ${d.tag}` : ` · s${n}`)));
   const mark = board ? th.appendChild(onBoardMark()) : null;
-  const ans = board && boardAnswer(d.course);     // reveals as it streams (no voice yet)
+  // Read aloud, the board keeps pace with the voice; without it (models still loading, or failed), it shows the
+  // answer as it streams.
+  const voiced = !!board && VOICE.tts === "ready";
+  if (board && !voiced) {
+    if (VOICE.tts === "off") { if (!VOICE.warned) toast(VOICE_OFF); VOICE.warned = true; }
+    else toast("The voice is still loading; showing the answer without it.");
+  }
+  const ans = board && boardAnswer(d.course, { paced: voiced });
+  const sp = voiced && readAloud(null, ans), spoke = VOICE.gen;     // (unlocks the audio in this tap)
+  const speaking = () => sp && VOICE.gen === spoke;
   const wait = h("p", { class: "waiting" }, mode.startsWith("example") ? "Writing a worked example…" : mode.endsWith("_deck") ? "Reading the whole deck…" : "Thinking…");
   (board || th).append(wait);
   th.scrollTop = th.scrollHeight;
@@ -1590,7 +1607,7 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
     queued = false;
     if (over) return;
     const t0 = performance.now();
-    if (board) { ans.feed(acc.slice(fed)); fed = acc.length; }
+    if (board) { const t = acc.slice(fed); ans.feed(t); if (sp) sp.feed(t); fed = acc.length; }
     else {
       const cut = cutPoint(acc);
       if (cut > done) { doneBlocks.append(...renderMd(acc.slice(done, cut), d.course).childNodes); done = cut; }
@@ -1621,6 +1638,8 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
     });
     over = true;
     release();
+    // The voice goes on to the end of the saved text; if that isn't what streamed, the pacing is off: all shows.
+    if (sp) { if (r.message.text.startsWith(acc.slice(0, fed))) sp.feed(r.message.text.slice(fed)); else ans.showAll(); sp.end(); }
     const chat = d.chat || { id: r.chat, title: askText(mode, question), updated: "", messages: [] };
     chat.messages.push({ role: "q", mode, deck: d.tag, slide: n, text: askText(mode, question), ...(spoken ? { spoken } : {}) }, r.message);
     chat.updated = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
@@ -1634,9 +1653,11 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
     if (!$(".chat-bar", th)) th.prepend(chatBar(chat));      // the chat's first answer
     wait.remove();
     if (board) {      // the board shows the answer from its start, under its drawing
+      const tools = answerTools(r.message, true);
       ans.end(r.message.text);
-      board.append(answerTools(r.message, true));
-      if (follow) board.scrollTop = 0;
+      board.append(tools);
+      if (speaking()) { VOICE.playBtn = tools.find((x) => x.classList.contains("play")); VOICE.playBtn.textContent = "■ Stop"; }
+      else if (follow) board.scrollTop = 0;
     } else {
       live.replaceWith(answerEl(r.message, seq === askSeq));
       if (follow) sc.scrollTop = sc.scrollHeight;
@@ -1645,6 +1666,7 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
   } catch (e) {
     over = true;
     release();
+    if (speaking()) stopSpeaking();
     sc.removeEventListener("scroll", onScroll);
     live.remove();
     const err = h("p", { class: "err" }, e.message);
@@ -1654,57 +1676,77 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
 }
 
 // ------------------------------------------------------------ voice
-// Answers read aloud a sentence at a time (Kokoro, local, on the hub): ▶ Play again on spoken answers. Speech is
-// transcribed on the hub too (faster-whisper), for dictation. Cues ([#id]) light up parts of the board's drawing.
+// Answers read aloud a sentence at a time (Kokoro, local, on the hub): every answer in Board view, any answer on
+// ▶ Play. Speech is transcribed on the hub too (faster-whisper), for dictation. Cues ([#id]) light up parts of the
+// board's drawing.
+//   state: the voice row's (idle: hidden, speaking, blocked: the browser wouldn't play without a tap)
+//   tts: the speech models (undefined: not asked yet, loading, ready, off); done: what ends the speech in progress
+//   (the board answer it reveals shows whole); warned: "Voice isn't available" was said once already.
 
-const VOICE = { state: "idle", gen: 0, ctrl: null, el: null, voices: null, poll: 0, tick: 0, thinkT0: 0, thinkMsg: "", playBtn: null, cue: null };
+const VOICE = { state: "idle", gen: 0, ctrl: null, el: null, voices: null, tts: undefined, poll: 0, playBtn: null, cue: null, done: null, warned: false };
 const micOk = () => window.isSecureContext && !!navigator.mediaDevices?.getUserMedia && !!window.MediaRecorder;
-const TALK_STATES = { thinking: "Thinking…", speaking: "Speaking…" };
+const VOICE_LINE = { speaking: "Speaking…", blocked: "Tap ▶ Play to hear the answer." };
+const VOICE_OFF = "Voice isn't available; showing the answer without it.";
 const MAX_RECORDING_MS = 120000;
 
-function talkSet(state, msg) {
-  // Thinking shows the seconds waited (the first answer on a deck can take most of a minute), after any status text.
-  if (state === "thinking") {
-    if (VOICE.state !== "thinking" || !VOICE.tick) {
-      clearInterval(VOICE.tick);
-      VOICE.thinkT0 = Date.now();
-      VOICE.tick = setInterval(() => { if (VOICE.state === "thinking") talkSet("thinking", VOICE.thinkMsg); }, 1000);
-    }
-    VOICE.thinkMsg = msg || "";
-    const s = Math.round((Date.now() - VOICE.thinkT0) / 1000);
-    msg = (VOICE.thinkMsg || TALK_STATES.thinking) + (s ? ` ${s} s` : "");
-  } else if (VOICE.tick) { clearInterval(VOICE.tick); VOICE.tick = 0; }
+// Under the compose box, while an answer is read aloud (or couldn't be): what's happening, ■ Stop, voice and speed.
+function voiceRow() {
+  const voice = h("select", { id: "voice-pick", "aria-label": "Voice", onchange: (e) => store.set("voice", e.target.value) });
+  const speed = h("select", { "aria-label": "Speed", onchange: (e) => store.set("voiceSpeed", +e.target.value) },
+    ...[0.85, 1, 1.1, 1.2, 1.35].map((s) => h("option", { value: s }, `${s}×`)));
+  speed.value = store.get("voiceSpeed", 1);
+  return h("div", { class: "voice-row", id: "voice-row", hidden: true },
+    h("span", { class: "voice-state", id: "voice-state", role: "status" }),
+    h("button", { class: "link quiet", id: "voice-stop", type: "button", onclick: () => stopSpeaking() }, "■ Stop"), voice, speed);
+}
+
+function voiceSet(state) {
   VOICE.state = state;
-  if (state !== "speaking" && VOICE.playBtn) { VOICE.playBtn.textContent = "▶ Play again"; VOICE.playBtn = null; }
-  const line = $("#talk-state");
-  if (line) line.textContent = msg || TALK_STATES[state] || "";
-  $("#talk-stop")?.toggleAttribute("hidden", !["thinking", "speaking"].includes(state));
+  if (state !== "speaking" && VOICE.playBtn) { VOICE.playBtn.textContent = "▶ Play"; VOICE.playBtn = null; }
+  const row = $("#voice-row");
+  if (!row) return;
+  row.hidden = state === "idle";
+  $("#voice-state").textContent = VOICE_LINE[state] || "";
+  $("#voice-stop").hidden = state !== "speaking";
 }
 
 function fillVoices() {
-  const sel = $("#talk-voice");
-  if (!sel || !VOICE.voices) return;
+  const sel = $("#voice-pick");
+  if (!sel) return;
+  sel.hidden = !VOICE.voices;
+  if (!VOICE.voices) return;
   sel.replaceChildren(...Object.entries(VOICE.voices.voices).map(([id, label]) => h("option", { value: id }, label)));
   sel.value = store.get("voice", VOICE.voices.default_voice);
 }
 
+// Load the speech models quietly (polling until they're up).
 async function warmVoice() {
   clearTimeout(VOICE.poll);
-  if (!$("#talk-voice")) return;      // no voice row showing
-  const calm = () => ["idle", "loading", "off"].includes(VOICE.state);   // never over a turn in progress
+  VOICE.tts = "loading";
   let st;
   // With the deck, the hub also opens the course's conversation now, so the first answer skips that step.
-  try { st = await api("/api/voice/warm", APP.deck ? { course: APP.deck.course, tag: APP.deck.tag, model: APP.model, slides_only: slidesOnly(APP.deck.course) } : {}); } catch (e) { if (calm()) talkSet("off", e.message); return; }
-  if (st.error) { if (calm()) talkSet("off", st.error); return; }
-  if (!st.ready) {
-    if (calm()) talkSet("loading", st.downloaded ? "Loading the voice models (a few seconds)…"
-      : "Downloading the voice models (about 600 MB, first time only)…");
-    VOICE.poll = setTimeout(warmVoice, 2000);
-    return;
-  }
-  VOICE.voices = st;
+  try { st = await api("/api/voice/warm", APP.deck ? { course: APP.deck.course, tag: APP.deck.tag, model: APP.model, slides_only: slidesOnly(APP.deck.course) } : {}); } catch { VOICE.tts = "off"; return; }
+  if (st.error) { VOICE.tts = "off"; return; }
+  if (!st.ready) { VOICE.poll = setTimeout(warmVoice, 2000); return; }
+  Object.assign(VOICE, { tts: "ready", warned: false, voices: st });
   fillVoices();
-  if (VOICE.state === "loading") talkSet("idle");
+}
+const warmOnce = () => { if (VOICE.tts !== "ready" && VOICE.tts !== "loading") warmVoice(); };
+
+// ▶ Play under an answer (■ Stop while it plays). On the board, its answer is written again in time with the voice.
+function playAnswer(m, btn) {
+  if (VOICE.playBtn === btn) return stopSpeaking();
+  stopSpeaking();
+  warmOnce();                 // (fills the voice list)
+  const b = btn.closest("#board");
+  if (!b) return speakAll(m.text, btn);
+  const ans = boardAnswer(APP.deck.course, { paced: true });
+  ans.feed(m.text);
+  ans.end(m.text);
+  const tools = answerTools(m, true);
+  b.append(tools);
+  b.scrollTop = 0;
+  speakAll(m.text, tools.find((x) => x.classList.contains("play")), ans);
 }
 
 // The tutor's SVG as live markup, rebuilt from an allowlist: SVG shapes and text with drawing attributes only, so
@@ -1772,10 +1814,10 @@ function cleanSvgEl(el) {
   return out;
 }
 
-// Cues ([#id] in the spoken text) and the board's drawing. While an answer is spoken over a new drawing, its named parts
-// start hidden and appear when the sentence that names them starts; the part being talked about is lit and the
-// rest fade back. Everything shows once the answer ends or is cut short, so a missed cue never hides a part.
-// A follow-up answer can cue the drawing that's already there without drawing it again.
+// Cues ([#id] in the answer's text) and the board's drawing. While an answer is read aloud over a new drawing, its
+// named parts start hidden and appear when the sentence that names them is reached (boardAnswer); the part being
+// talked about is lit and the rest fade back. Everything shows once the answer ends or is cut short, so a missed
+// cue never hides a part. A tap on a paragraph lights its parts (showCues).
 //   VOICE.cue = { build: parts start hidden, shown: Set of ids, on: ids lit now, named?: (boardAnswer) only parts a
 //   cue named start hidden, and a part once shown stays } (null: all shown, none lit)
 function cueParts(c) {
@@ -1825,7 +1867,7 @@ function applyCues() {
   c.classList.toggle("cueing", on.size > 0);
 }
 
-// A piece of speech is starting: the parts it names appear (if hidden) and light up. Cues naming no part on the
+// A paragraph was tapped: the parts its cues name appear (if hidden) and light up. Cues naming no part on the
 // board are ignored; returns how many did name one.
 function showCues(ids) {
   const c = cueRoot(), parts = c ? cueParts(c).parts : new Map();
@@ -1837,8 +1879,6 @@ function showCues(ids) {
   applyCues();
   return ids.length;
 }
-// A new drawing is going up while it is being explained: its parts wait for their cues.
-function buildCues() { VOICE.cue = { build: true, shown: new Set(), on: [] }; }
 function endCues() { if (VOICE.cue) { VOICE.cue = null; applyCues(); } }
 
 // ------------------------------------------------------------ dictation
@@ -1876,6 +1916,7 @@ function dictSet(state) { DICT.state = state; dictShow(); }
 async function dictTap() {
   if (DICT.state === "listening") return dictFinish();
   if (DICT.state !== "idle") return;
+  stopSpeaking();                                   // so the mic doesn't hear the tutor
   const tok = ++DICT.gen;
   dictSet("listening");
   api("/api/voice/warm", {}).catch(() => {});       // the speech models load while you talk (the first time ~10 s)
@@ -2000,64 +2041,72 @@ function pcmWav(pcm, rate) {
 }
 const blobBase64 = (b) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(b); });
 
-function speakAll(text, btn = null) {
-  stopSpeaking();
-  unlockAudio();
-  const ctrl = VOICE.ctrl = new AbortController();
-  const sp = speaker(VOICE.gen, ctrl.signal);
-  talkSet("speaking");
-  if (btn) { VOICE.playBtn = btn; btn.textContent = "■ Stop"; }
+// Read text aloud: speakAll(text) at once, readAloud() for an answer still streaming in (feed, end). With a board
+// answer, the speech paces it (speaker), and it shows whole when the speech ends however it ends.
+function speakAll(text, btn = null, board = null) {
+  const sp = readAloud(btn, board);
   sp.feed(text);
   sp.end();
 }
+function readAloud(btn = null, board = null) {
+  stopSpeaking();
+  unlockAudio();
+  const ctrl = VOICE.ctrl = new AbortController();
+  VOICE.done = board && (() => board.showAll());
+  voiceSet("speaking");
+  if (btn) { VOICE.playBtn = btn; btn.textContent = "■ Stop"; }
+  return speaker(VOICE.gen, ctrl.signal, board);
+}
 
 // Speaks streamed Markdown a few sentences at a time, in order: each piece is synthesised while the previous
-// one plays. A ``` drawing block isn't read out. stopSpeaking() (a new question, Stop, closing the panel) makes
-// every queued piece of this answer drop out.
+// one plays. A ``` drawing block isn't read out. With a board answer, each piece reveals it up to the piece's end
+// (an offset in the raw text both were fed) as the piece starts playing, and a drawing goes up when the speech
+// reaches it, a Mermaid diagram getting up to 2 s to be drawn before the next piece. stopSpeaking() (a new
+// question, Stop, closing the panel) makes every queued piece drop out. The voice failing stops it, with a toast.
 const ABBREV = /(?:^|[\s(])(?:e\.g|i\.e|vs|etc|dr|fig)\.$/i;
-function speaker(gen, signal) {
-  let acc = "", taken = 0, first = true, ended = false, pending = 0, blocked = false, building = false, uncued = 0;
+function speaker(gen, signal, board = null) {
+  let acc = "", taken = 0, first = true, ended = false, pending = 0;
   let synth = Promise.resolve(), play = Promise.resolve();
   const live = () => gen === VOICE.gen;
-  const check = () => {
-    if (ended && !pending && live()) {
-      endCues();
-      talkSet("idle", blocked ? "Tap ▶ Play again to hear the answer." : undefined);
-    }
+  const reveal = (i) => {      // (following the text down, unless the student scrolled up)
+    const b = $("#board"), follow = b && b.scrollHeight - b.scrollTop - b.clientHeight < 80;
+    const drawn = board.revealTo(i);
+    if (follow) b.scrollTop = b.scrollHeight;
+    return drawn;
   };
-  // Cues take effect as the piece naming them starts. A new drawing whose explanation names none of its parts
-  // in the next two pieces was drawn without cues: show it whole rather than wait for the end.
-  // Cues naming nothing on the board count as none.
-  const cueUp = (cues) => {
-    if (showCues(cues)) building = false;
-    else if (building && ++uncued >= 2) { building = false; endCues(); }
-  };
-  const sayOne = (text, cues = []) => {
+  const queue = (step) => {
     pending++;
-    const audio = synth = synth.then(() => (live() && !blocked && text ? fetchSpeech(text, signal) : null)).catch(() => null);
-    play = play.then(async () => {
+    play = play.then(step).catch(reportError).then(() => { if (--pending === 0 && ended && live()) stopSpeaking(); });
+  };
+  const failed = () => {
+    if (!live() || signal.aborted) return;
+    VOICE.tts = "off";
+    stopSpeaking();
+    if (!board || !VOICE.warned) toast(board ? VOICE_OFF : "Voice isn't available right now.");
+    if (board) VOICE.warned = true;
+  };
+  const sayOne = (text, end) => {
+    const audio = synth = synth.then(() => (live() && text ? fetchSpeech(text, signal) : null)).catch(() => { failed(); return null; });
+    queue(async () => {
       const url = await audio;
-      if (live()) cueUp(cues);
-      if (url && live() && !blocked) {
-        talkSet("speaking");
-        if (!(await playUrl(url)) && live()) blocked = true;    // the browser refused to play (no tap to unlock)
-      } else if (url) URL.revokeObjectURL(url);
-      pending--;
-      check();
+      if (!live()) { if (url) URL.revokeObjectURL(url); return; }
+      if (board) reveal(end);
+      if (url && !(await playUrl(url)) && live()) { stopSpeaking(); voiceSet("blocked"); }   // the browser refused (no tap)
     });
   };
-  const draw = () => {};        // drawings are the board's to put up, not the speaker's
-  const say = (chunk) => {      // a piece per cued sentence (so a cue lands as it is said); none over 1000 characters
-    for (const { text: part, cues } of cueSplit(chunk)) {
-      let text = speakable(part), lead = cues;
+  const drawAt = (end) => queue(() => live() && Promise.race([reveal(end), new Promise((res) => setTimeout(res, 2000))]));
+  const say = (chunk, at) => {      // a piece per cued sentence (so a cue lands as it is said); none over 1000 characters
+    for (const { text: part } of cueSplit(chunk)) {
+      const end = at + part.length, full = speakable(part);
+      let text = full;
       while (text.length > 1000) {
         const sp = text.lastIndexOf(" ", 1000);
         const k = sp > 200 ? sp : 1000;
-        sayOne(text.slice(0, k), lead);
-        lead = [];
+        sayOne(text.slice(0, k), end - Math.round((part.length * (text.length - k)) / full.length));
         text = text.slice(k).trim();
       }
-      if (text || lead.length) sayOne(text, lead);
+      sayOne(text, end);
+      at = end;
     }
   };
   const take = (final) => {
@@ -2072,9 +2121,8 @@ function speaker(gen, signal) {
           if (final) taken = acc.length;
           return;
         }
-        const block = rest.slice(0, close + 3);
         taken += close + 3;
-        draw(block);
+        if (board) drawAt(taken);
         continue;
       }
       const scan = fence > 0 ? rest.slice(0, fence) : rest;
@@ -2097,12 +2145,12 @@ function speaker(gen, signal) {
         else if (final) cut = rest.length;
         else return;
       }
-      say(rest.slice(0, cut));
+      say(rest.slice(0, cut), taken);
       taken += cut;
       first = false;
     }
   };
-  return { feed: (t) => { acc += t; take(false); }, end: () => { take(true); ended = true; check(); } };
+  return { feed: (t) => { acc += t; take(false); }, end: () => { take(true); ended = true; if (!pending && live()) stopSpeaking(); } };
 }
 
 // A piece of speech → parts, a new one at each sentence carrying a cue, with the cues it carries (its words keep them;
@@ -2155,7 +2203,8 @@ function speakable(md) {
 async function fetchSpeech(text, signal) {
   const r = await fetch("/api/voice/speak", { method: "POST", headers: { "Content-Type": "application/json" }, signal,
     body: JSON.stringify({ text, voice: store.get("voice", ""), speed: store.get("voiceSpeed", 1) }) });
-  return r.ok ? URL.createObjectURL(await r.blob()) : null;
+  if (!r.ok) throw new Error("no voice");
+  return URL.createObjectURL(await r.blob());
 }
 
 // One <audio> for every answer, unlocked by playing a moment of silence inside a tap: iOS Safari (and autoplay
@@ -2179,6 +2228,7 @@ function playUrl(url) {
       if (over) return;
       over = true;
       a.onended = a.onerror = a.onpause = null;
+      if (!ok) { a.removeAttribute("src"); a.load(); }       // (it would go on loading the revoked url)
       URL.revokeObjectURL(url);
       res(ok);
     };
@@ -2188,19 +2238,17 @@ function playUrl(url) {
   });
 }
 
-// Cut in / Stop / leave: abort the answer being written and its speech, and go quiet.
+// The speech has ended, or Stop / a new question / leaving cut it short: queued pieces drop out, and the board
+// answer it was revealing shows whole.
 function stopSpeaking() {
   VOICE.ctrl?.abort();
   VOICE.ctrl = null;
-  silence();
-}
-// Go quiet (queued pieces drop out) but let an answer being written finish: the hub saves it to the chat.
-function silence() {
   VOICE.gen++;
-  endCues();
   if (VOICE.el && !VOICE.el.paused) VOICE.el.pause();
-  if (["thinking", "speaking"].includes(VOICE.state)) talkSet("idle");
-  else if (VOICE.playBtn) { VOICE.playBtn.textContent = "▶ Play again"; VOICE.playBtn = null; }
+  const done = VOICE.done;
+  VOICE.done = null;
+  done?.();
+  voiceSet("idle");
 }
 
 // Hold Space to dictate into the Ask box (not while typing in a field or on a button).

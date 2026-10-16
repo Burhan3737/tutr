@@ -385,6 +385,12 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
    the text scrolls under them; an empty strip until there is one. The Read view shows it in the thread instead. */
 .ask-area { border-top: 1px solid var(--line); }
 .ask-area .compose { border-top: 0; padding-top: 8px; }
+/* While an answer is read aloud (or the browser wouldn't play it): what's happening, Stop, voice and speed. */
+.voice-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: -8px; padding: 0 16px 12px; font-size: 13px; }
+.voice-state { flex: 1; min-width: 0; color: var(--text-2); }
+.voice-row select { border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); color: var(--text);
+  font: inherit; padding: 4px 6px; }
+.voice-row .link { font-size: 13px; min-height: 30px; }
 .view-switch { margin: 10px 16px 0; }
 .panel.boarded .thread { flex: 2 1 0; }
 /* An answer always gets room to be read: the thread above gives way first. */
