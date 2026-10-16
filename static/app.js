@@ -1032,6 +1032,8 @@ function scopeSwitch() {
 function composeBox(placeholder, onSend) {
   const ta = h("textarea", { id: "ask-input", rows: "1", placeholder, "aria-label": placeholder,
     "aria-autocomplete": "list", "aria-controls": "slash-menu" });
+  // A new box is empty, so nothing in it was dictated; one drawn mid-dictation takes over the text so far.
+  if (DICT.state === "idle") DICT.spoken = false; else ta.value = DICT.last;
   const send = h("button", { class: "btn ghost", type: "submit" }, "Ask");
   const menu = h("ul", { class: "slash-menu", id: "slash-menu", role: "listbox", hidden: true });
   const form = h("form", { class: "compose", onsubmit: (e) => {
@@ -1700,7 +1702,7 @@ async function finishRecording() {
 // the text either side of the cursor when dictation began, so they stay untouched. `spoken` marks the question
 // as dictated when it is sent.
 const DICT = { rec: null, stream: null, chunks: [], gen: 0, timer: 0, state: "idle", tick: 0, seq: 0, busy: false,
-  before: "", after: "", draft: "", spoken: false, spaceHeld: false };
+  before: "", after: "", last: "", draft: "", spoken: false, spaceHeld: false };
 const PARTIAL_MS = 1500;
 const DICT_TITLE = { idle: "Dictate: speak your question, then edit it before sending", listening: "Stop and type out what you said",
   hearing: "Writing down what you said…" };
@@ -1745,7 +1747,7 @@ async function dictTap() {
     // Where the draft goes: at the cursor, replacing a selection (it keeps its place after tapping 🎙 takes the focus).
     const ta = $("#ask-input"), at = ta ? ta.selectionStart ?? ta.value.length : 0;
     Object.assign(DICT, { rec, stream, chunks, seq: 0, busy: false, draft: "",
-      before: ta ? ta.value.slice(0, at) : "", after: ta ? ta.value.slice(ta.selectionEnd ?? at) : "" });
+      last: ta ? ta.value : "", before: ta ? ta.value.slice(0, at) : "", after: ta ? ta.value.slice(ta.selectionEnd ?? at) : "" });
     DICT.timer = setTimeout(() => { if (DICT.rec === rec) dictFinish(); }, MAX_RECORDING_MS);
     DICT.tick = setInterval(() => dictPartial(rec, tok), PARTIAL_MS);
   } catch {
@@ -1794,7 +1796,7 @@ function dictDraft(text, final = false) {
   const ins = (before && !/\s$/.test(before) ? " " : "") + text + (after && !/^\s/.test(after) ? " " : "");
   DICT.spoken = true;
   DICT.draft = text;
-  ta.value = before + ins + after;
+  ta.value = DICT.last = before + ins + after;
   if (final) ta.focus();
   ta.setSelectionRange(before.length + ins.length, before.length + ins.length);
   ta.dispatchEvent(new Event("input"));            // resize the box and light up Ask
