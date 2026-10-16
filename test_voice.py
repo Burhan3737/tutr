@@ -1,4 +1,4 @@
-"""Checks for the Talk (voice) feature. A plain script, no test framework:
+"""Checks for the voice features (reading aloud, dictation, voice turns). A plain script, no test framework:
 
     python test_voice.py              # everything (loads the speech models: ~10 s warm, longer the first time)
     python test_voice.py --no-models  # only the checks that need no models and no Claude
@@ -266,7 +266,7 @@ def test_engine_turns():
         turn = lambda system, q: E._chat(key, None, system, q, "m", False, "s-old", lambda k, d: None)
         a = asyncio.ensure_future(turn("topic A", "QA"))
         await asyncio.sleep(0.1)
-        if warm:        # the Talk tab opened on deck B while deck A's answer is still coming
+        if warm:        # Board view opened on deck B while deck A's answer is still coming
             await E._warm(key, None, "topic B", "m", False, "s-old")
         else:
             await turn("topic B", "QB")
@@ -369,7 +369,7 @@ def test_engine_turns():
         reset()
 
 
-# ---------------------------------------------------------------- chat_turn(): Talk's This slide | Whole deck
+# ---------------------------------------------------------------- chat_turn(): a voice turn's This slide | Whole deck
 
 def test_chat_turn_scope(tmp):
     cdir = tmp / "Scope"

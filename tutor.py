@@ -7,8 +7,9 @@ study logic.
 Modes
 - chat (explain / example / quiz / map / before / cheatsheet / grill / ask / deeper / brush / side): Markdown answers
   streamed into the course's chat; a grill runs over several turns (the student's answers come back as grill_reply)
-- voice: a spoken question from the Talk tab, answered in plain spoken sentences (voice_prompt.md) in the same
-  chat; afterwards the tutor's notes on the student (study/tutor-memory.md) are updated in the background
+- voice: a spoken question (the retired Talk tab's mode, still accepted), answered in plain spoken sentences
+  (voice_prompt.md) in the same chat; afterwards the tutor's notes on the student (study/tutor-memory.md) are
+  updated in the background. Dictated questions now go as asks with spoken: true.
 - practice: a problem written and solved by Claude (structured output); the solution and hints stay
   on the server until the student has tried
 - check: marks the student's work (typed and/or photographed), method first
@@ -395,7 +396,7 @@ def current_chat(cdir):
 
 def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=False, spoken=False):
     """One tutor answer inside the course's chat, about deck tag. Returns the saved message and the chat id. whole_deck: a voice
-    question asked with Talk set to Whole deck (about the deck, not slide n)."""
+    question asked with Whole deck chosen (about the deck, not slide n)."""
     whole_deck = whole_deck and mode == "voice"
     if mode not in CHAT_PROMPTS and mode != "voice":
         raise TutorError("Unknown request.", 400)
@@ -460,7 +461,7 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=Fa
 
 
 def warm_chat(cdir, tag, model, web):
-    """Open the course's chat client before the first question (the Talk tab opening): no turn is sent. A course
+    """Open the course's chat client before the first question (Board view opening): no turn is sent. A course
     with no chat yet gets its id reserved, so the next new chat uses the client opened here."""
     with _course_lock(cdir):
         chat_id = current_chat(cdir)
@@ -474,8 +475,8 @@ def warm_chat(cdir, tag, model, web):
 
 
 # ---------------------------------------------------------------- voice turns and the tutor's memory
-# The Talk tab sends what speech recognition heard as mode "voice". Its prompt is voice_prompt.md (read on every
-# turn, so it can be tuned without a restart). The voice tutor keeps notes on the student in
+# A spoken question in mode "voice" (the retired Talk tab's; dictated questions now go as asks with spoken: true).
+# Its prompt is voice_prompt.md (read on every turn, so it can be tuned without a restart). The voice tutor keeps notes on the student in
 # <course>/study/tutor-memory.md: read into every voice turn, and rewritten after each one by a quick one-off
 # call in the background, so the next answer knows what was asked again and which mistakes were corrected.
 # Answers typed during a Grill me feed the same notes (what the grill found wrong), and a grill steers by them.

@@ -253,7 +253,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _post(self, path, req):
         model = req.get("model") if req.get("model") in T.MODELS else T.DEFAULT_MODEL
         web = not req.get("slides_only")
-        if path == "/api/voice/warm":        # the Talk tab opened: load the speech models now
+        if path == "/api/voice/warm":        # Board view opened (or dictation started): load the speech models now
             V.warm()
             c = self._course(req.get("course"))
             if c and L.deck(c, str(req.get("tag") or "")):     # and open the course's conversation, if it says which deck
@@ -490,8 +490,8 @@ def main():
         ready.set()
     print("\nKeep this window open while you study. Close it (or press Ctrl+C) to stop the hub.")
     T.log(f"start host={host} port={args.port} tunnel={bool(tunnel)}")
-    # Models already on disk load in the background now (a few seconds), so Talk and dictation are ready when
-    # opened. A first-ever download still waits until voice is used.
+    # Models already on disk load in the background now (a few seconds), so reading aloud and dictation are ready when
+    # first used. A first-ever download still waits until voice is used.
     threading.Thread(target=lambda: V.downloaded() and V.warm(), daemon=True).start()
     if args.open:       # with a tunnel, wait for its link so the page loads with "Open on your phone" in the menu
         threading.Thread(target=lambda: (ready.wait(30), webbrowser.open(url)), daemon=True).start()
