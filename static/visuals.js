@@ -51,13 +51,23 @@ function visNote(text) {
 
 // ---------------------------------------------------------------- SVG (as an image: no scripts, no links)
 
-function svgImage(src) {
+// The arrowhead the tutor points at with marker-end="url(#arrow)" instead of drawing its own <defs>.
+const SVG_ARROW = '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" '
+  + 'orient="auto-start-reverse"><path d="M0,1 L10,5 L0,9 z" fill="context-stroke"/></marker></defs>';
+
+// The tutor's SVG (or a piece of it: the board draws it element by element) as well-formed XML. An SVG image is
+// strict XML: a bare "&" (e.g. "P & Q") or an HTML <br> makes the whole picture fail.
+function svgFix(src) {
   let s = src.trim();
-  if (!/^<svg[\s>]/i.test(s)) throw new Error("not an <svg> element");
   if (!/xmlns=/.test(s.slice(0, 300))) s = s.replace(/^<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"');
-  // An SVG image is strict XML: a bare "&" (e.g. "P & Q") or an HTML <br> makes the whole picture fail.
-  s = s.replace(/<br\s*\/?>/gi, " ").replace(/&nbsp;/g, "&#160;")
+  return s.replace(/<br\s*\/?>/gi, " ").replace(/&nbsp;/g, "&#160;")
     .replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[\da-f]+);)/gi, "&amp;");
+}
+
+function svgImage(src) {
+  let s = svgFix(src);
+  if (!/^<svg[\s>]/i.test(s)) throw new Error("not an <svg> element");
+  if (/url\(\s*['"]?#arrow['"]?\s*\)/.test(s) && !/\bid\s*=\s*["']arrow["']/.test(s)) s = s.replace(/^<svg\b[^>]*>/i, (m) => m + SVG_ARROW);
   const fig = document.createElement("figure");
   fig.className = "diagram svg-box";
   fig.dataset.src = s;         // the fixed-up source, for the board to inline (inlineSvg in app.js)

@@ -1185,7 +1185,8 @@ function answerTools(m, isLast) {
 // Two views of the same panel. Text: answers in the thread. Board: the current answer is written and drawn on a
 // board under the thread, and moves up into the thread on the next send. The Read view shows everything inline.
 APP.view = store.get("view", "text");
-// turn: the answer being written on the board (tutorAsk's handle), so a newer question can move it up into the thread.
+// turn: the answer being written on the board (tutorAsk's handle: { answer: its boardAnswer, demote() }), so a newer
+// question can move it up into the thread.
 const BOARD = { turn: null };
 const boardOn = () => APP.view === "board" && !store.get("reading", false);
 
@@ -1208,56 +1209,217 @@ function drawBoard(m) {
   const b = $("#board");
   if (!b) return;
   if (!m) {
+    VOICE.cue = null;
     b.classList.add("empty");
     b.replaceChildren(h("p", { class: "board-empty" }, "The tutor's answer is written and drawn here."));
     return;
   }
-  boardWriter(APP.deck.course)(m.text, true);
+  boardAnswer(APP.deck.course).end(m.text);       // whole, nothing drawn on again
   b.append(answerTools(m, true));
 }
 
-// Clears the board and returns paint(text, final), which puts the answer so far on it. Drawings go up whole in
-// .board-draw once their block closes; the rest is written in .board-text, finished blocks rendered once (as in
-// tutorAsk). The one place the board's answer is rendered.
+// The board's answer. boardAnswer(course, { paced }) clears the board and returns { feed(chunk), end(text?),
+// revealTo(i), showAll() }. Drawings go up in .board-draw, one figure each in order: an ```svg drawing element by
+// element as it streams (svgStream), Mermaid and plots whole once their block closes. The rest is written in
+// .board-text, finished blocks rendered once (as in tutorAsk). The one place the board's answer is rendered.
+// Unpaced, the answer shows as it streams. Paced (read aloud), only up to revealTo(i), an offset in the raw text
+// (cues included): the text up to there, and a drawing once i reaches its fence; showAll() shows the rest.
+// Cues: a part named by a cue already seen in the stream when it is drawn waits, hidden, until that cue's text is
+// revealed; a part drawn before any cue names it stays shown. The latest revealed cued sentence lights its parts.
 const DRAWING = /^ {0,3}(```|~~~)\s*(mermaid|svg|plot)\b/;
-function boardWriter(course) {
+function boardAnswer(course, { paced = false } = {}) {
   const b = $("#board");
   const draw = h("div", { class: "board-draw" }), done = h("div"), tail = h("div");
   b.classList.remove("empty");
-  b.replaceChildren(draw, h("div", { class: "board-text msg-a" }, done, tail));
-  let taken = 0, seen = "";
-  const write = (md) => { if (md.trim()) done.append(...renderMd(md, course).childNodes); };
-  return (text, final = false) => {
-    if (!text.startsWith(seen)) { draw.replaceChildren(); done.replaceChildren(); taken = 0; }   // not the text streamed: start over
+  b.replaceChildren(draw, h("div", { class: "board-text msg-a", onclick: (e) => tapCues(e, draw) }, done, tail));
+  const st = VOICE.cue = { build: true, shown: new Set(), on: [], named: new Set() };
+  // taken: the raw text already written or drawn; open: the svg drawing streaming in at `taken`; figs: drawings done.
+  let acc = "", taken = 0, upto = 0, ended = false, all = false, live = false, open = null, figs = [];
+  const shownTo = () => (all || !paced ? acc.length : Math.min(upto, acc.length));
+  const write = (md) => { if (md.trim()) done.append(...cueMd(md, course).childNodes); };
+  const paint = () => {
+    for (const m of acc.matchAll(CUE)) st.named.add(m[1]);      // first: a part drawn now must know it is named
+    const lim = shownTo(), final = ended && lim >= acc.length;
     tail.replaceChildren();
     for (;;) {
-      const rest = text.slice(taken), f = rest.search(/^ {0,3}(```|~~~)/m);
-      if (f < 0) {             // finished: everything before the last blank line that isn't inside $$…$$
-        let cut = final ? rest.length : 0;
-        for (let i = rest.lastIndexOf("\n\n"); !final && i > 0; i = rest.lastIndexOf("\n\n", i - 1)) {
-          if ((rest.slice(0, i).split("$$").length - 1) % 2 === 0) { cut = i + 2; break; }
+      const rest = acc.slice(taken), f = rest.search(/^ {0,3}(```|~~~)/m);
+      if (f < 0 || taken + f > lim) {    // text: everything before the last blank line that isn't inside $$…$$
+        const txt = acc.slice(taken, lim);
+        let cut = final ? txt.length : 0;
+        for (let i = txt.lastIndexOf("\n\n"); !final && i > 0; i = txt.lastIndexOf("\n\n", i - 1)) {
+          if ((txt.slice(0, i).split("$$").length - 1) % 2 === 0) { cut = i + 2; break; }
         }
-        write(rest.slice(0, cut));
+        write(txt.slice(0, cut));
         taken += cut;
-        tail.replaceChildren(...renderMd(text.slice(taken), course).childNodes);
+        const t = acc.slice(taken, lim);
+        tail.replaceChildren(...cueMd(final ? t : t.replace(/\[(#[\w-]*)?$/, ""), course).childNodes);   // not half a cue
         break;
       }
       write(rest.slice(0, f));
       taken += f;
-      const block = text.slice(taken), mark = block.trimStart().slice(0, 3);
+      const block = acc.slice(taken), nl = block.indexOf("\n"), isDraw = DRAWING.test(block), mark = block.trimStart().slice(0, 3);
       const close = block.slice(1).match(new RegExp(`\\n {0,3}${mark}[ \\t]*(?:\\n|$)`));
-      if (!close) {            // still streaming in: a drawing goes up once it closes, code shows as it comes
-        if (final) { write(block); taken = text.length; }
-        else if (!DRAWING.test(block)) tail.replaceChildren(...renderMd(block, course).childNodes);
+      if (!close) {            // still streaming in: an svg drawing goes up as its elements close, code shows as it comes
+        if (!isDraw) { if (final) write(block); else tail.replaceChildren(...cueMd(block, course).childNodes); }
+        else if (/^\s*(```|~~~)\s*svg/.test(block)) {
+          if (!open) open = svgStream();
+          if (nl > 0 && open.feed(block.slice(nl + 1), live)) {
+            open.el = draw.appendChild(h("div", { class: "board-fig" }, open.fig));
+            fitDrawings(draw).then(cues);
+          }
+        } else if (/mermaid/.test(block.slice(0, nl < 0 ? 20 : nl))) loadMermaid().catch(() => {});   // it loads meanwhile
+        if (final) {           // never closed: what was drawn of it stays, otherwise its source is text
+          if (isDraw && open && open.count) figs.push({ el: open.el, end: acc.length });
+          else if (isDraw) { open?.el?.remove(); write(block); }
+          open = null;
+          taken = acc.length;
+        }
         break;
       }
       const end = 1 + close.index + close[0].length, src = block.slice(0, end);
       taken += end;
-      if (DRAWING.test(src)) { draw.append(h("div", { class: "board-fig" }, ...renderMd(src, course).childNodes)); fitDrawings(draw); }
-      else write(src);         // a code block is text
+      if (!isDraw) { write(src); continue; }       // a code block is text
+      let el = open && open.el;
+      if (el) open.feed(block.slice(nl + 1, 1 + close.index), live);
+      if (!el || !open.count) {   // nothing streamed (no viewBox, unreadable, or it arrived whole): drawn whole
+        const fig = h("div", { class: "board-fig" }, ...renderMd(src, course).childNodes), pen = live;
+        if (el) el.replaceWith(fig); else draw.append(fig);
+        el = fig;
+        fitDrawings(draw).then(() => { if (pen) $$(".cue-svg", fig).forEach((s) => [...s.children].forEach(penOn)); cues(); });
+      }
+      open = null;
+      figs.push({ el, end: taken });
     }
-    seen = text.slice(0, taken);
+    cues();
   };
+  // Which parts show and which are lit, from the text revealed so far (while this answer has the board's cues).
+  const cues = () => {
+    if (VOICE.cue !== st || !draw.isConnected) return;
+    const lim = shownTo(), shown = acc.slice(0, lim);
+    st.on = [];
+    for (const p of cueSplit(shown)) if (p.cues.length) { p.cues.forEach((id) => st.shown.add(id)); st.on = p.cues; }
+    // A drawing whose first two sentences after it name none of its parts was drawn without cues: it shows whole.
+    for (const fg of figs) {
+      if (fg.decided || fg.end > lim || $$(".mermaid-box", fg.el).some((m) => !$("svg, pre", m))) continue;   // (still drawing)
+      const ids = [...cueParts(fg.el).parts.keys()];
+      const after = sentences(shown.slice(fg.end).replace(/(```|~~~)[\s\S]*?(\1|$)/g, " ")).filter((s) => s.trim()).slice(0, 2);
+      if (after.some((s) => [...s.matchAll(CUE)].some((m) => ids.includes(m[1])))) fg.decided = true;
+      else if ((after.length === 2 && /([.!?]["')\]]*\s+|\n+)$/.test(after[1])) || (ended && lim >= acc.length)) {
+        fg.decided = true;
+        ids.forEach((id) => st.shown.add(id));
+      }
+    }
+    applyCues();
+  };
+  const showAll = () => {
+    all = true;
+    paint();
+    if (VOICE.cue === st) endCues();
+  };
+  return {
+    feed: (chunk) => { acc += chunk; live = true; paint(); },
+    // The answer is complete (final: the saved text, in case it isn't what streamed).
+    end: (final) => {
+      if (final != null && final !== acc) {
+        if (!final.startsWith(acc)) { draw.replaceChildren(); done.replaceChildren(); taken = 0; open = null; figs = []; }
+        acc = final;
+      }
+      ended = true;
+      if (paced) paint(); else showAll();
+    },
+    revealTo: (i) => { if (i > upto) { upto = i; paint(); } },
+    showAll,
+  };
+}
+
+// An ```svg drawing as it streams in: a scanner over the block's body that tracks tag depth (skipping comments and
+// quoted ">") puts up the root once its opening tag is complete, then each top-level element once it closes.
+// Every piece goes through inlineSvg's allowlist; the root also gets the hub's arrowhead. A root without a viewBox
+// is left to be drawn whole (off). feed(body so far, pen) returns true when the root has just gone up.
+function svgStream() {
+  let pos = 0, depth = 0, start = -1, over = false;
+  const s = { fig: null, root: null, count: 0, off: false };
+  const piece = (src) => inlineSvg(svgFix(`<svg xmlns:xlink="${XLINK_NS}">${src}</svg>`));
+  s.feed = (src, pen) => {
+    let up = false, k = 0;
+    const add = (part) => {
+      const w = piece(part);
+      if (!w) return;
+      for (const n of [...w.children]) { s.root.append(n); s.count++; if (pen) penOn(n, k++); }
+    };
+    while (!s.off && !over) {
+      const lt = src.indexOf("<", pos);
+      if (lt < 0) { pos = src.length; break; }
+      if (src.length - lt < 4) break;                // "<!-" or a name: wait for more
+      if (src.startsWith("<!--", lt)) { const e = src.indexOf("-->", lt + 4); if (e < 0) break; pos = e + 3; continue; }
+      if (src[lt + 1] === "!" || src[lt + 1] === "?") { const e = src.indexOf(">", lt); if (e < 0) break; pos = e + 1; continue; }
+      let q = "", e = -1;
+      for (let i = lt + 1; i < src.length; i++) {
+        const c = src[i];
+        if (q) { if (c === q) q = ""; } else if (c === '"' || c === "'") q = c; else if (c === ">") { e = i; break; }
+      }
+      if (e < 0) break;                              // the tag is still streaming in
+      pos = e + 1;
+      const tag = src.slice(lt, pos), closing = tag[1] === "/", empty = /\/\s*>$/.test(tag);
+      if (!s.root) {
+        if (closing || !/^<svg[\s/>]/i.test(tag)) continue;
+        const r = inlineSvg(svgFix(`${tag.replace(/\/\s*>$/, ">")}</svg>`));
+        if (!r || !r.hasAttribute("viewBox")) { s.off = true; break; }
+        r.prepend(...piece(SVG_ARROW).children);
+        s.root = r;
+        s.fig = h("figure", { class: "diagram svg-box" }, r);
+        up = true;
+        if (empty) over = true; else depth = 1;
+      } else if (closing) {
+        if (--depth === 1 && start >= 0) { add(src.slice(start, pos)); start = -1; }
+        if (depth < 1) over = true;                  // the root closed
+      } else if (depth === 1) {
+        if (empty) add(tag); else { start = lt; depth = 2; }
+      } else if (!empty) depth++;
+    }
+    return up;
+  };
+  return s;
+}
+
+// Pen: a part just drawn is stroked on (stroke-dashoffset from its length, --len, to 0); fills and text fade in.
+// k staggers the parts that go up together.
+function penOn(node, k = 0) {
+  if (node.nodeType !== 1 || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  for (const el of [node, ...node.querySelectorAll("*")]) {
+    el.style.animationDelay = `${Math.min(k, 8) * 0.15}s`;
+    if (el.localName === "text") el.classList.add("pen-fade");
+    else if (el instanceof SVGGeometryElement && !el.hasAttribute("stroke-dasharray")) {   // a dashed line keeps its dashes
+      let len = 0;
+      try { len = +el.getAttribute("pathLength") || el.getTotalLength(); } catch { /* not laid out */ }
+      if (len > 0) { el.style.setProperty("--len", len); el.classList.add("pen"); }
+    }
+  }
+  node.addEventListener("animationend", (e) => e.target.classList.remove("pen", "pen-fade"));
+}
+
+// The board's text keeps its cues, as data-cues on the paragraph (or item) that carried them, for a tap to light.
+function cueMd(md, course) {
+  const ids = [];
+  const box = renderMd(String(md).replace(/[ \t]?\[#([A-Za-z][\w-]{0,40})\]/g, (_, id) => `${ids.push(id) - 1}`), course);
+  const walk = document.createTreeWalker(box, NodeFilter.SHOW_TEXT), hits = [];
+  while (walk.nextNode()) if (walk.currentNode.nodeValue.includes("")) hits.push(walk.currentNode);
+  for (const n of hits) {
+    const at = n.parentElement.closest("p, li, h1, h2, h3, h4, h5, h6, td, th, blockquote, dd");
+    n.nodeValue = n.nodeValue.replace(/(\d+)/g, (_, k) => {
+      if (at) at.dataset.cues = `${at.dataset.cues || ""} ${ids[+k]}`.trim();
+      return "";
+    });
+  }
+  return box;
+}
+
+// A tap on a paragraph of the board's text lights the parts its cues name and brings them into view.
+function tapCues(e, draw) {
+  if (e.target.closest("a, button, .spoiler") || !getSelection().isCollapsed) return;
+  const ids = (e.target.closest("[data-cues]")?.dataset.cues || "").split(" ").filter(Boolean);
+  if (ids.length && showCues(ids)) $(".cue-on", draw)?.scrollIntoView({ block: "nearest" });
+  else if (VOICE.cue && !VOICE.cue.build) endCues();
 }
 
 // Board drawings go in as live (cleaned) SVG, so cues can reach their parts, and are scaled to the board rather
@@ -1378,7 +1540,7 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
   $(".earlier", th)?.remove();
   th.append(h("p", { class: "msg-q" }, (spoken ? "🎙 " : "") + askText(mode, question), h("span", { class: "where" }, mode.endsWith("_deck") ? ` · ${d.tag}` : ` · s${n}`)));
   const mark = board ? th.appendChild(onBoardMark()) : null;
-  const paintBoard = board && boardWriter(d.course);
+  const ans = board && boardAnswer(d.course);     // reveals as it streams (no voice yet)
   const wait = h("p", { class: "waiting" }, mode.startsWith("example") ? "Writing a worked example…" : mode.endsWith("_deck") ? "Reading the whole deck…" : "Thinking…");
   (board || th).append(wait);
   th.scrollTop = th.scrollHeight;
@@ -1387,7 +1549,7 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
   const doneBlocks = h("div"), tailBlock = h("div");
   live.append(doneBlocks, tailBlock);
   let sc = board || th;             // what scrolls as the answer is written
-  let acc = "", done = 0, queued = false, cost = 0, follow = true, over = false;
+  let acc = "", done = 0, fed = 0, queued = false, cost = 0, follow = true, over = false;
   const onScroll = () => { follow = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 80; };
   sc.addEventListener("scroll", onScroll, { passive: true });
   // Everything before the last blank line that isn't inside $$…$$ or a ``` block is finished text.
@@ -1402,7 +1564,7 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
     queued = false;
     if (over) return;
     const t0 = performance.now();
-    if (board) paintBoard(acc);
+    if (board) { ans.feed(acc.slice(fed)); fed = acc.length; }
     else {
       const cut = cutPoint(acc);
       if (cut > done) { doneBlocks.append(...renderMd(acc.slice(done, cut), d.course).childNodes); done = cut; }
@@ -1412,7 +1574,7 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
     if (follow) sc.scrollTop = sc.scrollHeight;
   };
   // A newer question took the board: this answer carries on in the thread, where its "On the board" line was.
-  const me = board ? (BOARD.turn = { demote: () => {
+  const me = board ? (BOARD.turn = { answer: ans, demote: () => {
     BOARD.turn = null;
     board = null;
     sc.removeEventListener("scroll", onScroll);
@@ -1446,7 +1608,7 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
     if (!$(".chat-bar", th)) th.prepend(chatBar(chat));      // the chat's first answer
     wait.remove();
     if (board) {      // the board shows the answer from its start, under its drawing
-      paintBoard(r.message.text, true);
+      ans.end(r.message.text);
       board.append(answerTools(r.message, true));
       if (follow) board.scrollTop = 0;
     } else {
@@ -1588,7 +1750,8 @@ function cleanSvgEl(el) {
 // start hidden and appear when the sentence that names them starts; the part being talked about is lit and the
 // rest fade back. Everything shows once the answer ends or is cut short, so a missed cue never hides a part.
 // A follow-up answer can cue the drawing that's already there without drawing it again.
-//   VOICE.cue = { build: parts start hidden, shown: Set of ids, on: ids lit now } (null: all shown, none lit)
+//   VOICE.cue = { build: parts start hidden, shown: Set of ids, on: ids lit now, named?: (boardAnswer) only parts a
+//   cue named start hidden, and a part once shown stays } (null: all shown, none lit)
 function cueParts(c) {
   const parts = new Map();     // id → its elements; mermaid edges (and their labels) come with both ends
   const add = (id, el) => {     // only a name a cue can carry ([#id]) is a part
@@ -1596,12 +1759,11 @@ function cueParts(c) {
     if (!parts.has(id)) parts.set(id, []);
     parts.get(id).push(el);
   };
-  const svg = $(".cue-svg", c);
-  if (svg) svg.querySelectorAll(":is(g, rect, circle, ellipse, line, polyline, polygon, path, text, use)[id]").forEach((el) => {
+  $$(".cue-svg", c).forEach((svg) => svg.querySelectorAll(":is(g, rect, circle, ellipse, line, polyline, polygon, path, text, use)[id]").forEach((el) => {
     if (!el.closest("defs, marker, symbol, clipPath, mask, pattern")) add(el.id.replace(/^tsvg-/, ""), el);
-  });
-  const mm = $(".mermaid-box svg", c), edges = [];
-  if (mm) {
+  }));
+  const edges = [];
+  $$(".mermaid-box svg", c).forEach((mm) => {
     mm.querySelectorAll("g.node[id]").forEach((el) => { const m = el.id.match(/^flowchart-(.+)-\d+$/); if (m) add(m[1], el); });
     mm.querySelectorAll("g.cluster[id]").forEach((el) => add(el.id, el));
     const labels = $$(".edgeLabels > .edgeLabel", mm);
@@ -1609,7 +1771,7 @@ function cueParts(c) {
       const from = [...p.classList].find((k) => k.startsWith("LS-"))?.slice(3), to = [...p.classList].find((k) => k.startsWith("LE-"))?.slice(3);
       if (from && to) edges.push({ from, to, els: [p, labels[i]].filter(Boolean) });
     });
-  }
+  });
   return { parts, edges };
 }
 
@@ -1619,7 +1781,8 @@ function applyCues() {
   if (!c) return;
   const { parts, edges } = cueParts(c), st = VOICE.cue;
   const on = new Set(st ? st.on.filter((id) => parts.has(id)) : []);
-  const shows = (id) => !st || !st.build || st.shown.has(id);
+  const shows = (id) => !st || !st.build || st.shown.has(id) || (st.named && !st.named.has(id));
+  if (st && st.named) for (const id of parts.keys()) if (shows(id)) st.shown.add(id);
   for (const [id, els] of parts) for (const el of els) {
     el.classList.add("cue-part");
     el.classList.toggle("cue-hide", !shows(id));
@@ -1919,17 +2082,22 @@ function speaker(gen, signal) {
 // A piece of speech → parts, a new one at each sentence carrying a cue, with the cues it carries (its words keep them;
 // speakable() drops them).
 function cueSplit(text) {
-  const out = [], sents = [];
-  // Sentences with the space after each (no lookbehind: older iPhone Safari can't even parse one).
-  const re = /[.!?]["')\]]*\s+|\n+/g;
-  let last = 0;
-  for (let m; (m = re.exec(text));) { sents.push(text.slice(last, re.lastIndex)); last = re.lastIndex; }
-  if (last < text.length || !sents.length) sents.push(text.slice(last));
-  for (const sent of sents) {
+  const out = [];
+  for (const sent of sentences(text)) {
     const cues = [...sent.matchAll(CUE)].map((m) => m[1]);
     if (!out.length || (cues.length && out[out.length - 1].text.trim())) out.push({ text: sent, cues });
     else { const last = out[out.length - 1]; last.text += sent; last.cues.push(...cues); }
   }
+  return out;
+}
+
+// Sentences with the space after each (no lookbehind: older iPhone Safari can't even parse one); the last may be
+// unfinished.
+function sentences(text) {
+  const out = [], re = /[.!?]["')\]]*\s+|\n+/g;
+  let last = 0;
+  for (let m; (m = re.exec(text));) { out.push(text.slice(last, re.lastIndex)); last = re.lastIndex; }
+  if (last < text.length || !out.length) out.push(text.slice(last));
   return out;
 }
 

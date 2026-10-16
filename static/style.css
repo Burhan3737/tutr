@@ -410,8 +410,16 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 .board-draw .mermaid-box .cue-on :is(rect, circle, ellipse, polygon, path) { stroke: #e8a317 !important; stroke-width: 3px !important; }
 /* Safari may skip filter on SVG groups: the lit part's outlines turn amber too (the inlined SVG has no inline styles). */
 .board-draw .cue-svg :is(.cue-on, .cue-on *):is(rect, circle, ellipse, polygon, path, line, polyline) { stroke: #e8a317; stroke-width: 3px; }
+/* Pen: a part just drawn is stroked on (penOn sets --len, its length) while its fill and text fade in. */
+@keyframes pen { from { stroke-dashoffset: var(--len); } to { stroke-dashoffset: 0; } }
+@keyframes pen-fill { from { fill-opacity: 0; } }
+@keyframes pen-fade { from { opacity: 0; } }
+.board-draw .pen { stroke-dasharray: var(--len); animation: pen .6s var(--ease) both, pen-fill .6s var(--ease) both; }
+.board-draw .pen-fade { animation: pen-fade .6s var(--ease) both; }
+.board-text [data-cues] { cursor: pointer; }
 @keyframes rec-pulse { 0% { box-shadow: 0 0 0 0 rgba(192, 57, 43, .5); } 70% { box-shadow: 0 0 0 14px rgba(192, 57, 43, 0); } 100% { box-shadow: 0 0 0 0 rgba(192, 57, 43, 0); } }
-@media (prefers-reduced-motion: reduce) { .compose .dictate.on { animation: none; } .board-draw * { transition: none !important; } }
+@media (prefers-reduced-motion: reduce) { .compose .dictate.on { animation: none; } .board-draw * { transition: none !important; }
+  .board-draw :is(.pen, .pen-fade) { animation: none; stroke-dasharray: none; } }
 .thread .empty { color: var(--text-2); font-size: 13px; }
 /* Your messages: right-aligned bubbles; the tutor's answers stay full width on the left. */
 .msg-q { width: fit-content; max-width: 85%; margin: 20px 0 10px auto; padding: 8px 12px;
