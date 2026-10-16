@@ -1926,7 +1926,7 @@ function endCues() { if (VOICE.cue) { VOICE.cue = null; applyCues(); } }
 const DICT = { rec: null, stream: null, chunks: [], gen: 0, timer: 0, state: "idle", tick: 0, seq: 0, busy: false,
   before: "", after: "", last: "", draft: "", spoken: false, spaceHeld: false };
 const PARTIAL_MS = 1500;
-const DICT_TITLE = { idle: "Dictate: speak your question, then edit it before sending", listening: "Stop and type out what you said",
+const DICT_TITLE = { idle: "Dictate: speak your question, then edit it before sending (Ctrl+Space)", listening: "Stop and type out what you said (Ctrl+Space)",
   hearing: "Writing down what you said…" };
 
 function dictateButton(ta) {
@@ -1944,7 +1944,7 @@ function dictShow(b = $("#dict-mic"), ta = $("#ask-input")) {
   b.classList.toggle("on", st === "listening");
   b.disabled = st === "hearing";
   if (ta) ta.readOnly = st !== "idle";              // the draft is being rewritten: typing would be overwritten
-  if (ta) ta.placeholder = st === "listening" ? "Listening… tap ■ to stop" : st === "hearing" ? "Writing down what you said…" : composeHint();
+  if (ta) ta.placeholder = st === "listening" ? "Listening… tap ■ or Ctrl+Space to stop" : st === "hearing" ? "Writing down what you said…" : composeHint();
 }
 function dictSet(state) { DICT.state = state; dictShow(); }
 
@@ -2307,6 +2307,26 @@ document.addEventListener("keyup", (e) => {
   e.preventDefault();
   DICT.spaceHeld = false;
   if (DICT.state === "listening") dictFinish();      // let go before the mic started: dictFinish cancels the start
+});
+
+// Ctrl+Space dictates from anywhere, the Ask box included (opening the tutor if it's closed): press to start and
+// again to stop, or hold it and let go.
+let ctrlSpaceAt = 0;
+document.addEventListener("keydown", (e) => {
+  if (e.key !== " " || !e.ctrlKey || e.metaKey || e.altKey || !APP.deck || !micOk()) return;
+  e.preventDefault();
+  if (e.repeat) return;
+  if (DICT.state === "listening") return dictFinish();
+  if (DICT.state !== "idle") return;
+  if (APP.tutor !== "open" || !$("#dict-mic")) { APP.tutor = "open"; renderTutor(); }
+  ctrlSpaceAt = Date.now();
+  dictTap();
+});
+document.addEventListener("keyup", (e) => {
+  if (e.key !== " " || !ctrlSpaceAt) return;
+  const held = Date.now() - ctrlSpaceAt > 400;      // a quick press toggles; a hold stops on release
+  ctrlSpaceAt = 0;
+  if (held && DICT.state === "listening") dictFinish();
 });
 
 function showAskedMark() { /* deliberately no marker on the slide */ }
