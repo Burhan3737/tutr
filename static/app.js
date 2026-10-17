@@ -711,7 +711,8 @@ function keepPlace(change) {
 }
 
 function toggleReading() {
-  // The Read view shows every answer whole and unlit: the voice stops (Voice paces nothing there).
+  // The Read view shows every answer whole and unlit: the voice stops (Voice paces nothing there). ▶ Play pressed in
+  // the Read view still reads, without glow or lighting (playAnswer).
   const on = !store.get("reading", false);
   if (on) { stopSpeaking(); endCues(VOICE.lit); }
   const th = keepPlace(() => store.set("reading", on));
@@ -1051,7 +1052,10 @@ function composeBox(placeholder, onSend) {
     ta.value = ""; autosize(); send.classList.add("ghost"); slashMenu();
     if (slash) slash.run(spoken); else onSend(q, spoken);
   } }, menu, ta, micOk() ? dictateButton(ta) : null, send);
-  const autosize = () => { ta.style.height = "auto"; ta.style.height = Math.min(160, ta.scrollHeight + 2) + "px"; };
+  const autosize = () => {
+    ta.style.height = "auto";
+    ta.style.height = ta.value ? `${Math.min(160, ta.scrollHeight + 2)}px` : "";      // (empty: its own height, not the placeholder's)
+  };
   // Typing "/" at the start lists the modes; up/down pick, Tab (or Enter) fills one in, then add your own words.
   let pick = 0, shown = [];
   const fill = (c) => { ta.value = `/${c.cmd} `; ta.focus(); ta.dispatchEvent(new Event("input")); };
@@ -1140,7 +1144,7 @@ function drawThread() {
   th.replaceChildren();
   // Turns still being written go back at the end, in order (place); another deck's turns are gone. An answer still
   // being read aloud keeps its element (VOICE.view), so its voice, glow and pacing carry on.
-  for (const t of TURNS) if (t.d !== APP.deck) TURNS.delete(t);
+  for (const t of TURNS) if (!sameDeck(t.d, APP.deck)) TURNS.delete(t);
   const msgs = APP.deck.chat ? APP.deck.chat.messages : [];
   if (APP.deck.chat && msgs.length) th.append(chatBar(APP.deck.chat));
   if (!msgs.length && !TURNS.size) {
@@ -1157,9 +1161,16 @@ function drawThread() {
     else th.append(answerEl(m, i === msgs.length - 1 && !TURNS.size));
   });
   for (const t of TURNS) t.place(th);
+  if (VOICE.view && !VOICE.view.root.isConnected) stopSpeaking();      // (its answer went with another deck)
+  pinBelowBar(th);
   th.scrollTop = th.scrollHeight;
   updateComposeHint();
 }
+
+// The same deck, even when it was fetched again (a citation chip, the deck reopened).
+const sameDeck = (a, b) => !!a && !!b && a.course === b.course && a.tag === b.tag;
+// An answer's pinned drawing sticks just under the chat bar (--pin: the bar's height), so the bar stays in view.
+const pinBelowBar = (th) => th.style.setProperty("--pin", `${$(".chat-bar", th)?.offsetHeight || 0}px`);
 
 // The deck a saved question is about: older ones carry none (the chat's own deck), and `deck: true` once meant Whole deck.
 const msgDeck = (m, chat) => (typeof m.deck === "string" ? m.deck : chat.deck) || "";
@@ -1281,7 +1292,7 @@ function answerView(course, { paced = false } = {}) {
           if (!open) open = svgStream();
           if (nl > 0 && open.feed(block.slice(nl + 1), got)) {
             open.el = draw.appendChild(h("div", { class: "ans-fig" }, open.fig));
-            drawn = fitDrawings(draw).then(cues);
+            drawn = fitDrawings(draw).then(() => { cues(); keep(); });
           }
         } else if (/mermaid/.test(block.slice(0, nl < 0 ? 20 : nl))) loadMermaid().catch(() => {});   // it loads meanwhile
         if (final) {           // never closed: what was drawn of it stays, otherwise its source is text
@@ -1302,7 +1313,7 @@ function answerView(course, { paced = false } = {}) {
         const fig = h("div", { class: "ans-fig" }, ...renderMd(src, course).childNodes);
         if (el) { fresh = fresh.filter((n) => !el.contains(n)); el.replaceWith(fig); } else draw.append(fig);
         el = fig;
-        drawn = fitDrawings(draw).then(cues);       // (inlines the svg at once; Mermaid draws later)
+        drawn = fitDrawings(draw).then(() => { cues(); keep(); });       // (inlines the svg at once; Mermaid draws later)
         $$(".cue-svg", fig).forEach((s) => [...s.children].forEach((n) => { if (n.localName !== "defs") got(n); }));
       }
       open = null;
@@ -1311,7 +1322,11 @@ function answerView(course, { paced = false } = {}) {
     cues();
     pens();       // after the cues, so a part waiting for its sentence is drawn on when it appears
     glowText(root, said);      // (the text was written again: the sentence being said glows again)
+    keep();
   };
+  // The sentence being said stays in view (below the pinned drawing) while the student follows it.
+  let track = true;
+  const keep = () => { const sp = said && track && $(".snt.spoken", root); if (sp && root.isConnected) keepInView(sp); };
   // Which parts show and which are lit, from the text revealed so far (while this answer is building its drawing).
   const cues = () => {
     if (root.cue !== st || !draw.isConnected) return;
@@ -1333,6 +1348,7 @@ function answerView(course, { paced = false } = {}) {
   };
   const view = {
     root, msg: null, settle: null,
+    following: () => paced && upto > 0 && track,       // (the student follows the voice: the end follows too)
     feed: (chunk) => { acc += chunk; live = true; paint(); },
     // The answer is complete (final: the saved text, in case it isn't what streamed).
     end: (final) => {
@@ -1343,8 +1359,11 @@ function answerView(course, { paced = false } = {}) {
       ended = true;
       if (paced && !all) paint(); else view.showAll();
     },
-    // (Following the newest words down, unless the student scrolled up.)
+    // (Following the newest words down, unless the student scrolled up; the sentence being said stays in view while
+    // the student follows it: decided before this scrolls.)
     revealTo: (i) => {
+      const was = $(".snt.spoken", root);
+      track = !was || inThread(was);       // (the student is following it, or it's the first)
       if (i > upto) {
         const th = root.closest(".thread"), follow = th && th.scrollHeight - th.scrollTop - th.clientHeight < 80;
         upto = i;
@@ -1353,7 +1372,11 @@ function answerView(course, { paced = false } = {}) {
       }
       return drawn;
     },
-    glow: (s, e) => { said = s == null ? null : [s, e]; glowText(root, said); },
+    glow: (s, e) => {
+      said = s == null ? null : [s, e];
+      glowText(root, said);
+      keep();
+    },
     showAll: () => {
       all = true;
       said = null;
@@ -1400,18 +1423,31 @@ function glowText(root, span) {
   if (span && from < 0) from = span[0];
   for (const el of els) { const o = +el.dataset.o; el.classList.toggle("spoken", !!span && o >= from && o < span[1]); }
 }
+// The part of the thread that shows its text: below the chat bar and any pinned drawing stuck at its top.
+function threadView(th) {
+  const t = th.getBoundingClientRect();
+  let top = t.top;
+  for (const el of $$(":scope > .chat-bar, :scope > .ans.live > .ans-draw", th)) {
+    const r = el.getBoundingClientRect();
+    if (r.height && r.top <= top + 4 && r.bottom > top) top = r.bottom;
+  }
+  return { top, bottom: t.bottom };
+}
 function inThread(el) {
   const th = el.closest(".thread");
   if (!th) return false;
-  const r = el.getBoundingClientRect(), t = th.getBoundingClientRect();
-  return r.bottom > t.top && r.top < t.bottom;
+  const r = el.getBoundingClientRect(), v = threadView(th);
+  return r.bottom > v.top && r.top < v.bottom;
 }
-function keepInView(el) {       // (scrolls only the thread, never the page)
+function keepInView(el) {       // (scrolls only the thread, never the page; a tall sentence shows from its start)
   const th = el.closest(".thread");
   if (!th) return;
-  const r = el.getBoundingClientRect(), t = th.getBoundingClientRect();
-  if (r.top < t.top + 40) th.scrollTop -= t.top + 40 - r.top;
-  else if (r.bottom > t.bottom - 40) th.scrollTop += Math.min(r.bottom - t.bottom + 40, r.top - t.top - 40);
+  for (let k = 0; k < 2; k++) {      // (scrolling can pin or unpin a drawing: look again once)
+    const r = el.getBoundingClientRect(), v = threadView(th), pad = 8;
+    if (r.top < v.top + pad) th.scrollTop -= v.top + pad - r.top;
+    else if (r.bottom > v.bottom - pad) th.scrollTop += Math.min(r.bottom - v.bottom + pad, r.top - v.top - pad);
+    else return;
+  }
 }
 
 // An ```svg drawing as it streams in: a scanner over the block's body that tracks tag depth (skipping comments and
@@ -1495,21 +1531,33 @@ function penOn(node, k = 0) {
   return { did, left };
 }
 
-// An answer's text (md: from a line start, at offset `at` of the answer's raw text). Its cues stay, as data-cues on
-// the paragraph (or item) that carried them, for a tap to light; its sentences are marked for the spoken glow.
+// An answer's text (md: from a line start, at offset `at` of the answer's raw text), rendered exactly as renderMd
+// renders it, with its sentences marked for the spoken glow (.snt spans, data-o: the raw offset where each starts)
+// and its cues kept as data-cues on the paragraph (or item) of the sentence that carried them, for a tap to light.
+// The marks must never change the rendering: if the marked render differs from the plain one (apart from the marks),
+// the marks inside lines are dropped, and failing that the whole text is one sentence.
 function cueMd(md, course, at = 0) {
-  const ids = [];
-  const box = renderMd(markSentences(String(md), at).replace(/[ \t]?\[#([A-Za-z][\w-]{0,40})\]/g, (_, id) => `${ids.push(id) - 1}`), course);
-  const walk = document.createTreeWalker(box, NodeFilter.SHOW_TEXT), hits = [];
-  while (walk.nextNode()) if (walk.currentNode.nodeValue.includes("")) hits.push(walk.currentNode);
-  for (const n of hits) {
-    const at = n.parentElement.closest("p, li, h1, h2, h3, h4, h5, h6, td, th, blockquote, dd");
-    n.nodeValue = n.nodeValue.replace(/(\d+)/g, (_, k) => {
-      if (at) at.dataset.cues = `${at.dataset.cues || ""} ${ids[+k]}`.trim();
-      return "";
-    });
+  md = String(md);
+  const same = (a, b) => a.innerHTML.replace(SNT_MARKS, "").replace(/clip[0-9a-z]*/g, "clip") === b.innerHTML.replace(/clip[0-9a-z]*/g, "clip");
+  const plain = renderMd(md, course);       // (a plot's clip id is random: not a difference)
+  let box = renderMd(markSentences(md, at), course), start = null;
+  if (!same(box, plain)) {
+    box = renderMd(markSentences(md, at, true), course);
+    if (!same(box, plain)) { box = plain; start = at; }
   }
-  spanSentences(box);
+  spanSentences(box, start);
+  // A cue belongs to the sentence it is in: its paragraph (or item) carries it.
+  const snts = $$(".snt", box).map((el) => [+el.dataset.o, el]);
+  for (const m of md.matchAll(CUE)) {
+    const c = at + m.index;
+    let el = null, o = -1;
+    for (const [k, e] of snts) if (k <= c && k > o) { o = k; el = e; }
+    // (a cue a sentence opens with sits before its mark, on the same line: it is that sentence's)
+    const next = snts.find(([k]) => k > c && /^([ \t]*\[#[A-Za-z][\w-]{0,40}\])*[ \t]*$/.test(md.slice(c - at, k - at)));
+    if (next) el = next[1];
+    const blk = (el || box).closest("p, li, h1, h2, h3, h4, h5, h6, td, th, blockquote, dd") || $("p, li, h1, h2, h3, h4, h5, h6, td, th, blockquote, dd", box);
+    if (blk && box.contains(blk)) blk.dataset.cues = `${blk.dataset.cues || ""} ${m[1]}`.trim();
+  }
   return box;
 }
 // Finished answers are rendered once and reused, like renderMdCached.
@@ -1524,60 +1572,87 @@ function cueMdCached(text, course) {
 }
 
 // The spoken glow needs to know which rendered words are which raw text. Before rendering, a mark carrying its raw
-// offset goes in where each sentence starts: at each line's content (after any list, heading, quote or table-cell
-// marker; a $$ block at its first line) and after each ". " / "? " / "! " in it. Never inside code, maths, [[terms]],
-// HTML tags or link targets, nor on lines where a character would change the Markdown (fences, inside $$ blocks,
-// table rules, rules, HTML lines). spanSentences then wraps each run of text in a .snt span with the offset of the
-// mark before it (data-o); maths, inline code and term buttons become .snt whole; code blocks (never read out) don't
-// glow. A sentence missing a mark joins the one before: it glows with it.
-const SNT_OPEN = "", SNT_CLOSE = "";
-function markSentences(md, at) {
-  const out = [];
-  let pos = at, fence = "", math = false;
+// offset goes in where each sentence starts: at each line's content (after any list, task box, heading, quote or
+// table-cell marker) and after each ". " / "? " / "! " in it (linesOnly: line starts only). A mark goes inside an
+// emphasis opener (**…), never between characters renderMd takes as code, a [[term]], maths, an HTML tag or a link
+// target (mdProtected: its own regexes), never before an autolink, and not on lines a character could change
+// (fences, table rules, rules and setext underlines, link definitions, HTML lines). spanSentences then wraps each
+// run of text in a .snt span with the offset of the mark before it; maths, inline code and term buttons become .snt
+// whole; code blocks (never read out) don't glow. A sentence missing a mark joins the one before: it glows with it.
+const SNT_OPEN = "", SNT_CLOSE = "", SNT_MARKS = /\d+/g;
+function mdProtected(md) {      // an id per character: 0, or the code / term / maths / tag range it is in
+  const id = new Int32Array(md.length + 1);
+  let t = md, n = 0;
+  // Like renderMd's replacements in order, each match taken out of what the later ones see (as x's).
+  const pass = (re, fill = true) => {
+    let out = "", last = 0;
+    for (const m of t.matchAll(re)) {
+      const a = m.index + (m.groups?.pre?.length || 0), b = m.index + m[0].length;
+      id.fill(++n, a, b);
+      if (!fill) continue;
+      out += t.slice(last, a) + (m.groups?.keep != null ? `xx${m.groups.keep}xx` : "x".repeat(b - a));
+      last = b;
+    }
+    if (fill) t = out + t.slice(last);
+  };
+  pass(/```[\s\S]*?```|`[^`\n]+`/g);
+  pass(/\[\[(?<keep>[^[\]\n]{1,120}?)\]\]/g);         // (a term's words stay: its maths is still maths)
+  pass(/\$\$([\s\S]+?)\$\$/g);
+  pass(/(?<pre>^|[^\\$])\$([^\s$](?:[^$\n]*?[^\s$])?)\$(?!\d)/g);
+  pass(/<\/?[A-Za-z][^>\n]*>|\]\([^)\n]*\)|\]\[[^\]\n]*\]/g, false);
+  return id;
+}
+function markSentences(md, at, linesOnly = false) {
+  const prot = mdProtected(md), out = [];
+  let pos = 0, fence = "";
   for (const line of md.split("\n")) {
-    const f = line.match(/^\s{0,3}(```|~~~)/);
+    const f = line.match(/^\s*(?:(?:[-*+]|\d{1,9}[.)])\s+|>\s?)*(`{3,}|~{3,})/);
     let s = line;
-    if (fence) { if (f && f[1] === fence) fence = ""; } else if (f) fence = f[1];
-    else {
-      if (!math && !/^\s*(<|([-*_=]\s*){3,}$|\|?[\s:|]*-[\s:|-]*$)/.test(line)) {
-        const pre = line.match(/^\s*(?:(?:[-*+]|\d{1,3}[.)])\s+(?:\[[ xX]\]\s+)?|#{1,6}\s+|>\s?|\|\s*)*/)[0].length;
-        const skip = [...line.matchAll(/`[^`]*`?|\$\$.*?(?:\$\$|$)|\$[^$]*\$|\[\[.*?(?:\]\]|$)|<\/?[A-Za-z][^>]*>?|\]\([^)]*\)?/g)]
-          .map((m) => [m.index, m.index + m[0].length]);
-        const spots = /\S/.test(line[pre] || "") ? [pre] : [];
-        for (const m of line.matchAll(/[.!?]["')\]]*[ \t]+(?=\S)/g)) {
-          const i = m.index + m[0].length;
-          if (i > pre && !skip.some(([a, b]) => i > a && i < b)) spots.push(i);
-        }
-        let k = 0;
-        s = "";
-        for (const i of spots) { s += line.slice(k, i) + SNT_OPEN + (pos + i) + SNT_CLOSE; k = i; }
-        s += line.slice(k);
-      }
-      if ((line.match(/\$\$/g) || []).length % 2) math = !math;
+    if (fence) { if (f && f[1][0] === fence[0] && f[1].length >= fence.length) fence = ""; }
+    else if (f) fence = f[1];
+    else if (!/^\s*(<|([-*_=]\s*){3,}$|\|?[\s:|]*-[\s:|-]*$)|^\s{0,3}(=+|-+)\s*$|^\s{0,3}\[[^\]]+\]:/.test(line)) {
+      const pre = line.match(/^\s*(?:(?:[-*+]|\d{1,9}[.)])\s+(?:\[[ xX]\]\s+)?|#{1,6}\s+|>\s?|\|\s*)*/)[0].length;
+      const spots = [];
+      const add = (i) => {
+        i += line.slice(i).match(/^(\[#[A-Za-z][\w-]{0,40}\][ \t]*)*/)[0].length;   // after a cue (it goes with the space before it)
+        i += line.slice(i).match(/^[*_~]*/)[0].length;          // inside an emphasis opener, not before it
+        const g = pos + i;
+        if (i >= line.length || /\s/.test(line[i]) || (prot[g] && prot[g] === prot[g - 1])
+          || /^(www\.|https?:|[\w.+-]+@)/i.test(line.slice(i))) return;
+        if (spots[spots.length - 1] !== i) spots.push(i);
+      };
+      if (pre < line.length && (pre === 0 || /\s/.test(line[pre - 1]))) add(pre);
+      if (!linesOnly) for (const m of line.matchAll(/[.!?]["')\]]*[ \t]+(?=\S)/g)) if (m.index + m[0].length > pre) add(m.index + m[0].length);
+      let k = 0;
+      s = "";
+      for (const i of spots) { s += line.slice(k, i) + SNT_OPEN + (at + pos + i) + SNT_CLOSE; k = i; }
+      s += line.slice(k);
     }
     out.push(s);
     pos += line.length + 1;
   }
   return out.join("\n");
 }
-function spanSentences(box) {
-  let cur = null;
-  const MARK = /(\d+)/g;
+const BLOCK = "p, ul, ol, li, table, thead, tbody, tfoot, tr, td, th, caption, pre, div, blockquote, h1, h2, h3, h4, h5, h6, figure, details, summary, hr, dl, dd, dt, .katex-display";
+function spanSentences(box, start = null) {
+  let cur = start;
+  const inline = (n) => n && (n.nodeType === 3 || (n.nodeType === 1 && !n.matches(BLOCK)));
   const walk = (el) => {
     for (const n of [...el.childNodes]) {
       if (n.nodeType === 1) {
-        if (n.matches(".katex, .katex-display, pre, code, button.term, svg, .diagram")) {      // whole: no spans inside
+        if (n.matches(".katex, .katex-display, pre, code, button.term, svg, .diagram, summary")) {      // whole: no spans inside
           const w = document.createTreeWalker(n, NodeFilter.SHOW_TEXT);
-          while (w.nextNode()) if (w.currentNode.nodeValue.includes(SNT_OPEN)) w.currentNode.nodeValue = w.currentNode.nodeValue.replace(MARK, "");
-          if (cur != null && !n.matches("pre, svg, .diagram")) { n.classList.add("snt"); n.dataset.o = cur; }
+          while (w.nextNode()) if (w.currentNode.nodeValue.includes(SNT_OPEN)) w.currentNode.nodeValue = w.currentNode.nodeValue.replace(SNT_MARKS, "");
+          if (cur != null && !n.matches("pre, svg, .diagram, summary")) { n.classList.add("snt"); n.dataset.o = cur; }
         } else walk(n);
       } else if (n.nodeType === 3 && (cur != null || n.nodeValue.includes(SNT_OPEN))) {
         const bits = n.nodeValue.split(/(\d+)/);
-        if (bits.length === 1 && !/\S/.test(bits[0])) continue;      // (the space between blocks)
+        // (the space between blocks stays as it is; between words and inline elements it glows too)
+        if (bits.length === 1 && !/\S/.test(bits[0]) && !(inline(n.previousSibling) && inline(n.nextSibling))) continue;
         const out = [];
         bits.forEach((b, i) => {
           if (i % 2) cur = +b;
-          else if (b) out.push(cur == null || !/\S/.test(b) ? b : h("span", { class: "snt", "data-o": cur }, b));
+          else if (b) out.push(cur == null || (!/\S/.test(b) && bits.length > 1) ? b : h("span", { class: "snt", "data-o": cur }, b));
         });
         n.replaceWith(...out);
       }
@@ -1586,7 +1661,7 @@ function spanSentences(box) {
   walk(box);
   for (const el of box.querySelectorAll("[alt], [title]")) for (const a of ["alt", "title"]) {      // (an image's words)
     const v = el.getAttribute(a);
-    if (v && v.includes(SNT_OPEN)) el.setAttribute(a, v.replace(MARK, ""));
+    if (v && v.includes(SNT_OPEN)) el.setAttribute(a, v.replace(SNT_MARKS, ""));
   }
 }
 
@@ -1603,7 +1678,7 @@ function inlineDrawings(c) {
   $$(".svg-box[data-src]", c).forEach((fig) => {
     const img = $("img", fig), svg = img && inlineSvg(fig.dataset.src);
     if (!svg) return;
-    if (img.clientWidth) svg.style.width = `${img.clientWidth}px`;
+    if (img.clientWidth && !fig.closest(".ans-draw")) { svg.style.width = "100%"; svg.style.maxWidth = `${img.clientWidth}px`; }
     img.replaceWith(svg);
   });
 }
@@ -1746,7 +1821,7 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
     if (sp) sp.feed(t);
     fed = acc.length;
     cost = performance.now() - t0;
-    if (follow) sc.scrollTop = sc.scrollHeight;
+    if (follow && !speaking()) sc.scrollTop = sc.scrollHeight;
   };
   // The thread was drawn again (scope switch, Read, the panel reopened…): the question and its answer so far go
   // back at its end (the same element, so its voice and glow carry on).
@@ -1777,24 +1852,24 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
     d.chat = chat;
     if (!d.asked.includes(n)) d.asked.push(n);
     scrollOn(null);
-    if (APP.deck !== d) return;
+    if (!sameDeck(APP.deck, d)) { ans.end(r.message.text); return; }     // (another deck: its voice was stopped on leaving)
+    if (APP.deck !== d) { APP.deck.chat = chat; APP.deck.asked = [...new Set([...(APP.deck.asked || []), ...d.asked])]; }
     // Not in the panel any more (New chat, practice): the newest question draws the panel from the chat; an older
     // one never redraws over it (its answer is in the chat for the next redraw).
     if (!wait.isConnected) { if (seq === askSeq) drawThread(); return; }
     // Swap in just the finished answer; the rest of the thread stays as it is.
-    if (!$(".chat-bar", th)) th.prepend(chatBar(chat));      // the chat's first answer
+    if (!$(".chat-bar", th)) { th.prepend(chatBar(chat)); pinBelowBar(th); }      // the chat's first answer
     wait.remove();
     // Once all of it shows (now, or when the voice is done), the finished answer takes its place, drawings in the text.
     ans.settle = () => {
-      const t = ans.root.closest(".thread"), f = t && t.scrollHeight - t.scrollTop - t.clientHeight < 80;
+      const t = ans.root.closest(".thread"), f = t && (t.scrollHeight - t.scrollTop - t.clientHeight < 80 || ans.following());
       if (ans.root.isConnected) ans.root.replaceWith(answerEl(r.message, seq === askSeq));
       if (f) bottom(t);
     };
-    if (speaking()) {        // still being read: ■ Stop under it meanwhile
-      const tools = answerTools(r.message, seq === askSeq);
-      ans.root.append(...tools);
-      VOICE.playBtn = tools.find((x) => x.classList?.contains("play"));
+    if (speaking()) {        // still being read: only ■ Stop under it meanwhile (the rest comes when it settles)
+      VOICE.playBtn = answerTools(r.message, false).find((x) => x.classList?.contains("play"));
       VOICE.playBtn.textContent = "■ Stop";
+      ans.root.append(VOICE.playBtn);
     }
     ans.end(r.message.text);
     if (!speaking() && follow) bottom(th);

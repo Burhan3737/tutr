@@ -266,7 +266,7 @@ def test_engine_turns():
         turn = lambda system, q: E._chat(key, None, system, q, "m", False, "s-old", lambda k, d: None)
         a = asyncio.ensure_future(turn("topic A", "QA"))
         await asyncio.sleep(0.1)
-        if warm:        # Board view opened on deck B while deck A's answer is still coming
+        if warm:        # Voice chosen on deck B while deck A's answer is still coming
             await E._warm(key, None, "topic B", "m", False, "s-old")
         else:
             await turn("topic B", "QB")

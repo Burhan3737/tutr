@@ -253,7 +253,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _post(self, path, req):
         model = req.get("model") if req.get("model") in T.MODELS else T.DEFAULT_MODEL
         web = not req.get("slides_only")
-        if path == "/api/voice/warm":        # Board view opened (or dictation started): load the speech models now
+        if path == "/api/voice/warm":        # Voice chosen (or dictation started): load the speech models now
             V.warm()
             c = self._course(req.get("course"))
             if c and L.deck(c, str(req.get("tag") or "")):     # and open the course's conversation, if it says which deck

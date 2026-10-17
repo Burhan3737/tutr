@@ -461,7 +461,7 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=Fa
 
 
 def warm_chat(cdir, tag, model, web):
-    """Open the course's chat client before the first question (Board view opening): no turn is sent. A course
+    """Open the course's chat client before the first question (Voice chosen): no turn is sent. A course
     with no chat yet gets its id reserved, so the next new chat uses the client opened here."""
     with _course_lock(cdir):
         chat_id = current_chat(cdir)
