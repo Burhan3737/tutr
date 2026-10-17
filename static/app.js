@@ -1170,7 +1170,13 @@ function drawThread() {
 // The same deck, even when it was fetched again (a citation chip, the deck reopened).
 const sameDeck = (a, b) => !!a && !!b && a.course === b.course && a.tag === b.tag;
 // An answer's pinned drawing sticks just under the chat bar (--pin: the bar's height), so the bar stays in view.
-const pinBelowBar = (th) => th.style.setProperty("--pin", `${$(".chat-bar", th)?.offsetHeight || 0}px`);
+const PIN_RO = new ResizeObserver((es) => { for (const e of es) e.target.parentElement?.style.setProperty("--pin", `${e.target.offsetHeight}px`); });
+function pinBelowBar(th) {
+  const bar = $(".chat-bar", th);
+  th.style.setProperty("--pin", `${bar?.offsetHeight || 0}px`);
+  PIN_RO.disconnect();
+  if (bar) PIN_RO.observe(bar);       // (and again whenever its height changes)
+}
 
 // The deck a saved question is about: older ones carry none (the chat's own deck), and `deck: true` once meant Whole deck.
 const msgDeck = (m, chat) => (typeof m.deck === "string" ? m.deck : chat.deck) || "";
@@ -1261,6 +1267,8 @@ function answerView(course, { paced = false } = {}) {
   const shownTo = () => (all || !paced ? acc.length : Math.min(upto, acc.length));
   const write = (md, at = taken) => { if (md.trim()) done.append(...cueMd(md, course, at).childNodes); };
   const paint = () => {
+    const was = said && $(".snt.spoken", root);
+    if (was) track = inThread(was);       // (scrolled away from it: stay there; back on it: follow again)
     for (const m of acc.matchAll(CUE)) st.named.add(m[1]);      // first: a part drawn now must know it is named
     const lim = shownTo(), final = ended && lim >= acc.length;
     tail.replaceChildren();
@@ -1292,7 +1300,7 @@ function answerView(course, { paced = false } = {}) {
           if (!open) open = svgStream();
           if (nl > 0 && open.feed(block.slice(nl + 1), got)) {
             open.el = draw.appendChild(h("div", { class: "ans-fig" }, open.fig));
-            drawn = fitDrawings(draw).then(() => { cues(); keep(); });
+            drawn = fitDrawings(draw).then(cues);
           }
         } else if (/mermaid/.test(block.slice(0, nl < 0 ? 20 : nl))) loadMermaid().catch(() => {});   // it loads meanwhile
         if (final) {           // never closed: what was drawn of it stays, otherwise its source is text
@@ -1313,7 +1321,7 @@ function answerView(course, { paced = false } = {}) {
         const fig = h("div", { class: "ans-fig" }, ...renderMd(src, course).childNodes);
         if (el) { fresh = fresh.filter((n) => !el.contains(n)); el.replaceWith(fig); } else draw.append(fig);
         el = fig;
-        drawn = fitDrawings(draw).then(() => { cues(); keep(); });       // (inlines the svg at once; Mermaid draws later)
+        drawn = fitDrawings(draw).then(cues);       // (inlines the svg at once; Mermaid draws later)
         $$(".cue-svg", fig).forEach((s) => [...s.children].forEach((n) => { if (n.localName !== "defs") got(n); }));
       }
       open = null;
@@ -1325,7 +1333,7 @@ function answerView(course, { paced = false } = {}) {
     keep();
   };
   // The sentence being said stays in view (below the pinned drawing) while the student follows it.
-  let track = true;
+  let track = true;     // (declared here, used by paint, revealTo and glow)
   const keep = () => { const sp = said && track && $(".snt.spoken", root); if (sp && root.isConnected) keepInView(sp); };
   // Which parts show and which are lit, from the text revealed so far (while this answer is building its drawing).
   const cues = () => {
@@ -1546,6 +1554,7 @@ function cueMd(md, course, at = 0) {
     if (!same(box, plain)) { box = plain; start = at; }
   }
   spanSentences(box, start);
+  if (start != null) { cueBlocks(md, course, box); return box; }
   // A cue belongs to the sentence it is in: its paragraph (or item) carries it.
   const snts = $$(".snt", box).map((el) => [+el.dataset.o, el]);
   for (const m of md.matchAll(CUE)) {
@@ -1559,6 +1568,19 @@ function cueMd(md, course, at = 0) {
     if (blk && box.contains(blk)) blk.dataset.cues = `${blk.dataset.cues || ""} ${m[1]}`.trim();
   }
   return box;
+}
+// Cues on their paragraphs without sentence marks: rendered as markers, each marker's block (by its place among
+// the blocks) carries its cue in box, the same text rendered plain.
+const CUE_BLOCK = "p, li, h1, h2, h3, h4, h5, h6, td, th, blockquote, dd";
+function cueBlocks(md, course, box) {
+  const ids = [];
+  const marked = renderMd(md.replace(/[ \t]?\[#([A-Za-z][\w-]{0,40})\]/g, (_, id) => `\uE000${ids.push(id) - 1}\uE001`), course);
+  const from = $$(CUE_BLOCK, marked), to = $$(CUE_BLOCK, box);
+  const walk = document.createTreeWalker(marked, NodeFilter.SHOW_TEXT);
+  while (walk.nextNode()) for (const m of walk.currentNode.nodeValue.matchAll(/\uE000(\d+)\uE001/g)) {
+    const blk = to[from.indexOf(walk.currentNode.parentElement.closest(CUE_BLOCK))] || to[0];
+    if (blk) blk.dataset.cues = `${blk.dataset.cues || ""} ${ids[+m[1]]}`.trim();
+  }
 }
 // Finished answers are rendered once and reused, like renderMdCached.
 const CUE_CACHE = new Map();
@@ -1588,7 +1610,8 @@ function mdProtected(md) {      // an id per character: 0, or the code / term / 
     let out = "", last = 0;
     for (const m of t.matchAll(re)) {
       const a = m.index + (m.groups?.pre?.length || 0), b = m.index + m[0].length;
-      id.fill(++n, a, b);
+      n++;
+      for (let i = a; i < b; i++) if (!id[i]) id[i] = n;       // (inside an earlier range: it stays that range)
       if (!fill) continue;
       out += t.slice(last, a) + (m.groups?.keep != null ? `xx${m.groups.keep}xx` : "x".repeat(b - a));
       last = b;
@@ -1659,9 +1682,8 @@ function spanSentences(box, start = null) {
     }
   };
   walk(box);
-  for (const el of box.querySelectorAll("[alt], [title]")) for (const a of ["alt", "title"]) {      // (an image's words)
-    const v = el.getAttribute(a);
-    if (v && v.includes(SNT_OPEN)) el.setAttribute(a, v.replace(SNT_MARKS, ""));
+  for (const el of box.querySelectorAll("*")) for (const a of el.attributes) {      // (an image's words, a term, a link)
+    if (a.value.includes(SNT_OPEN)) a.value = a.value.replace(SNT_MARKS, "");
   }
 }
 
