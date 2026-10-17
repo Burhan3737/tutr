@@ -171,6 +171,8 @@ document.addEventListener("click", (e) => {
 document.addEventListener("keydown", (e) => {
   if ((e.key === "Enter" || e.key === " ") && e.target.classList?.contains("spoiler")) { e.preventDefault(); e.target.classList.add("shown"); }
 });
+// A ⋯ menu closes on a click anywhere else.
+document.addEventListener("click", (e) => { $$("details.more-menu[open]").forEach((d) => { if (!d.contains(e.target)) d.open = false; }); });
 
 // Rendering Markdown with many formulas is the expensive part of a long chat, so finished answers
 // are rendered once and reused (as HTML) whenever the thread is drawn again.
@@ -312,7 +314,7 @@ function sidenavDeck(c, d, here) {
     for (const s of here.slides_text) {
       list.append(h("li", {}, h("a", { class: "sn-slide" + (s.n === APP.n ? " here" : ""), "data-n": String(s.n),
         href: `#c=${encodeURIComponent(c.id)}&d=${encodeURIComponent(d.tag)}&s=${s.n}`,
-        onclick: (e) => { if (APP.deck === here) { e.preventDefault(); APP.n = s.n; showSlide(); if (APP.tutor === "open") updateTutorWhere(); if (isPhone()) toggleNav(false); } } },
+        onclick: (e) => { if (APP.deck === here) { e.preventDefault(); APP.n = s.n; showSlide(); if (APP.tutor === "open") updateTutorWhere(); else updateComposeHint(); if (isPhone()) toggleNav(false); } } },
         h("span", { class: "sn-n" }, String(s.n)), s.title || `Slide ${s.n}`)));
     }
     out.push(list);
@@ -554,7 +556,6 @@ function showSlide() {
   const { prev: prevDeck, next: nextDeck } = neighbourDecks(d);
   if (end) {
     sm.classList.remove("portrait");
-    $("#tutor")?.classList.add("quiet-rail");
     sm.replaceChildren(h("div", { class: "end-card" },
       h("h2", {}, `End of ${d.tag}`),
       h("p", {}, d.state.solved ? "You've solved a problem from this deck." : "Solve one problem from it to finish the deck."),
@@ -563,7 +564,6 @@ function showSlide() {
         prevDeck ? h("a", { class: "link quiet", href: `#c=${encodeURIComponent(d.course)}&d=${encodeURIComponent(prevDeck.tag)}&s=${prevDeck.slides}` }, `‹ Previous deck: ${prevDeck.tag}`) : null,
         nextDeck ? h("a", { class: "link", href: `#c=${encodeURIComponent(d.course)}&d=${encodeURIComponent(nextDeck.tag)}&s=1` }, `Next deck: ${nextDeck.tag} ›`) : null)));
   } else {
-    $("#tutor")?.classList.remove("quiet-rail");
     let img = $(".slide-img", sm);
     if (!img) { img = h("img", { class: "slide-img", alt: "", draggable: "false" }); sm.replaceChildren(img); }
     img.style.opacity = ".001";
@@ -630,7 +630,7 @@ function step(k) {
   if (n === APP.n) return;
   APP.n = n;
   showSlide();
-  if (APP.tutor === "open") updateTutorWhere();
+  if (APP.tutor === "open") updateTutorWhere(); else updateComposeHint();
 }
 
 function toggleText(on = !APP.text) {
@@ -665,8 +665,12 @@ function setTutor(mode) {
   APP.tutor = mode;
   const t = $("#tutor");
   if (!t) return;
+  const fromBar = mode !== "closed" && $(".viewer")?.classList.contains("ask-closed");
   t.classList.toggle("open", mode === "open");
   t.classList.toggle("focus", mode === "focus");
+  $(".viewer")?.classList.toggle("ask-closed", mode === "closed");   // the ask bar under the slide
+  // Out of the ask bar, the panel slides in from the edge rather than shrinking from the bar's width.
+  if (fromBar && !isPhone()) { t.style.transition = "none"; t.style.width = "0px"; void t.offsetWidth; t.style.transition = ""; }
   // The panel's width is dragged by its left edge; practice mode remembers its own width.
   const saved = mode === "open" ? store.get("panelW", 0) : mode === "focus" ? store.get("focusW", 0) : 0;
   t.style.width = saved && !isPhone() ? `${clampPanel(saved)}px` : "";
@@ -838,26 +842,27 @@ function renderTutor() {
     stopSpeaking();
     cancelDictation();
     setTutor("closed");
-    t.replaceChildren(h("div", { class: "rail" },
-      h("button", { class: "primary", type: "button", onclick: () => startPracticeInPanel({ kind: tryKind() }), title: "A problem on this slide (or the whole deck, if chosen in the panel)" },
-        h("span", { class: "go", "aria-hidden": "true" }, "✎"), "Try one"),
-      h("button", { type: "button", onclick: () => { APP.tutor = "open"; renderTutor(); $("#ask-input")?.focus(); } },
-        h("span", { class: "glyph", "aria-hidden": "true" }, "💬"), "Ask"),
-      h("button", { type: "button", onclick: () => tutorAsk("example") },
-        h("span", { class: "glyph", "aria-hidden": "true" }, "▤"), "Example")));
+    // Closed, the tutor is an ask bar under the slide: sending opens the panel with the question in it.
+    t.replaceChildren(h("div", { class: "askbar" },
+      h("span", { class: "askbar-mark", "aria-hidden": "true" }, "✦"),
+      composeBox(composeHint(), (q, spoken) => tutorAsk(grilling() ? "grill_reply" : "ask", q, { spoken })),
+      h("button", { class: "icon-btn askbar-open", type: "button", title: "Open the tutor", "aria-label": "Open the tutor",
+        onclick: () => { APP.tutor = "open"; renderTutor(); $("#ask-input")?.focus(); } }, "⇤")));
     return;
   }
   setTutor("open");
   t.replaceChildren(h("div", { class: "panel" + (APP.view === "board" ? " boarded" : "") },
     h("div", { class: "panel-head" }, h("h2", {}, "Tutor"), h("span", { class: "muted small", id: "tutor-where" }), readTools(),
-      h("button", { class: "link quiet new-chat", type: "button", title: "Copy this chat as Markdown", onclick: () => copyChat(APP.deck.chat, APP.deck) }, "Copy chat"),
       h("button", { class: "link quiet new-chat", type: "button", id: "read-btn", title: "Reading view: the chat as full-width pages, like a PDF (R)", onclick: toggleReading }, "Read"),
-      h("button", { class: "link quiet new-chat", type: "button", title: "Print this chat, or save it as a PDF", onclick: () => printChat(APP.deck.chat, APP.deck) }, "PDF"),
       h("button", { class: "link quiet new-chat", type: "button", title: "Start a new chat in this course", onclick: newChat }, "New chat"),
+      h("details", { class: "more-menu" },
+        h("summary", { class: "icon-btn", title: "More", "aria-label": "More" }, "⋯"),
+        h("div", { class: "more-pop", role: "menu", onclick: (e) => { if (e.target.closest("button")) e.currentTarget.parentElement.open = false; } },
+          h("button", { type: "button", role: "menuitem", onclick: () => copyChat(APP.deck.chat, APP.deck) }, "Copy chat as Markdown"),
+          h("button", { type: "button", role: "menuitem", onclick: () => printChat(APP.deck.chat, APP.deck) }, "Print or save as PDF"))),
       h("button", { class: "icon-btn", type: "button", "aria-label": "Close the tutor", onclick: () => { APP.tutor = "closed"; renderTutor(); } }, "×")),
     h("div", { class: "panel-actions" },
       scopeSwitch(),
-      h("button", { class: "btn block", type: "button", onclick: () => startPracticeInPanel({ kind: tryKind() }) }, "Try one"),
       h("div", { class: "links" },
         h("button", { class: "link", type: "button", title: "Every concept in this deck at a glance (always the whole deck)", onclick: () => tutorAsk("map_deck") }, "Big picture"),
         h("button", { class: "link", type: "button", onclick: () => tutorAsk("example") }, "Worked example"),
@@ -1119,7 +1124,9 @@ function grilling() {
   const last = msgs[msgs.length - 1];
   return !!last && last.role === "a" && GRILL_MODES.includes(last.mode);
 }
-const composeHint = () => (grilling() ? "Your answer, or \"stuck\" / \"stop\"" : "Ask anything about this slide, or / for a mode");
+const composeHint = () => (grilling() ? "Your answer, or \"stuck\" / \"stop\""
+  : APP.tutor === "open" ? "Ask anything about this slide, or / for a mode"
+  : `Ask about slide ${Math.min(APP.n, APP.deck ? APP.deck.slides : APP.n)}… or / for a mode`);
 function updateComposeHint() {
   const ta = $("#ask-input");
   if (ta) { ta.placeholder = composeHint(); ta.setAttribute("aria-label", ta.placeholder); }
@@ -1137,7 +1144,7 @@ function drawThread() {
   const msgs = APP.deck.chat ? APP.deck.chat.messages : [];
   if (APP.deck.chat && msgs.length) th.append(chatBar(APP.deck.chat));
   if (!msgs.length && !TURNS.size) {
-    th.append(h("p", { class: "empty" }, "Ask anything about this slide, or tap Try one to practise it."));
+    th.append(h("p", { class: "empty" }, "Ask anything about this slide, or type / for a mode."));
     const earlier = APP.deck.chats || [];
     if (earlier.length) th.append(h("div", { class: "earlier" }, h("p", { class: "empty" }, "Earlier chats in this course:"),
       ...earlier.map((c) => h("button", { class: "link", type: "button", onclick: () => openChat(c.id) }, c.starred ? `★ ${c.title}` : c.title))));
@@ -1918,14 +1925,11 @@ function endCues() { if (VOICE.cue) { VOICE.cue = null; applyCues(); } }
 
 // ------------------------------------------------------------ dictation
 // 🎙 next to Ask: speak a question, and what the hub heard is typed into the box to check and edit before sending.
-// Nothing is sent until Ask.
-// While you talk, the words so far appear in the box every ~1.5 s as a draft (one request at a time, a sequence
-// number drops a late reply); stopping replaces the draft with one pass over the whole clip. `before`/`after` are
-// the text either side of the cursor when dictation began, so they stay untouched. `spoken` marks the question
-// as dictated when it is sent.
-const DICT = { rec: null, stream: null, chunks: [], gen: 0, timer: 0, state: "idle", tick: 0, seq: 0, busy: false,
-  before: "", after: "", last: "", draft: "", spoken: false, spaceHeld: false };
-const PARTIAL_MS = 1500;
+// Nothing is sent until Ask. The clip is written down in one pass when you stop (a live draft re-read the whole
+// clip every 1.5 s and made the final pass wait its turn). `before`/`after` are the text either side of the cursor
+// when dictation began, so they stay untouched. `spoken` marks the question as dictated when it is sent.
+const DICT = { rec: null, stream: null, chunks: [], gen: 0, timer: 0, state: "idle",
+  before: "", after: "", last: "", spoken: false, spaceHeld: false };
 const DICT_TITLE = { idle: "Dictate: speak your question, then edit it before sending (Ctrl+Space)", listening: "Stop and type out what you said (Ctrl+Space)",
   hearing: "Writing down what you said…" };
 
@@ -1943,7 +1947,7 @@ function dictShow(b = $("#dict-mic"), ta = $("#ask-input")) {
   b.setAttribute("aria-pressed", String(st === "listening"));
   b.classList.toggle("on", st === "listening");
   b.disabled = st === "hearing";
-  if (ta) ta.readOnly = st !== "idle";              // the draft is being rewritten: typing would be overwritten
+  if (ta) ta.readOnly = st !== "idle";              // what you said goes in at the cursor: typing meanwhile would be lost
   if (ta) ta.placeholder = st === "listening" ? "Listening… tap ■ or Ctrl+Space to stop" : st === "hearing" ? "Writing down what you said…" : composeHint();
 }
 function dictSet(state) { DICT.state = state; dictShow(); }
@@ -1967,13 +1971,12 @@ async function dictTap() {
   try {
     const rec = new MediaRecorder(stream), chunks = [];
     rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
-    rec.start(250);                                 // chunks arrive as we go, for the live draft
-    // Where the draft goes: at the cursor, replacing a selection (it keeps its place after tapping 🎙 takes the focus).
+    rec.start();
+    // Where the words go: at the cursor, replacing a selection (it keeps its place after tapping 🎙 takes the focus).
     const ta = $("#ask-input"), at = ta ? ta.selectionStart ?? ta.value.length : 0;
-    Object.assign(DICT, { rec, stream, chunks, seq: 0, busy: false, draft: "",
+    Object.assign(DICT, { rec, stream, chunks,
       last: ta ? ta.value : "", before: ta ? ta.value.slice(0, at) : "", after: ta ? ta.value.slice(ta.selectionEnd ?? at) : "" });
     DICT.timer = setTimeout(() => { if (DICT.rec === rec) dictFinish(); }, MAX_RECORDING_MS);
-    DICT.tick = setInterval(() => dictPartial(rec, tok), PARTIAL_MS);
   } catch {
     stream.getTracks().forEach((t) => t.stop());
     dictSet("idle");
@@ -1985,57 +1988,39 @@ async function dictFinish() {
   const { rec, stream, chunks, gen: tok } = DICT;
   if (!rec) { DICT.gen++; return dictSet("idle"); }   // tapped again before the mic had started: don't start it
   clearTimeout(DICT.timer);
-  clearInterval(DICT.tick);
-  DICT.seq++;                                       // a draft still being written down is now stale
   Object.assign(DICT, { rec: null, stream: null, chunks: [] });
   dictSet("hearing");
   const d = APP.deck;
-  let text = "", msg = "Didn't catch that. Tap 🎙 and try again.", failed = false;
+  let text = "", msg = "Didn't catch that. Tap 🎙 and try again.";
   try {
     if (rec.state !== "inactive") await new Promise((res) => { rec.onstop = res; rec.onerror = res; rec.stop(); setTimeout(res, 3000); });   // never stuck on "…"
     const wav = await toWav16k(new Blob(chunks, { type: rec.mimeType }));
     if (tok !== DICT.gen) return;
     text = (await dictTranscribe(d, wav)).trim();
-  } catch (e) { failed = true; if (e && e.message && !(e instanceof DOMException)) msg = e.message; } finally {   // a recording that won't decode: "didn't catch that"
+  } catch (e) { if (e && e.message && !(e instanceof DOMException)) msg = e.message; } finally {   // a recording that won't decode: "didn't catch that"
     stream.getTracks().forEach((t) => t.stop());
   }
   if (tok !== DICT.gen) return;
   dictSet("idle");
   const ta = $("#ask-input");
-  const keep = text || DICT.draft;                  // no final text: the last draft stays
-  if (!keep) toast(msg);
-  else if (!text && failed) toast("The last words may be missing: the text so far is in the box.");
-  if (keep && ta && APP.deck === d) dictDraft(keep, true);     // the whole clip replaces the draft; nothing is sent
+  if (!text) return toast(msg);
+  if (ta && APP.deck === d) dictInsert(text);       // into the box to check; nothing is sent
 }
 
 const dictTranscribe = async (d, wav) => (await api("/api/voice/transcribe",
   { course: d.course, tag: d.tag, n: Math.min(APP.n, d.slides), scope: APP.scope, audio: await blobBase64(wav) })).text;
 
-// Put `text` in the box between `before` and `after`: the draft region is replaced each time. `final` ends with the
-// cursor after it and the focus in the box.
-function dictDraft(text, final = false) {
+// Put `text` in the box between `before` and `after`, with the cursor after it and the focus in the box.
+function dictInsert(text) {
   const ta = $("#ask-input");
   if (!ta) return;
   const { before, after } = DICT;
   const ins = (before && !/\s$/.test(before) ? " " : "") + text + (after && !/^\s/.test(after) ? " " : "");
   DICT.spoken = true;
-  DICT.draft = text;
   ta.value = DICT.last = before + ins + after;
-  if (final) ta.focus();
+  ta.focus();
   ta.setSelectionRange(before.length + ins.length, before.length + ins.length);
   ta.dispatchEvent(new Event("input"));            // resize the box and light up Ask
-}
-
-// One draft at a time: a tick while the last request is still out is skipped, and a reply older than the newest
-// request (or than the final pass) is dropped. An empty result changes nothing.
-async function dictPartial(rec, tok) {
-  if (DICT.busy || DICT.rec !== rec || tok !== DICT.gen || !DICT.chunks.length) return;
-  const seq = ++DICT.seq, d = APP.deck;
-  DICT.busy = true;
-  try {
-    const text = (await dictTranscribe(d, await toWav16k(new Blob(DICT.chunks.slice(), { type: rec.mimeType })))).trim();
-    if (text && seq === DICT.seq && tok === DICT.gen && DICT.rec === rec && APP.deck === d) dictDraft(text);
-  } catch { /* the next tick or the final pass tries again */ } finally { if (tok === DICT.gen) DICT.busy = false; }
 }
 
 // Leaving the deck, closing the panel, starting practice: stop listening and drop what was recorded.
@@ -2043,7 +2028,6 @@ function cancelDictation() {
   DICT.gen++;
   DICT.spaceHeld = false;
   clearTimeout(DICT.timer);
-  clearInterval(DICT.tick);
   const rec = DICT.rec;
   if (rec) {
     rec.onstop = rec.onerror = rec.ondataavailable = null;
@@ -2295,7 +2279,7 @@ function stopSpeaking() {
 // Hold Space to dictate into the Ask box (not while typing in a field or on a button, nor where Space scrolls: the
 // Read view, the thread, the board).
 document.addEventListener("keydown", (e) => {
-  if (e.key !== " " || e.ctrlKey || e.metaKey || e.altKey || APP.tutor !== "open" || !$("#dict-mic") || !micOk() || $(".viewer.reading")
+  if (e.key !== " " || e.ctrlKey || e.metaKey || e.altKey || APP.tutor === "focus" || !$("#dict-mic") || !micOk() || $(".viewer.reading")
     || e.target.closest("input, textarea, select, button, a, summary, [contenteditable], .spoiler, #thread, #board, .side-sheet")) return;
   e.preventDefault();
   if (e.repeat || DICT.spaceHeld) return;
@@ -2309,7 +2293,7 @@ document.addEventListener("keyup", (e) => {
   if (DICT.state === "listening") dictFinish();      // let go before the mic started: dictFinish cancels the start
 });
 
-// Ctrl+Space dictates from anywhere, the Ask box included (opening the tutor if it's closed): press to start and
+// Ctrl+Space dictates from anywhere, the Ask box included (into the ask bar while the tutor is closed): press to start and
 // again to stop, or hold it and let go.
 let ctrlSpaceAt = 0;
 document.addEventListener("keydown", (e) => {
@@ -2318,7 +2302,7 @@ document.addEventListener("keydown", (e) => {
   if (e.repeat) return;
   if (DICT.state === "listening") return dictFinish();
   if (DICT.state !== "idle") return;
-  if (APP.tutor !== "open" || !$("#dict-mic")) { APP.tutor = "open"; renderTutor(); }
+  if (!$("#dict-mic")) { APP.tutor = "open"; renderTutor(); }   // the ask bar (tutor closed) has its own mic
   ctrlSpaceAt = Date.now();
   dictTap();
 });
@@ -2838,6 +2822,13 @@ document.addEventListener("keydown", (e) => {
   if (!typing && e.key === "[" && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); toggleNav(); return; }
   if (typing || !$(".viewer") || APP.tutor === "focus") return;
   if (e.key.toLowerCase() === "r" && !e.ctrlKey && !e.metaKey && !e.altKey && APP.tutor === "open") return toggleReading();
+  if (e.key === "/" && !e.ctrlKey && !e.metaKey && !e.altKey && $("#ask-input")) {   // jump to the Ask box, modes listed
+    e.preventDefault();
+    const ta = $("#ask-input");
+    ta.focus();
+    if (!ta.value) { ta.value = "/"; ta.dispatchEvent(new Event("input")); }
+    return;
+  }
   if ($(".viewer.reading")) {   // the slide is hidden: arrows and Page keys scroll the chat instead
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key === "+" || e.key === "=") zoomReading(1);

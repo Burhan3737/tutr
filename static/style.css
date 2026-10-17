@@ -346,17 +346,37 @@ h1.page-title { font-size: 28px; line-height: 34px; font-weight: 600; margin: 0 
 }
 .earlier { display: flex; flex-direction: column; align-items: flex-start; margin-top: 8px; }
 .earlier .link { font-weight: 400; min-height: 32px; text-align: left; }
-.tutor.quiet-rail .rail .go { background: none; color: var(--accent); box-shadow: inset 0 0 0 1.5px var(--accent); }
 .tutor.focus { width: 50%; }
-.rail { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 12px 0; height: 100%; }
-.rail button { width: 60px; min-height: 60px; border: 0; background: none; border-radius: var(--r); cursor: pointer;
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; font-size: 12px; line-height: 16px;
-  color: var(--text-2); }
-.rail button:hover { background: var(--sunken); color: var(--text); }
-.rail .go { width: 44px; height: 44px; border-radius: 50%; background: var(--accent); color: var(--on-accent); display: grid; place-items: center; font-size: 18px; }
-.rail .glyph { font-size: 20px; height: 24px; }
-.rail .primary { color: var(--text); font-weight: 600; }
 .panel { position: relative; display: flex; flex-direction: column; height: 100%; min-width: 0; }
+/* Closed, the tutor is an ask bar under the slide: a pill with the Ask box, its mic and send, and ⇤ to open the panel.
+   Laptop: it floats over the bottom of the stage (the counter moves right to make room); phone: it's the bottom bar. */
+.askbar { position: relative; display: flex; align-items: flex-end; gap: 2px; padding: 4px 4px 4px 14px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 24px; box-shadow: 0 2px 10px rgba(20,18,26,.08);
+  transition: box-shadow .2s var(--ease); }
+.askbar:focus-within { box-shadow: 0 0 0 2px var(--accent), 0 6px 20px rgba(47,91,183,.18); }
+.askbar-mark { align-self: center; color: var(--accent); font-size: 15px; }
+.askbar .compose { flex: 1; min-width: 0; position: static; border: 0; padding: 0; gap: 4px; }
+.askbar .compose textarea { min-height: 40px; border: 0; background: none; padding: 9px 6px; outline: none; }
+.askbar .compose textarea::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.askbar .slash-menu { left: 0; right: 0; bottom: calc(100% + 8px); }
+.askbar .compose .btn { min-height: 40px; border-radius: 999px; padding: 0 16px; }
+.askbar .compose .btn.ghost { box-shadow: none; opacity: .6; }
+.askbar .compose .dictate { width: 40px; padding: 0; font-size: 16px; }
+.askbar-open { width: 40px; height: 40px; font-size: 18px; }
+@media (min-width: 761px) {
+  .viewer.ask-closed .tutor { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); z-index: 4;
+    width: clamp(300px, calc(100% - 460px), 600px); background: none; border: 0; transition: none; }
+  .viewer.ask-closed .stage-foot { height: 64px; }
+  .viewer.ask-closed .stage-foot .counter { position: absolute; right: 150px; }
+}
+/* ⋯ in the panel's header: Copy chat and PDF. */
+.more-menu { position: relative; flex: none; }
+.more-menu > summary { list-style: none; width: 36px; height: 36px; font-size: 18px; }
+.more-menu > summary::-webkit-details-marker { display: none; }
+.more-pop { position: absolute; right: 0; top: calc(100% + 4px); z-index: 30; min-width: 210px; padding: 4px; background: var(--surface);
+  border: 1px solid var(--line); border-radius: var(--r); box-shadow: var(--shadow-pop); display: flex; flex-direction: column; }
+.more-pop button { border: 0; background: none; text-align: left; padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+.more-pop button:hover { background: var(--sunken); }
 /* Side questions: a sheet over the lower two thirds of the panel; the chat above keeps its place. */
 .side-sheet { position: absolute; left: 0; right: 0; bottom: 0; height: 66%; z-index: 5; display: flex; flex-direction: column;
   background: var(--surface); border-top: 1px solid var(--line-strong); border-radius: 14px 14px 0 0;
@@ -376,10 +396,12 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 @media print { button.term { text-decoration: none; } }
 .sel-ask { position: fixed; z-index: 50; height: 32px; padding: 0 12px; border: 0; border-radius: 999px; background: var(--text); color: var(--surface);
   font-family: inherit; font-size: 13px; font-weight: 600; box-shadow: 0 4px 14px rgba(20,18,26,.25); cursor: pointer; }
-.panel-head { display: flex; align-items: center; gap: 4px; padding: 6px 8px 6px 20px; border-bottom: 1px solid var(--line); min-height: 52px; }
-.panel-head h2 { flex: 1; font-size: 15px; font-weight: 600; margin: 0; }
-.panel-actions { padding: 16px 20px 8px; display: flex; flex-direction: column; gap: 0; }
-.panel-actions .links { display: flex; gap: 12px; flex-wrap: wrap; }
+.panel-head { display: flex; align-items: center; gap: 4px; padding: 6px 8px 6px 18px; border-bottom: 1px solid var(--line); min-height: 52px; }
+.panel-head h2 { flex: none; font-size: 15px; font-weight: 600; margin: 0; }
+#tutor-where { flex: 1; min-width: 0; margin-left: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.panel-actions { padding: 12px 18px 6px; display: flex; flex-direction: column; gap: 0; }
+.panel-actions .links { display: flex; gap: 0 14px; flex-wrap: wrap; }
+.panel-actions .links .link { min-height: 30px; font-size: 14px; font-weight: 500; padding: 0; }
 .thread { flex: 1; min-height: 0; overflow: auto; padding: 8px 20px 16px; }
 /* Text | Board. Board view: the current answer on a board under the thread, its drawings pinned on top while
    the text scrolls under them; an empty strip until there is one. The Read view shows it in the thread instead. */
@@ -398,7 +420,6 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   scrollbar-width: thin; border-bottom: 1px solid var(--line); }
 .panel.boarded .panel-actions .scope-switch { flex: none; margin: 0; }
 .panel.boarded .panel-actions .scope-switch button { padding: 0 10px; white-space: nowrap; min-height: 28px; }
-.panel.boarded .panel-actions .btn.block { width: auto; flex: none; min-height: 34px; padding: 0 14px; font-size: 14px; }
 .panel.boarded .panel-actions .links { flex-wrap: nowrap; flex: none; gap: 2px; }
 .panel.boarded .panel-actions .link { min-height: 34px; white-space: nowrap; font-size: 14px; padding: 0 6px; }
 .panel.boarded .thread { flex: 2 1 0; min-height: 72px; }
@@ -577,13 +598,6 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   .tutor { height: 64px; flex: none; }
   .tutor.open, .tutor.focus { position: fixed; left: 0; right: 0; bottom: 0; top: 56px; height: auto; z-index: 40;
     border-radius: var(--r-lg) var(--r-lg) 0 0; }
-  .rail { flex-direction: row; justify-content: center; padding: 10px 16px; gap: 12px; }
-  .rail .primary { flex: 1; flex-direction: row; min-height: 44px; background: var(--accent); color: var(--on-accent); border-radius: var(--r); font-size: 15px; }
-  .rail .primary:hover { background: var(--accent-hover); color: var(--on-accent); }
-  .rail .primary .go { display: none; }
-  .rail button:not(.primary) { flex-direction: row; width: auto; min-height: 44px; padding: 0 8px; font-size: 15px; color: var(--accent); font-weight: 600; }
-  .rail .glyph { display: none; }
-  .rail .more { display: none; }
   .practice { padding: 16px 16px 0; }
   .check-row { position: sticky; bottom: 0; background: var(--surface); padding: 8px 0 calc(8px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); }
   pre { white-space: pre-wrap; font-size: 13px; }
@@ -591,7 +605,6 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   .stage-foot { order: 2; }
   .tutor { box-shadow: none; }
   .tutor.open, .tutor.focus { box-shadow: var(--shadow-sheet); }
-  .rail { padding-bottom: calc(10px + env(safe-area-inset-bottom)); }
   .tutor:not(.open):not(.focus) { height: auto; }
   .session-bar { padding: 6px 12px 0; gap: 4px; }
   .session-bar .lbl { font-size: 11px; }
@@ -601,7 +614,6 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   .sn-deck, .sn-topic > summary { min-height: 44px; }
   .sn-slide { padding: 8px; }
   .nav-btn { margin-left: -12px; }
-  .rail .primary, .rail .primary:hover { color: var(--on-accent); }
 }
 .mob-arrows { display: none !important; gap: 4px; align-items: center; position: absolute; left: 50%; transform: translateX(-50%); }
 .mob-arrows button { width: 44px; height: 44px; border: 0; background: none; font-size: 22px; color: var(--text-2); }
@@ -630,7 +642,6 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   .viewer.ask-open .panel-actions::-webkit-scrollbar { display: none; }
   .viewer.ask-open .scope-switch { flex: none; margin: 0; }
   .viewer.ask-open .scope-switch button { padding: 0 10px; white-space: nowrap; min-height: 28px; }
-  .viewer.ask-open .panel-actions .btn.block { width: auto; flex: none; min-height: 34px; padding: 0 14px; font-size: 14px; }
   .viewer.ask-open .panel-actions .links { flex-wrap: nowrap; flex: none; gap: 2px; }
   .viewer.ask-open .panel-actions .link { min-height: 34px; white-space: nowrap; font-size: 14px; padding: 0 6px; }
   .viewer.ask-open .thread { padding: 4px 14px 12px; }
@@ -644,6 +655,12 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   .viewer.ask-open .side-sheet { height: 85%; }
   /* Board view under the slide: the thread and the board share what's left. */
   .panel.boarded .board { min-height: 120px; }
+  /* Tutor closed: the ask bar is the bottom bar. 16px stops iOS zooming the page when the box is focused. */
+  .viewer.ask-closed .askbar { margin: 8px 10px calc(8px + env(safe-area-inset-bottom)); }
+  .viewer.ask-closed .askbar .compose textarea { font-size: 16px; }
+  /* ⋯ opens as a sheet at the bottom (the header scrolls sideways, so a dropdown would be clipped). */
+  .more-pop { position: fixed; left: 12px; right: 12px; top: auto; bottom: calc(12px + env(safe-area-inset-bottom)); }
+  .more-pop button { padding: 12px; font-size: 15px; }
   /* Reading view still takes the whole screen. */
   .viewer.ask-open.reading .stage { display: none; }
 }
