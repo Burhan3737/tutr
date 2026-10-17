@@ -403,8 +403,7 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 .panel-actions .links { display: flex; gap: 0 14px; flex-wrap: wrap; }
 .panel-actions .links .link { min-height: 30px; font-size: 14px; font-weight: 500; padding: 0; }
 .thread { flex: 1; min-height: 0; overflow: auto; padding: 8px 20px 16px; }
-/* Text | Board. Board view: the current answer on a board under the thread, its drawings pinned on top while
-   the text scrolls under them; an empty strip until there is one. The Read view shows it in the thread instead. */
+/* Text | Voice: one chat; Voice reads answers aloud as they appear. */
 .ask-area { flex: none; border-top: 1px solid var(--line); }
 .ask-area .compose { border-top: 0; padding-top: 8px; }
 /* While an answer is read aloud (or the browser wouldn't play it): what's happening, Stop, voice and speed. */
@@ -414,50 +413,45 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   font: inherit; padding: 4px 6px; }
 .voice-row .link { font-size: 13px; min-height: 30px; }
 .view-switch { margin: 10px 16px 0; }
-/* Board view: the actions go on one sideways-scrolling row (as on a phone), so the thread keeps room for the newest
-   question and the board for the answer. */
-.panel.boarded .panel-actions { flex-direction: row; align-items: center; gap: 8px; padding: 6px 12px; overflow-x: auto;
-  scrollbar-width: thin; border-bottom: 1px solid var(--line); }
-.panel.boarded .panel-actions .scope-switch { flex: none; margin: 0; }
-.panel.boarded .panel-actions .scope-switch button { padding: 0 10px; white-space: nowrap; min-height: 28px; }
-.panel.boarded .panel-actions .links { flex-wrap: nowrap; flex: none; gap: 2px; }
-.panel.boarded .panel-actions .link { min-height: 34px; white-space: nowrap; font-size: 14px; padding: 0 6px; }
-.panel.boarded .thread { flex: 2 1 0; min-height: 72px; }
-/* An answer always gets room to be read: the thread above gives way first (down to its last question). */
-.board { flex: 3 1 0; min-height: clamp(140px, 35vh, 300px); overflow: auto; padding: 0 20px 12px; border-top: 1px solid var(--line-strong); }
-.board.empty { flex: none; min-height: 0; padding: 10px 20px; }
-.board-empty { margin: 0; color: var(--text-2); font-size: 13px; }
-.board-draw { position: sticky; top: 0; z-index: 1; padding-top: 8px; background: var(--surface); border-bottom: 1px solid var(--line); }
-.board-draw:empty { display: none; }
-.board-draw .diagram { margin: 0 0 8px; padding: 4px 8px; width: 100%; }
-.board-draw .mermaid-box svg { display: block; width: 100%; height: auto; max-width: 100% !important; margin: 0 auto; }
-.board-draw .svg-box img { width: 100%; height: auto; }
-.board-draw .svg-box svg { display: block; width: 100%; height: auto; margin: 0 auto; }
-.board-text { padding-top: 10px; }
-.board .copy-one { opacity: 1; }
-.on-board { margin: 0 0 4px; text-align: right; font-size: 13px; color: var(--text-2); }
-.viewer.reading .board { display: none; }
+/* An answer being written: its drawings are pinned at the top of the thread (above the chat bar) while its text
+   scrolls under them; capped by fitDrawings at 40% of the thread, so the text keeps the rest. Once it is finished
+   the drawings settle into their place in the text. */
+.thread > .ans.live { content-visibility: visible; }
+.ans-draw:empty { display: none; }
+.ans.live .ans-draw { position: sticky; top: -8px; z-index: 2; margin: 0 -20px 10px; padding: 8px 20px 0;
+  background: var(--surface); border-bottom: 1px solid var(--line); }
+.ans-draw .diagram { margin: 0 0 8px; padding: 4px 8px; width: 100%; }
+.ans-draw .mermaid-box svg { display: block; width: 100%; height: auto; max-width: 100% !important; margin: 0 auto; }
+.ans-draw .svg-box img { width: 100%; height: auto; }
+.ans-draw .svg-box svg { display: block; width: 100%; height: auto; margin: 0 auto; }
+.ans.live .copy-one { opacity: 1; }
+.viewer.reading .ans.live .ans-draw { position: static; margin: 0 0 10px; padding: 0; border: 0; }
+/* The sentence being read aloud glows (Voice, ▶ Play); never in the Read view or on paper. */
+.snt { border-radius: 3px; transition: background-color .25s var(--ease), box-shadow .25s var(--ease); }
+.snt.spoken { background: var(--accent-soft); box-shadow: 0 0 0 2px var(--accent-soft); -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+.viewer.reading .snt.spoken { background: none; box-shadow: none; }
 /* Cues: parts of a drawing appear as they're named; the one being talked about glows and the rest fade back. */
-.board-draw .cue-part, .board-draw .flowchart-link, .board-draw .edgeLabel { transition: opacity .45s var(--ease), filter .3s var(--ease); }
-.board-draw .cue-hide { opacity: 0 !important; }
+.ans .cue-part, .ans .flowchart-link, .ans .edgeLabel { transition: opacity .45s var(--ease), filter .3s var(--ease); }
+.ans .cue-hide { opacity: 0 !important; }
+.viewer.reading .ans .cue-hide { opacity: 1 !important; }      /* (the Read view shows every drawing whole) */
 /* Not a part inside the lit one either: fading it there would muddy the part being talked about. */
-.board-draw.cueing .cue-part:not(.cue-on):not(:has(.cue-on)):not(.cue-on *), .board-draw.cueing .cue-dim { opacity: .35; }
-.board-draw .cue-on { filter: drop-shadow(0 0 2px #e8a317) drop-shadow(0 0 6px #e8a317); }
-.board-draw .mermaid-box .cue-on :is(rect, circle, ellipse, polygon, path) { stroke: #e8a317 !important; stroke-width: 3px !important; }
+.ans.cueing .cue-part:not(.cue-on):not(:has(.cue-on)):not(.cue-on *), .ans.cueing .cue-dim { opacity: .35; }
+.ans .cue-on { filter: drop-shadow(0 0 2px #e8a317) drop-shadow(0 0 6px #e8a317); }
+.ans .mermaid-box .cue-on :is(rect, circle, ellipse, polygon, path) { stroke: #e8a317 !important; stroke-width: 3px !important; }
 /* Safari may skip filter on SVG groups: the lit part's outlines turn amber too (the inlined SVG has no inline styles). */
-.board-draw .cue-svg :is(.cue-on, .cue-on *):is(rect, circle, ellipse, polygon, path, line, polyline) { stroke: #e8a317; stroke-width: 3px; }
+.ans .cue-svg :is(.cue-on, .cue-on *):is(rect, circle, ellipse, polygon, path, line, polyline) { stroke: #e8a317; stroke-width: 3px; }
 /* Pen: a part just drawn is stroked on (penOn sets --len, its length) while its fill and text fade in. */
 @keyframes pen { from { stroke-dashoffset: var(--len); } to { stroke-dashoffset: 0; } }
 @keyframes pen-fill { from { fill-opacity: 0; } }
 @keyframes pen-fade { from { opacity: 0; } }
-.board-draw .pen { stroke-dasharray: var(--len); animation: pen .6s var(--ease) both, pen-fill .6s var(--ease) both; }
-.board-draw .pen-fade { animation: pen-fade .6s var(--ease) both; }
+.ans .pen { stroke-dasharray: var(--len); animation: pen .6s var(--ease) both, pen-fill .6s var(--ease) both; }
+.ans .pen-fade { animation: pen-fade .6s var(--ease) both; }
 /* A part drawn on as its cue reveals it is there at once: its stroke, not a fade, brings it in. */
-.board-draw .cue-part:is(.pen, .pen-fade) { transition: filter .3s var(--ease); }
-.board-text [data-cues] { cursor: pointer; }
+.ans .cue-part:is(.pen, .pen-fade) { transition: filter .3s var(--ease); }
+.ans [data-cues] { cursor: pointer; }
 @keyframes rec-pulse { 0% { box-shadow: 0 0 0 0 rgba(192, 57, 43, .5); } 70% { box-shadow: 0 0 0 14px rgba(192, 57, 43, 0); } 100% { box-shadow: 0 0 0 0 rgba(192, 57, 43, 0); } }
-@media (prefers-reduced-motion: reduce) { .compose .dictate.on { animation: none; } .board-draw * { transition: none !important; }
-  .board-draw :is(.pen, .pen-fade) { animation: none; stroke-dasharray: none; } }
+@media (prefers-reduced-motion: reduce) { .compose .dictate.on { animation: none; } .ans *, .snt { transition: none !important; }
+  .ans :is(.pen, .pen-fade) { animation: none; stroke-dasharray: none; } }
 .thread .empty { color: var(--text-2); font-size: 13px; }
 /* Your messages: right-aligned bubbles; the tutor's answers stay full width on the left. */
 .msg-q { width: fit-content; max-width: 85%; margin: 20px 0 10px auto; padding: 8px 12px;
@@ -653,8 +647,7 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   .viewer.ask-open .compose textarea { font-size: 16px; min-height: 44px; padding: 10px 12px; }
   .viewer.ask-open .compose .btn { min-height: 44px; }
   .viewer.ask-open .side-sheet { height: 85%; }
-  /* Board view under the slide: the thread and the board share what's left. */
-  .panel.boarded .board { min-height: 120px; }
+  .viewer.ask-open .ans.live .ans-draw { top: -4px; margin: 0 -14px 8px; padding: 4px 14px 0; }
   /* Tutor closed: the ask bar is the bottom bar. 16px stops iOS zooming the page when the box is focused. */
   .viewer.ask-closed .askbar { margin: 8px 10px calc(8px + env(safe-area-inset-bottom)); }
   .viewer.ask-closed .askbar .compose textarea { font-size: 16px; }
