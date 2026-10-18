@@ -477,6 +477,9 @@ def test_drawing_first_prompts():
     s = T.SYSTEM
     check("prompts: system prompt has the cue rule", "[#id]" in s and "before the text that explains it" in s)
     check("prompts: system prompt has the SVG viewBox rule", "viewBox on the opening <svg> tag" in s and "marker-end" in s)
+    check("prompts: spoken-line rule", "[say:" in s and "on its own line" in s)
+    check("prompts: spoken lines cover the visual cases", all(w in s for w in ("table", "$$", "code", "drawing", "arithmetic")))
+    check("prompts: spoken lines never read cells or symbols", "never read the cells" in s)
     ex = T.CHAT_PROMPTS["explain"]
     check("prompts: worked example's drawing comes before its steps",
           0 < ex.index("<one drawing") < ex.index("**Let's work through it:**"))
