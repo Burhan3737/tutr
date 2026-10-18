@@ -711,10 +711,8 @@ function keepPlace(change) {
 }
 
 function toggleReading() {
-  // The Read view shows every answer whole and unlit: the voice stops (Voice paces nothing there). ▶ Play pressed in
-  // the Read view still reads, without glow or lighting (playAnswer).
+  // The Read view is the same chat on a wider page: an answer being read aloud carries on, glowing as before.
   const on = !store.get("reading", false);
-  if (on) { stopSpeaking(); endCues(VOICE.lit); }
   const th = keepPlace(() => store.set("reading", on));
   if (th && $(".viewer.reading")) th.focus({ preventScroll: true });
 }
@@ -858,11 +856,11 @@ function renderTutor() {
     h("div", { class: "panel-head" }, h("h2", {}, "Tutor"), h("span", { class: "muted small", id: "tutor-where" }), readTools(),
       h("button", { class: "link quiet new-chat", type: "button", id: "read-btn", title: "Reading view: the chat as full-width pages, like a PDF (R)", onclick: toggleReading }, "Read"),
       h("button", { class: "link quiet new-chat", type: "button", title: "Start a new chat in this course", onclick: newChat }, "New chat"),
+      h("button", { class: "link quiet new-chat", type: "button", title: "Print the chat or save it as a PDF", onclick: () => printChat(APP.deck.chat, APP.deck) }, "Print"),
       h("details", { class: "more-menu" },
         h("summary", { class: "icon-btn", title: "More", "aria-label": "More" }, "⋯"),
         h("div", { class: "more-pop", role: "menu", onclick: (e) => { if (e.target.closest("button")) e.currentTarget.parentElement.open = false; } },
-          h("button", { type: "button", role: "menuitem", onclick: () => copyChat(APP.deck.chat, APP.deck) }, "Copy chat as Markdown"),
-          h("button", { type: "button", role: "menuitem", onclick: () => printChat(APP.deck.chat, APP.deck) }, "Print or save as PDF"))),
+          h("button", { type: "button", role: "menuitem", onclick: () => copyChat(APP.deck.chat, APP.deck) }, "Copy chat as Markdown"))),
       h("button", { class: "icon-btn", type: "button", "aria-label": "Close the tutor", onclick: () => { APP.tutor = "closed"; renderTutor(); } }, "×")),
     h("div", { class: "panel-actions" },
       scopeSwitch(),
@@ -1162,21 +1160,12 @@ function drawThread() {
   });
   for (const t of TURNS) t.place(th);
   if (VOICE.view && !VOICE.view.root.isConnected) stopSpeaking();      // (its answer went with another deck)
-  pinBelowBar(th);
   th.scrollTop = th.scrollHeight;
   updateComposeHint();
 }
 
 // The same deck, even when it was fetched again (a citation chip, the deck reopened).
 const sameDeck = (a, b) => !!a && !!b && a.course === b.course && a.tag === b.tag;
-// An answer's pinned drawing sticks just under the chat bar (--pin: the bar's height), so the bar stays in view.
-const PIN_RO = new ResizeObserver((es) => { for (const e of es) e.target.parentElement?.style.setProperty("--pin", `${e.target.offsetHeight}px`); });
-function pinBelowBar(th) {
-  const bar = $(".chat-bar", th);
-  th.style.setProperty("--pin", `${bar?.offsetHeight || 0}px`);
-  PIN_RO.disconnect();
-  if (bar) PIN_RO.observe(bar);       // (and again whenever its height changes)
-}
 
 // The deck a saved question is about: older ones carry none (the chat's own deck), and `deck: true` once meant Whole deck.
 const msgDeck = (m, chat) => (typeof m.deck === "string" ? m.deck : chat.deck) || "";
@@ -1226,7 +1215,7 @@ APP.view = store.get("view", "text") === "text" ? "text" : "voice";
 // TURNS: the questions still being answered, oldest first (tutorAsk's handles: { d: its deck, place(thread) }),
 // so a redraw of the thread puts them back.
 const TURNS = new Set();
-const voiceOn = () => APP.view === "voice" && !store.get("reading", false);     // (the Read view is never paced)
+const voiceOn = () => APP.view === "voice";
 
 function viewSwitch() {
   const mk = (v, label, title) => h("button", { type: "button", role: "radio", "aria-checked": String(APP.view === v), title,
@@ -1238,7 +1227,7 @@ function viewSwitch() {
 
 // An answer as it is written. answerView(course, { paced }) returns { root, feed(chunk), end(text?), revealTo(i)
 // (resolves once the drawings shown are drawn), glow(start, end), showAll(), settle, msg }. While it is written its
-// drawings go up in .ans-draw, pinned at the top of the thread, one figure each in order: an ```svg drawing element
+// drawings go up in .ans-draw, above its text, one figure each in order: an ```svg drawing element
 // by element as it streams (svgStream), Mermaid and plots whole once their block closes. The text goes in the
 // .msg-a under it, finished blocks rendered once. Once it is all shown and the stream has ended, settle() (set by
 // the caller) swaps in the finished answer (answerEl), its drawings in their place in the text.
@@ -1332,7 +1321,7 @@ function answerView(course, { paced = false } = {}) {
     glowText(root, said);      // (the text was written again: the sentence being said glows again)
     keep();
   };
-  // The sentence being said stays in view (below the pinned drawing) while the student follows it.
+  // The sentence being said stays in view while the student follows it.
   let track = true;     // (declared here, used by paint, revealTo and glow)
   const keep = () => { const sp = said && track && $(".snt.spoken", root); if (sp && root.isConnected) keepInView(sp); };
   // Which parts show and which are lit, from the text revealed so far (while this answer is building its drawing).
@@ -1431,11 +1420,11 @@ function glowText(root, span) {
   if (span && from < 0) from = span[0];
   for (const el of els) { const o = +el.dataset.o; el.classList.toggle("spoken", !!span && o >= from && o < span[1]); }
 }
-// The part of the thread that shows its text: below the chat bar and any pinned drawing stuck at its top.
+// The part of the thread that shows its text: below the chat bar stuck at its top.
 function threadView(th) {
   const t = th.getBoundingClientRect();
   let top = t.top;
-  for (const el of $$(":scope > .chat-bar, :scope > .ans.live > .ans-draw", th)) {
+  for (const el of $$(":scope > .chat-bar", th)) {
     const r = el.getBoundingClientRect();
     if (r.height && r.top <= top + 4 && r.bottom > top) top = r.bottom;
   }
@@ -1689,7 +1678,7 @@ function spanSentences(box, start = null) {
 
 // A tap on a paragraph of an answer lights the parts of its drawing that the paragraph's cues name.
 function tapCues(e, root) {
-  if (e.target.closest("a, button, .spoiler") || !getSelection().isCollapsed || store.get("reading", false)) return;
+  if (e.target.closest("a, button, .spoiler") || !getSelection().isCollapsed) return;
   const ids = (e.target.closest("[data-cues]")?.dataset.cues || "").split(" ").filter(Boolean);
   if (ids.length && showCues(ids, root)) $(".cue-on", root)?.scrollIntoView({ block: "nearest" });
   else if (root.cue && !root.cue.build) endCues(root);
@@ -1704,7 +1693,7 @@ function inlineDrawings(c) {
     img.replaceWith(svg);
   });
 }
-// An answer's pinned drawings, while it is written: live SVG, scaled to the thread rather than to their text (Mermaid
+// An answer's drawings, while it is written: live SVG, scaled to the thread rather than to their text (Mermaid
 // sets a max-width in px). Resolves once any Mermaid diagram is drawn.
 function fitDrawings(c) {
   const root = c.closest(".ans") || c;
@@ -1880,7 +1869,7 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
     // one never redraws over it (its answer is in the chat for the next redraw).
     if (!wait.isConnected) { if (seq === askSeq) drawThread(); return; }
     // Swap in just the finished answer; the rest of the thread stays as it is.
-    if (!$(".chat-bar", th)) { th.prepend(chatBar(chat)); pinBelowBar(th); }      // the chat's first answer
+    if (!$(".chat-bar", th)) th.prepend(chatBar(chat));      // the chat's first answer
     wait.remove();
     // Once all of it shows (now, or when the voice is done), the finished answer takes its place, drawings in the text.
     ans.settle = () => {
@@ -1972,13 +1961,12 @@ async function warmVoice() {
 }
 const warmOnce = () => { if (VOICE.tts !== "ready" && VOICE.tts !== "loading") warmVoice(); };
 
-// ▶ Play under an answer (■ Stop while it plays): its sentences glow and its drawing lights up as it is read (not
-// in the Read view, where everything shows whole and unlit).
+// ▶ Play under an answer (■ Stop while it plays): its sentences glow and its drawing lights up as it is read.
 function playAnswer(m, btn) {
   if (VOICE.playBtn === btn) return stopSpeaking();
   stopSpeaking();
   warmOnce();                 // (fills the voice list)
-  const root = !store.get("reading", false) && btn.closest(".ans");
+  const root = btn.closest(".ans");
   speakAll(m.text, btn, root ? playView(root, m) : null);
 }
 
