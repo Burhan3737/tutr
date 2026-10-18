@@ -96,6 +96,8 @@ const uncue = (t) => String(t || "").replace(/[ \t]?\[#[A-Za-z][\w-]{0,40}\]/g, 
 const SAY = /^[ \t]*\[say:[ \t]*([^\]\n]{1,400})\][ \t]*$/gm;
 const SAY_OR_FENCE = new RegExp(`(\`\`\`|~~~)[\\s\\S]*?(?:\\1|(?![\\s\\S]))|${SAY.source}(?:\\r?\\n|(?![\\s\\S]))`, "gm");
 const unsay = (t) => String(t || "").replace(SAY_OR_FENCE, (m, fence) => (fence ? m : ""));
+// Text still streaming in, without the half cue or half spoken line at its end (final: only a spoken line's half).
+const halfCut = (t, final = false) => (final ? t : t.replace(/\[(#[\w-]*)?$/, "")).replace(/(^|\n)[ \t]*\[(?:say:[^\]\n]*|s|sa|say)$/, "$1");
 
 function renderMd(md, courseId) {
   const code = [], math = [];
@@ -959,7 +961,7 @@ async function sideAsk(question) {
   s.thread.append(wait);
   s.thread.scrollTop = s.thread.scrollHeight;
   let acc = "", queued = false;
-  const paint = () => { queued = false; live.replaceChildren(...renderMd(acc, s.course).childNodes); s.thread.scrollTop = s.thread.scrollHeight; };
+  const paint = () => { queued = false; live.replaceChildren(...renderMd(halfCut(acc), s.course).childNodes); s.thread.scrollTop = s.thread.scrollHeight; };
   const deck = APP.deck;
   try {
     const r = await apiStream("/api/side", { course: s.course, tag: s.tag, n: s.n, chat: deck.chat ? deck.chat.id : "", side: s.id,
@@ -1281,7 +1283,7 @@ function answerView(course, { paced = false } = {}) {
         write(txt.slice(0, cut));
         taken += cut;
         const t = acc.slice(taken, lim);
-        const md = (final ? t : t.replace(/\[(#[\w-]*)?$/, "")).replace(/(^|\n)[ \t]*\[(?:say:[^\]\n]*|s|sa|say)$/, "$1");   // not half a cue or spoken line
+        const md = halfCut(t, final);   // not half a cue or spoken line
         tail.replaceChildren(...fromMd(cueMd(md, course, taken), md, taken));
         break;
       }
@@ -2321,11 +2323,15 @@ function readAloud(btn = null, view = null) {
 // change it (open: more may stream in; otherwise the text is whole).
 const SAY_LINE = new RegExp(SAY.source);
 const lineEnd = (t, j) => { const k = t.indexOf("\n", j); return k < 0 ? t.length : k; };
-// A line of working (8 + 8 = 16, = 24): a digit, an operator, and hardly anything but digits and operators.
+// A line of working (8 + 8 = 16, = 24): a digit and hardly anything but digits and operators, once a list marker
+// and a leading label (Week 3:) are set aside. A run of them is working only if a line has a real operator
+// (workOp): =, <, >, or one between spaces; a - or / between digits is a date or a mark (2030-01-15, 4/5).
+const workLine = (l) => l.replace(/^\s*(?:[-*+]|\d{1,9}[.)])\s+/, "").replace(/^[A-Za-z][\w ()'-]{0,30}:\s+/, "");
 const isWork = (l) => {
-  const x = l.replace(/\s/g, "");
-  return /\d/.test(x) && /[=+*/×÷^<>≤≥−-]/.test(x) && !/^[|$]/.test(x) && x.replace(/[\d=+*/×÷^<>≤≥−().,·-]/g, "").length * 10 <= x.length * 3;
+  const x = workLine(l).replace(/\s/g, "");
+  return /\d/.test(x) && !/^[|$]/.test(x) && x.replace(/[\d=+*/×÷^<>≤≥−().,·-]/g, "").length * 10 <= x.length * 3;
 };
+const workOp = (l) => /[=<>≤≥]|\s[+*/×÷−·-]\s|^[+*/×÷−-]\s/.test(workLine(l).trim());
 function mdBlock(t, i, work = false, open = false) {
   const le = lineEnd(t, i), first = t.slice(i, le);
   const run = (ok) => {        // the lines after the first while ok(line, whole) (null: can't tell until it's whole)
@@ -2352,9 +2358,11 @@ function mdBlock(t, i, work = false, open = false) {
   if (work && isWork(first)) {
     if (le === t.length && open) return { kind: "work", end: le, done: false };
     const r = run((l, whole) => (whole ? isWork(l) : null));
-    if (r.n >= 2 || !r.done) return { kind: "work", ...r };
+    if (!r.done || (r.n >= 2 && t.slice(i, r.end).split("\n").some(workOp))) return { kind: "work", ...r };
   }
-  return { kind: "text", ...run((l, whole) => (/\S/.test(l) ? !(whole && SAY_LINE.test(l)) : whole ? false : null)) };
+  const opens = /^ {0,3}(```|~~~|\$\$|\|)/;       // (a paragraph running straight into one of these stops before it)
+  return { kind: "text", ...run((l, whole) => (!/\S/.test(l) ? (whole ? false : null) : !whole && /^\s*[`~$|]/.test(l) ? null
+    : !(whole && SAY_LINE.test(l)) && !opens.test(l))) };
 }
 // What a spoken line ending at `at` covers, up to the returned offset: the block on the next non-blank line; nothing
 // (at) when that's another spoken line or there's none. open: still streaming in, -1 until the block is whole.
@@ -2393,13 +2401,15 @@ function speaker(gen, signal, view = null, asked = false) {     // asked: by ▶
     if (asked || !view) toast("Voice isn't available right now.");      // ▶ Play always says so
     else { if (!VOICE.warned) toast(VOICE_OFF); VOICE.warned = true; }
   };
-  const sayOne = (text, start, end, whole = false) => {      // the raw text [start, end), said as `text`
+  // (draws: [start, end) is a drawing, given up to 2 s to be drawn before its line plays)
+  const sayOne = (text, start, end, whole = false, draws = false) => {      // the raw text [start, end), said as `text`
     const audio = synth = synth.then(() => (live() && text ? fetchSpeech(text, signal) : null)).catch(() => { failed(); return null; });
     queue(async () => {
       const url = await audio;
       if (!live()) { if (url) URL.revokeObjectURL(url); return; }
-      if (view) reveal(end);
-      if (!url) return;
+      if (view && draws) await Promise.race([reveal(end), new Promise((res) => setTimeout(res, 2000))]);
+      else if (view) reveal(end);
+      if (!url || !live()) return;
       if (view) view.glow(start, end, whole);
       if (VOICE.state === "waiting") voiceSet("speaking");
       if (!(await playUrl(url)) && live()) { stopSpeaking(); voiceSet("blocked"); }   // the browser refused (no tap)
@@ -2437,8 +2447,11 @@ function speaker(gen, signal, view = null, asked = false) {     // asked: by ▶
           const at = Math.min(acc.length, taken + line.length + 1), end = sayCover(acc, at, !final);
           if (end < 0) return;
           const start = end > at ? at + acc.slice(at).search(/\S/) : at;
-          if (view && DRAWING.test(acc.slice(start, end))) drawAt(end);       // (it goes up as the line is said)
-          sayOne(speakable(said[1]), start, end, true);
+          const draws = DRAWING.test(acc.slice(start, end));
+          // (a drawing the answer opens with waits, as before, for the text after it to begin: the cues streamed by
+          // then decide which of its parts wait for their sentence)
+          if (draws && first && !final && !/\S[\s\S]*?(?:[.!?](?=["')\]]*\s)|\n)/.test(acc.slice(end))) return;
+          sayOne(speakable(said[1]), start, end, true, draws);
           taken = end;
           first = false;
           continue;
@@ -2447,7 +2460,7 @@ function speaker(gen, signal, view = null, asked = false) {     // asked: by ▶
         const b = mdBlock(acc, taken, true, !final);
         if (b.kind !== "text" && !DRAWING.test(line)) {     // a table, formula, code or working: one line for it
           if (!b.done) return;
-          sayOne(speakable(acc.slice(taken, b.end)), taken, b.end, true);
+          sayOne(FALLBACK[b.kind === "fence" ? "code" : b.kind], taken, b.end, true);
           taken = b.end;
           first = false;
           continue;
@@ -2535,13 +2548,13 @@ function visualFallback(md) {
   const line = (k) => `\n${FALLBACK[k]}\n`;
   const lines = String(md)
     .replace(/(```|~~~)[ \t]*(\w*)[\s\S]*?(?:\1|$)/g, (_, f, lang) => (/^(mermaid|svg|plot)$/.test(lang) ? " " : line("code")))
+    .replace(/(?:^[ \t]*\|[^\n]*(?:\n|(?![\s\S])))+/gm, line("table"))      // (before $$: a cell may hold one)
     .replace(/\$\$[\s\S]+?\$\$/g, line("math"))
-    .replace(/(?:^[ \t]*\|[^\n]*(?:\n|(?![\s\S])))+/gm, line("table"))
     .split("\n"), out = [];
   for (let i = 0; i < lines.length; i++) {      // two or more lines of working in a row
     let j = i;
     while (j < lines.length && isWork(lines[j])) j++;
-    if (j - i >= 2) { out.push(FALLBACK.work); i = j - 1; } else out.push(lines[i]);
+    if (j - i >= 2 && lines.slice(i, j).some(workOp)) { out.push(FALLBACK.work); i = j - 1; } else out.push(lines[i]);
   }
   return out.join("\n").replace(/(^|[^\\$])\$([^\s$](?:[^$\n]*?[^\s$])?)\$(?!\d)/g, (m, pre, t) => (t.length > 12 ? `${pre}the formula on screen` : m));
 }
