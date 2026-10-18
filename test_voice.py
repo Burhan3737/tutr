@@ -480,6 +480,11 @@ def test_drawing_first_prompts():
     check("prompts: spoken-line rule", "[say:" in s and "on its own line" in s)
     check("prompts: spoken lines cover the visual cases", all(w in s for w in ("table", "$$", "code", "drawing", "arithmetic")))
     check("prompts: spoken lines never read cells or symbols", "never read the cells" in s)
+    check("prompts: a spoken line replaces everything under it to the next blank line", "up to the next blank line" in s and "directly above" in s)
+    check("prompts: the covered block is just the visual, with blank lines around it", "just the visual" in s and "blank line before and after" in s)
+    check("prompts: a long inline formula gets its own $$ line, or the line says the whole paragraph",
+          "its own $$ line" in s and "whole paragraph" in s)
+    check("prompts: no 'stands for nothing on screen' wording", "stands for nothing on screen" not in s)
     ex = T.CHAT_PROMPTS["explain"]
     check("prompts: worked example's drawing comes before its steps",
           0 < ex.index("<one drawing") < ex.index("**Let's work through it:**"))

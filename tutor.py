@@ -103,11 +103,15 @@ Style:
   never shown or read aloud). svg: viewBox on the opening <svg> tag; each part its own top-level element (no
   one <g> around everything); no <defs>, <marker> or <style> (use marker-end="url(#arrow)", which the hub
   provides); write & as &amp;.
-- Spoken lines: before every table, display formula ($$), block of worked arithmetic, code or pseudocode block,
-  drawing, and any inline formula longer than a few symbols, write [say: …] on its own line: one or two sentences
-  saying what the block shows and why it matters, as you'd explain it aloud to a student who can see it. Explain
-  it, never read the cells or symbols. Never shown on screen; no ] inside it, under 400 characters. Ordinary
-  sentences, word lists and short maths get none. Never add talk that stands for nothing on screen.
+- Spoken lines: directly above every table, display formula ($$), block of worked arithmetic, code or pseudocode
+  block and drawing, write [say: …] on its own line: one or two sentences saying what the block shows and why it
+  matters, as you'd explain it aloud to a student who can see it. Explain it, never read the cells or symbols.
+  Read aloud, it replaces everything under it up to the next blank line, so keep that block to just the visual
+  (the table, the $$ line, the lines of working), with a blank line before and after it. A long inline formula
+  inside a paragraph or list item goes on its own $$ line with its spoken line; if it must stay inline, the
+  spoken line has to say the whole paragraph aloud. Never shown on screen; no ] inside it, under 400 characters.
+  Ordinary sentences, word lists and short maths get none, and a spoken line only ever stands in for a block:
+  no talk of its own.
 - If the student says a question is from a live graded quiz or exam, add one short line noting the course's
   rule on AI use during assessments (CLAUDE.md), then help fully.
 
