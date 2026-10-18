@@ -91,10 +91,16 @@ const STEPS = [["review", "Review"], ["new", "New slides"], ["practise", "Practi
 const CUE = /\[#([A-Za-z][\w-]{0,40})\]/g;
 const uncue = (t) => String(t || "").replace(/[ \t]?\[#[A-Za-z][\w-]{0,40}\]/g, "");
 
+// A spoken line, [say: …], on its own line before a table, formula, working, code block or drawing: what the voice
+// says in its place. Never shown, copied or printed; inside a code fence it is code and stays as written.
+const SAY = /^[ \t]*\[say:[ \t]*([^\]\n]{1,400})\][ \t]*$/gm;
+const SAY_OR_FENCE = new RegExp(`(\`\`\`|~~~)[\\s\\S]*?(?:\\1|(?![\\s\\S]))|${SAY.source}(?:\\r?\\n|(?![\\s\\S]))`, "gm");
+const unsay = (t) => String(t || "").replace(SAY_OR_FENCE, (m, fence) => (fence ? m : ""));
+
 function renderMd(md, courseId) {
   const code = [], math = [];
   let src = String(md || "").replace(/```[\s\S]*?```|`[^`\n]+`/g, (m) => { code.push(m); return `CODETOKEN${code.length - 1}X`; });
-  src = uncue(src);
+  src = unsay(uncue(src));
   // [[term]] becomes a button that explains the term in a side question (openSide), its maths still rendered.
   const terms = [];
   src = src.replace(/\[\[([^[\]\n]{1,120}?)\]\]/g, (_, t) => { terms.push(t); return `TERMOPEN${terms.length - 1}X${t}TERMCLOSEX`; });
@@ -1274,7 +1280,7 @@ function answerView(course, { paced = false } = {}) {
         write(txt.slice(0, cut));
         taken += cut;
         const t = acc.slice(taken, lim);
-        tail.replaceChildren(...cueMd(final ? t : t.replace(/\[(#[\w-]*)?$/, ""), course, taken).childNodes);   // not half a cue
+        tail.replaceChildren(...cueMd((final ? t : t.replace(/\[(#[\w-]*)?$/, "")).replace(/(^|\n)[ \t]*\[(?:say:[^\]\n]*|s|sa|say)$/, "$1"), course, taken).childNodes);   // not half a cue or spoken line
         break;
       }
       write(rest.slice(0, f));
@@ -1622,7 +1628,7 @@ function markSentences(md, at, linesOnly = false) {
     let s = line;
     if (fence) { if (f && f[1][0] === fence[0] && f[1].length >= fence.length) fence = ""; }
     else if (f) fence = f[1];
-    else if (!/^\s*(<|([-*_=]\s*){3,}$|\|?[\s:|]*-[\s:|-]*$)|^\s{0,3}(=+|-+)\s*$|^\s{0,3}\[[^\]]+\]:/.test(line)) {
+    else if (!/^\s*\[say:/.test(line) && !/^\s*(<|([-*_=]\s*){3,}$|\|?[\s:|]*-[\s:|-]*$)|^\s{0,3}(=+|-+)\s*$|^\s{0,3}\[[^\]]+\]:/.test(line)) {
       const pre = line.match(/^\s*(?:(?:[-*+]|\d{1,9}[.)])\s+(?:\[[ xX]\]\s+)?|#{1,6}\s+|>\s?|\|\s*)*/)[0].length;
       const spots = [];
       const add = (i) => {
@@ -1749,7 +1755,7 @@ function chatMeta(chat, deck) {
 }
 
 // Copied Markdown shows terms as plain words, without the [[…]] that makes them buttons (or any cues).
-const unmark = (t) => uncue(t).replace(/\[\[([^[\]\n]{1,120}?)\]\]/g, "$1");
+const unmark = (t) => uncue(unsay(t)).replace(/\[\[([^[\]\n]{1,120}?)\]\]/g, "$1");
 
 function chatMarkdown(chat, deck) {
   const out = [`# ${chat.title || "Tutor chat"}`, "", `_${chatMeta(chat, deck)}_`, ""];
@@ -2390,7 +2396,7 @@ const TEX_WORDS = { cdot: "times", times: "times", le: "at most", leq: "at most"
   neq: "not equal to", approx: "about", to: "to", rightarrow: "to", infty: "infinity", sqrt: "root of", pm: "plus or minus" };
 const TEX_DROP = /^(left|right|text|textbf|mathrm|mathbf|mathit|mathcal|operatorname|displaystyle|quad|qquad|big|Big|bigg|Bigg)$/;
 function speakable(md) {
-  return String(md)
+  return unsay(md)
     .replace(/(```|~~~)[\s\S]*?(\1|$)/g, " ")
     .replace(CUE, " ")
     .replace(/<\/?[a-zA-Z][^>]*>/g, " ")
