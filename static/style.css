@@ -426,6 +426,8 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 /* The sentence being read aloud glows (Voice, ▶ Play); never on paper. */
 .snt { border-radius: 3px; transition: background-color .25s var(--ease), box-shadow .25s var(--ease); }
 .snt.spoken { background: var(--accent-soft); box-shadow: 0 0 0 2px var(--accent-soft); -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+/* A block said as one line (a table, formula, code, working) glows whole. */
+.msg-a .spoken:not(.snt) { background: var(--accent-soft); box-shadow: 0 0 0 4px var(--accent-soft); border-radius: 4px; }
 /* Cues: parts of a drawing appear as they're named; the one being talked about glows and the rest fade back. */
 .ans .cue-part, .ans .flowchart-link, .ans .edgeLabel { transition: opacity .45s var(--ease), filter .3s var(--ease); }
 .ans .cue-hide { opacity: 0 !important; }

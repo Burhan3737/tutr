@@ -1239,7 +1239,8 @@ function viewSwitch() {
 // the caller) swaps in the finished answer (answerEl), its drawings in their place in the text.
 // Unpaced (Text), the answer shows as it streams. Paced (Voice), only up to revealTo(i), an offset in the raw text
 // (cues included): the text up to there, and a drawing once i reaches its fence; showAll() shows the rest.
-// glow(start, end): the sentences of raw text [start, end) are being spoken (.spoken); glow(null): none.
+// glow(start, end): the sentences of raw text [start, end) are being spoken (.spoken); glow(start, end, true): the
+// block rendered from [start, end) glows whole; glow(null): none.
 // Cues: a part named by a cue already seen in the stream when it is drawn waits, hidden, until that cue's text is
 // revealed; a part drawn before any cue names it stays shown. The latest revealed cued sentence lights its parts.
 const DRAWING = /^ {0,3}(```|~~~)\s*(mermaid|svg|plot)\b/;
@@ -1260,9 +1261,9 @@ function answerView(course, { paced = false } = {}) {
     fresh = fresh.filter((n) => { const r = penOn(n, k); if (r.did) k++; return r.left; });
   };
   const shownTo = () => (all || !paced ? acc.length : Math.min(upto, acc.length));
-  const write = (md, at = taken) => { if (md.trim()) done.append(...cueMd(md, course, at).childNodes); };
+  const write = (md, at = taken) => { if (md.trim()) done.append(...fromMd(cueMd(md, course, at), md, at)); };
   const paint = () => {
-    const was = said && $(".snt.spoken", root);
+    const was = said && $(".spoken", root);
     if (was) track = inThread(was);       // (scrolled away from it: stay there; back on it: follow again)
     for (const m of acc.matchAll(CUE)) st.named.add(m[1]);      // first: a part drawn now must know it is named
     const lim = shownTo(), final = ended && lim >= acc.length;
@@ -1280,7 +1281,8 @@ function answerView(course, { paced = false } = {}) {
         write(txt.slice(0, cut));
         taken += cut;
         const t = acc.slice(taken, lim);
-        tail.replaceChildren(...cueMd((final ? t : t.replace(/\[(#[\w-]*)?$/, "")).replace(/(^|\n)[ \t]*\[(?:say:[^\]\n]*|s|sa|say)$/, "$1"), course, taken).childNodes);   // not half a cue or spoken line
+        const md = (final ? t : t.replace(/\[(#[\w-]*)?$/, "")).replace(/(^|\n)[ \t]*\[(?:say:[^\]\n]*|s|sa|say)$/, "$1");   // not half a cue or spoken line
+        tail.replaceChildren(...fromMd(cueMd(md, course, taken), md, taken));
         break;
       }
       write(rest.slice(0, f));
@@ -1290,7 +1292,7 @@ function answerView(course, { paced = false } = {}) {
       // Still streaming in: an svg drawing goes up as its elements close, code shows as it comes. (Paced, a drawing
       // goes up whole once it is complete, every part decided then, with all the cues streamed so far.)
       if (!close) {
-        if (!isDraw) { if (final) write(block); else tail.replaceChildren(...cueMd(block, course, taken).childNodes); }
+        if (!isDraw) { if (final) write(block); else tail.replaceChildren(...fromMd(cueMd(block, course, taken), block, taken)); }
         else if (/^\s*(```|~~~)\s*svg/.test(block) && (all || !paced)) {
           if (!open) open = svgStream();
           if (nl > 0 && open.feed(block.slice(nl + 1), got)) {
@@ -1329,7 +1331,7 @@ function answerView(course, { paced = false } = {}) {
   };
   // The sentence being said stays in view while the student follows it.
   let track = true;     // (declared here, used by paint, revealTo and glow)
-  const keep = () => { const sp = said && track && $(".snt.spoken", root); if (sp && root.isConnected) keepInView(sp); };
+  const keep = () => { const sp = said && track && $(".spoken", root); if (sp && root.isConnected) keepInView(sp); };
   // Which parts show and which are lit, from the text revealed so far (while this answer is building its drawing).
   const cues = () => {
     if (root.cue !== st || !draw.isConnected) return;
@@ -1365,7 +1367,7 @@ function answerView(course, { paced = false } = {}) {
     // (Following the newest words down, unless the student scrolled up; the sentence being said stays in view while
     // the student follows it: decided before this scrolls.)
     revealTo: (i) => {
-      const was = $(".snt.spoken", root);
+      const was = $(".spoken", root);
       track = !was || inThread(was);       // (the student is following it, or it's the first)
       if (i > upto) {
         const th = root.closest(".thread"), follow = th && th.scrollHeight - th.scrollTop - th.clientHeight < 80;
@@ -1375,8 +1377,8 @@ function answerView(course, { paced = false } = {}) {
       }
       return drawn;
     },
-    glow: (s, e) => {
-      said = s == null ? null : [s, e];
+    glow: (s, e, whole = false) => {
+      said = s == null ? null : [s, e, whole];
       glowText(root, said);
       keep();
     },
@@ -1395,6 +1397,8 @@ function answerView(course, { paced = false } = {}) {
 // ▶ Play on a finished answer: nothing is hidden or written again; the sentence being said glows and the drawing
 // parts it names light up, in this answer only. Same shape as answerView's handle.
 function playView(root, m) {
+  const body = $(".msg-a", root);
+  if (body) fromMd(body, m.text, 0);
   inlineDrawings(root);
   litOnly(root);
   const st = root.cue = { build: false, shown: new Set(), on: [] };
@@ -1407,10 +1411,10 @@ function playView(root, m) {
       return Promise.resolve();
     },
     // The glow stays in view while the student follows it (it was in view, or it's the first).
-    glow: (s, e) => {
-      const was = $(".snt.spoken", root), follow = !was || inThread(was);
-      glowText(root, s == null ? null : [s, e]);
-      const now = $(".snt.spoken", root);
+    glow: (s, e, whole = false) => {
+      const was = $(".spoken", root), follow = !was || inThread(was);
+      glowText(root, s == null ? null : [s, e, whole]);
+      const now = $(".spoken", root);
       if (now && follow) keepInView(now);
     },
     showAll: () => { glowText(root, null); if (root.cue === st) endCues(root); },
@@ -1419,12 +1423,51 @@ function playView(root, m) {
 
 // The sentences of root covering raw text [span[0], span[1]) glow (.spoken); span null: none. A sentence is the
 // .snt elements sharing a data-o (its offset in the raw text, from cueMd); the one the span starts inside counts too.
+// span[2] (a block said as one line: its spoken line, or the line said for it): the block glows whole, every
+// sentence in it too, even a block with none (a formula, code); a block it can't find, nothing.
 function glowText(root, span) {
   const els = $$(".snt", root);
+  $$(".spoken:not(.snt)", root).forEach((el) => el.classList.remove("spoken"));
+  if (span && span[2]) {
+    const lit = blockEls(root, span[0], span[1]);
+    for (const el of els) el.classList.toggle("spoken", lit.some((b) => b.contains(el)));
+    lit.forEach((b) => b.classList.add("spoken"));
+    return;
+  }
   let from = -1;
   if (span) for (const el of els) { const o = +el.dataset.o; if (o <= span[0] && o > from) from = o; }
   if (span && from < 0) from = span[0];
   for (const el of els) { const o = +el.dataset.o; el.classList.toggle("spoken", !!span && o >= from && o < span[1]); }
+}
+// An answer's top-level blocks as rendered from md (from offset `at` of the raw text): each keeps where it came from
+// (rawMd), so blockEls can find a block among them. Returns the nodes.
+function fromMd(box, md, at) {
+  const src = [md, at];
+  for (const el of box.children) el.rawMd = src;
+  return [...box.childNodes];
+}
+// The top-level blocks of root rendered from raw text [s, e), found by their place among the blocks written with
+// them: their text rendered with that range swapped for a marker paragraph puts the marker where they start. They
+// must look as the range does rendered alone (same tags, same words), or it's none: never the wrong text. (No marks
+// go into the maths or code: the rendering is untouched.)
+const BLOCK_AT = new Map();
+const blockWords = (el) => el.textContent.replace(/\s+/g, "");
+function blockEls(root, s, e) {
+  if (!(e > s)) return [];
+  const tops = $$(".msg-a > *, .msg-a > div > *", root).filter((el) => el.rawMd);
+  const src = tops.map((el) => el.rawMd).find(([md, at]) => at <= s && e <= at + md.length);
+  if (!src) return [];
+  const [md, at] = src, kids = tops.filter((el) => el.rawMd === src), key = `${at} ${s} ${e} ${md}`;
+  let hit = BLOCK_AT.get(key);
+  if (!hit) {
+    const alone = [...renderMd(md.slice(s - at, e - at)).children].map((el) => [el.tagName, blockWords(el)]);
+    const k = [...renderMd(`${md.slice(0, s - at)}\n\n\uE004\n\n${md.slice(e - at)}`).children].findIndex((el) => el.textContent.trim() === "\uE004");
+    hit = { k, alone };
+    BLOCK_AT.set(key, hit);
+    if (BLOCK_AT.size > 50) BLOCK_AT.delete(BLOCK_AT.keys().next().value);
+  }
+  const { k, alone } = hit, els = k < 0 ? [] : kids.slice(k, k + alone.length);
+  return alone.length && els.length === alone.length && els.every((el, i) => el.tagName === alone[i][0] && blockWords(el) === alone[i][1]) ? els : [];
 }
 // The part of the thread that shows its text: below the chat bar stuck at its top.
 function threadView(th) {
@@ -2272,8 +2315,64 @@ function readAloud(btn = null, view = null) {
   return speaker(VOICE.gen, ctrl.signal, view, !!btn);
 }
 
+// The blocks of an answer's raw text, for the voice: from i (where a line's text starts) to `end` (where its last
+// line ends). A fence (to its closing fence), $$…$$, a table (lines starting with |), with work: two or more lines
+// of working; otherwise a paragraph or list run, to a blank line or a spoken line. done: nothing streamed later can
+// change it (open: more may stream in; otherwise the text is whole).
+const SAY_LINE = new RegExp(SAY.source);
+const lineEnd = (t, j) => { const k = t.indexOf("\n", j); return k < 0 ? t.length : k; };
+// A line of working (8 + 8 = 16, = 24): a digit, an operator, and hardly anything but digits and operators.
+const isWork = (l) => {
+  const x = l.replace(/\s/g, "");
+  return /\d/.test(x) && /[=+*/×÷^<>≤≥−-]/.test(x) && !/^[|$]/.test(x) && x.replace(/[\d=+*/×÷^<>≤≥−().,·-]/g, "").length * 10 <= x.length * 3;
+};
+function mdBlock(t, i, work = false, open = false) {
+  const le = lineEnd(t, i), first = t.slice(i, le);
+  const run = (ok) => {        // the lines after the first while ok(line, whole) (null: can't tell until it's whole)
+    let end = le, n = 1;
+    for (let j = le; j < t.length; n++) {
+      const k = lineEnd(t, j + 1), r = ok(t.slice(j + 1, k), k < t.length || !open);
+      if (!r) return { end, n, done: r === false };
+      end = j = k;
+    }
+    return { end, n, done: !open };
+  };
+  const f = first.match(/^(`{3,}|~{3,})/);
+  if (f) {
+    const close = new RegExp(`\\n {0,3}${f[1][0]}{${f[1].length},}[ \\t]*(?=\\n|$)`, "g");
+    close.lastIndex = le;
+    const c = close.exec(t);
+    return { kind: "fence", end: c ? c.index + c[0].length : t.length, done: !!c || !open };
+  }
+  if (first.startsWith("$$")) {
+    const c = t.indexOf("$$", i + 2), end = c < 0 ? t.length : lineEnd(t, c + 2);
+    return { kind: "math", end, done: end < t.length || !open };
+  }
+  if (first.startsWith("|")) return { kind: "table", ...run((l, whole) => (/^\s*\|/.test(l) ? true : whole || /\S/.test(l) ? false : null)) };
+  if (work && isWork(first)) {
+    if (le === t.length && open) return { kind: "work", end: le, done: false };
+    const r = run((l, whole) => (whole ? isWork(l) : null));
+    if (r.n >= 2 || !r.done) return { kind: "work", ...r };
+  }
+  return { kind: "text", ...run((l, whole) => (/\S/.test(l) ? !(whole && SAY_LINE.test(l)) : whole ? false : null)) };
+}
+// What a spoken line ending at `at` covers, up to the returned offset: the block on the next non-blank line; nothing
+// (at) when that's another spoken line or there's none. open: still streaming in, -1 until the block is whole.
+function sayCover(raw, at, open = false) {
+  const i = at + raw.slice(at).search(/\S|$/);
+  if (i >= raw.length) return open ? -1 : at;
+  const le = lineEnd(raw, i);
+  if (SAY_LINE.test(raw.slice(i, le))) return le < raw.length || !open ? at : -1;
+  const b = mdBlock(raw, i, false, open);
+  return b.done ? b.end : -1;
+}
+// A half-written spoken line at the end of the text (it's a spoken line once its ] comes).
+const HALF_SAY = /^\[(?:s(?:a(?:y(?::[^\]\n]*)?)?)?)?$/;
+
 // Speaks streamed Markdown a few sentences at a time, in order: each piece is synthesised while the previous
-// one plays. A ``` drawing block isn't read out. With a view, each piece reveals it up to the piece's end (an offset
+// one plays. A ``` drawing block isn't read out. A spoken line is said in place of the block it covers, which goes
+// up whole and glows as it is said; a table, formula, code or working without one is a line of its own
+// (visualFallback), glowing whole. With a view, each piece reveals it up to the piece's end (an offset
 // in the raw text both were fed) and makes the piece's sentences glow as it starts playing; a drawing goes up when
 // the speech reaches it, a Mermaid diagram getting up to 2 s to be drawn before the next piece. stopSpeaking() (a new
 // question, Stop, closing the panel) makes every queued piece drop out. The voice failing stops it, with a toast.
@@ -2294,14 +2393,14 @@ function speaker(gen, signal, view = null, asked = false) {     // asked: by ▶
     if (asked || !view) toast("Voice isn't available right now.");      // ▶ Play always says so
     else { if (!VOICE.warned) toast(VOICE_OFF); VOICE.warned = true; }
   };
-  const sayOne = (text, start, end) => {      // the raw text [start, end), said as `text`
+  const sayOne = (text, start, end, whole = false) => {      // the raw text [start, end), said as `text`
     const audio = synth = synth.then(() => (live() && text ? fetchSpeech(text, signal) : null)).catch(() => { failed(); return null; });
     queue(async () => {
       const url = await audio;
       if (!live()) { if (url) URL.revokeObjectURL(url); return; }
       if (view) reveal(end);
       if (!url) return;
-      if (view) view.glow(start, end);
+      if (view) view.glow(start, end, whole);
       if (VOICE.state === "waiting") voiceSet("speaking");
       if (!(await playUrl(url)) && live()) { stopSpeaking(); voiceSet("blocked"); }   // the browser refused (no tap)
     });
@@ -2329,6 +2428,31 @@ function speaker(gen, signal, view = null, asked = false) {     // asked: by ▶
       if (!rest.trim()) return;
       const ws = rest.search(/\S/);
       if (ws > 0) { taken += ws; continue; }      // (a blank isn't a piece: it shows with the next one)
+      const line = rest.slice(0, lineEnd(rest, 0)), whole = line.length < rest.length || final;
+      if (!acc.slice(acc.lastIndexOf("\n", taken - 1) + 1, taken).trim()) {      // at a line's start
+        if (!whole && HALF_SAY.test(line)) return;
+        const said = SAY_LINE.exec(line);
+        if (said) {           // a spoken line: said in place of its block, once the block is whole (or the stream ended)
+          if (!whole) return;
+          const at = Math.min(acc.length, taken + line.length + 1), end = sayCover(acc, at, !final);
+          if (end < 0) return;
+          const start = end > at ? at + acc.slice(at).search(/\S/) : at;
+          if (view && DRAWING.test(acc.slice(start, end))) drawAt(end);       // (it goes up as the line is said)
+          sayOne(speakable(said[1]), start, end, true);
+          taken = end;
+          first = false;
+          continue;
+        }
+        if (final && HALF_SAY.test(line)) { taken += line.length; continue; }     // (never shown either)
+        const b = mdBlock(acc, taken, true, !final);
+        if (b.kind !== "text" && !DRAWING.test(line)) {     // a table, formula, code or working: one line for it
+          if (!b.done) return;
+          sayOne(speakable(acc.slice(taken, b.end)), taken, b.end, true);
+          taken = b.end;
+          first = false;
+          continue;
+        }
+      }
       const fence = rest.search(/```|~~~/);
       if (fence === 0) {          // a drawing: wait until it is complete, then show it
         const mark = rest.slice(0, 3), close = rest.indexOf(mark, 3);
@@ -2341,7 +2465,15 @@ function speaker(gen, signal, view = null, asked = false) {     // asked: by ▶
         if (view && !first) drawAt(taken);     // (one the answer opens with goes up with the first piece said)
         continue;
       }
-      const scan = fence > 0 ? rest.slice(0, fence) : rest;
+      // (a piece ends where a drawing, a spoken line or a block said as one line starts)
+      let stop = fence > 0 ? fence : rest.length;
+      for (const m of rest.matchAll(/\n[ \t]*(?=\S)/g)) {
+        const j = m.index + m[0].length, l = rest.slice(j, lineEnd(rest, j));
+        if (j >= stop) break;
+        if (SAY_LINE.test(l) || (j + l.length === rest.length && HALF_SAY.test(l)) || /^(\$\$|\|)/.test(l)
+          || (isWork(l) && mdBlock(acc, taken + j, true, !final).kind === "work")) { stop = j; break; }
+      }
+      const scan = rest.slice(0, stop);
       // Cut after a sentence or a line; the first piece as early as possible, then pieces of 140+ characters.
       const re = /[.!?](?=["')\]]*\s)|\n/g;
       let cut = -1, soft = -1, m;
@@ -2357,7 +2489,7 @@ function speaker(gen, signal, view = null, asked = false) {     // asked: by ▶
         cut = soft > 0 ? soft : p > 0 ? p + 1 : head.lastIndexOf(" ") > 0 ? head.lastIndexOf(" ") + 1 : 350;
       }
       if (cut < 0) {
-        if (fence > 0) cut = fence;              // speak what comes before the drawing
+        if (stop < rest.length) cut = stop;      // speak what comes before the drawing or block
         else if (final) cut = rest.length;
         else return;
       }
@@ -2395,9 +2527,26 @@ function sentences(text) {
 const TEX_WORDS = { cdot: "times", times: "times", le: "at most", leq: "at most", ge: "at least", geq: "at least",
   neq: "not equal to", approx: "about", to: "to", rightarrow: "to", infty: "infinity", sqrt: "root of", pm: "plus or minus" };
 const TEX_DROP = /^(left|right|text|textbf|mathrm|mathbf|mathit|mathcal|operatorname|displaystyle|quad|qquad|big|Big|bigg|Bigg)$/;
+// A table, formula, code block or working with no spoken line: one line said for it, never its cells, TeX, code or
+// sums; long inline maths (over 12 characters) is "the formula on screen" in its sentence. A drawing says nothing:
+// its cues narrate it.
+const FALLBACK = { table: "Have a look at the table.", math: "The formula's on screen.", code: "The code's on screen.", work: "The working's on screen." };
+function visualFallback(md) {
+  const line = (k) => `\n${FALLBACK[k]}\n`;
+  const lines = String(md)
+    .replace(/(```|~~~)[ \t]*(\w*)[\s\S]*?(?:\1|$)/g, (_, f, lang) => (/^(mermaid|svg|plot)$/.test(lang) ? " " : line("code")))
+    .replace(/\$\$[\s\S]+?\$\$/g, line("math"))
+    .replace(/(?:^[ \t]*\|[^\n]*(?:\n|(?![\s\S])))+/gm, line("table"))
+    .split("\n"), out = [];
+  for (let i = 0; i < lines.length; i++) {      // two or more lines of working in a row
+    let j = i;
+    while (j < lines.length && isWork(lines[j])) j++;
+    if (j - i >= 2) { out.push(FALLBACK.work); i = j - 1; } else out.push(lines[i]);
+  }
+  return out.join("\n").replace(/(^|[^\\$])\$([^\s$](?:[^$\n]*?[^\s$])?)\$(?!\d)/g, (m, pre, t) => (t.length > 12 ? `${pre}the formula on screen` : m));
+}
 function speakable(md) {
-  return unsay(md)
-    .replace(/(```|~~~)[\s\S]*?(\1|$)/g, " ")
+  return visualFallback(unsay(md))
     .replace(CUE, " ")
     .replace(/<\/?[a-zA-Z][^>]*>/g, " ")
     .replace(/\|\|[\s\S]*?\|\|/g, " ")
@@ -2465,7 +2614,7 @@ function stopSpeaking() {
   VOICE.done = null;
   VOICE.view = null;
   done?.();
-  $$(".snt.spoken").forEach((el) => el.classList.remove("spoken"));
+  $$(".spoken").forEach((el) => el.classList.remove("spoken"));
   voiceSet("idle");
 }
 
