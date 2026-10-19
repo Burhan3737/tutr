@@ -1,6 +1,6 @@
 ---
 name: preparing-slides
-description: Use when new lecture slides or lesson PDFs land in a course's course/WeekN folder and need preparing for the Study Hub — "build week 3", "new slides were posted", "prepare week 4", "add the new deck", or a course/WeekN PDF with no transcript in .cache/WeekN. Extracts slide images, transcribes every slide faithfully (equations, diagrams, handwriting), audits the transcription, and files each deck under a topic. All courses.
+description: Use when new lecture slides or lesson PDFs land in a course's course/WeekN folder (or homework / practice exams in course/practice) and need preparing for the Study Hub — "build week 3", "new slides were posted", "prepare week 4", "add the new deck", or a course/WeekN PDF with no transcript in .cache/WeekN. Extracts slide images, transcribes every slide faithfully (equations, diagrams, handwriting), audits the transcription, and files each deck under a topic. All courses.
 ---
 
 # Preparing slides
@@ -49,6 +49,13 @@ writes files with the Write/Edit tools, never shell heredocs (they mangle `\\` i
 6. **Report** to the student: decks prepared, pages, slide errors found (one line each), the topic each
    deck went under. Then point them to the Study Hub (`start.bat`) — new decks show up on
    the next page load; nothing needs restarting.
+
+**Homework and practice exams** live in `<course>/course/practice/` and are prepared the same way with
+`practice` in place of the week number (`extract.py <course> practice`, `check.py <course> practice …`);
+everything goes to `.cache/practice/` instead of `.cache/WeekN/`. Pages are problems, not slides: transcribe
+them verbatim (blank answer space noted in one line), type them `exercise`, and never add solutions. Their
+deck-table Week is the latest lecture week whose material they exercise (the hub uses it for order and test
+scope); their Topic cell is `Practice`: the hub lists them on their own, apart from the topics.
 
 Before starting, read `<course>/CLAUDE.md`. If `study/progress.md` doesn't exist, create it with
 `## Deadlines` (`| Date | Item | Weight | Status | Covers |`), `## Weak topics`, `## Error log` and

@@ -1,8 +1,9 @@
 """Prepare a week's source decks for transcription.
 
-    python extract.py <course-folder> <week-number> [--force]
+    python extract.py <course-folder> <week-number | practice> [--force]
 
-For every PDF in <course>/course/Week<N>/ this writes, under <course>/.cache/Week<N>/:
+For every PDF in <course>/course/Week<N>/ (or course/practice/: homework and practice exams) this writes,
+under <course>/.cache/Week<N>/ (or .cache/practice/):
   <stem>.transcript.md   one "## [<tag> sN] ..." section per page. Text-rich pages are filled
                           from the text layer; every other page is marked VISUAL-PENDING and
                           must be rewritten by an agent that looks at the PNG.
@@ -83,13 +84,14 @@ def needs_visual(page, text):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("course")
-    ap.add_argument("week", type=int)
+    ap.add_argument("week", help="week number, or 'practice' for course/practice/")
     ap.add_argument("--force", action="store_true")
     a = ap.parse_args()
 
     course = Path(a.course).resolve()
-    src = course / "course" / f"Week{a.week}"
-    out = course / ".cache" / f"Week{a.week}"
+    folder = f"Week{a.week}" if a.week.isdigit() else a.week
+    src = course / "course" / folder
+    out = course / ".cache" / folder
     tags = deck_tags(course)
     # Source order = the order decks are listed in the CLAUDE.md "Deck tags" table (lecture order);
     # decks not in the table follow, alphabetically.

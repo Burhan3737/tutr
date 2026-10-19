@@ -3,6 +3,7 @@
     python check.py <course-folder> <week-number> transcripts
     python check.py <course-folder> <week-number> audit
     python check.py <course-folder> <week-number> sorted
+(<week-number> may be 'practice' for course/practice/.)
 
 transcripts: every deck in manifest.json has one section per page, none still VISUAL-PENDING,
              every section ends with a Type line.
@@ -18,7 +19,7 @@ CITE = re.compile(r"\[(?P<tag>[A-Za-z][\w&.\-]*(?: [\w&.\-]+)?) s(?P<body>\d[^\]
 
 
 def load(course, week):
-    out = course / ".cache" / f"Week{week}"
+    out = course / ".cache" / (f"Week{week}" if week.isdigit() else week)
     mf = out / "manifest.json"
     if not mf.exists():
         sys.exit(f"No manifest at {mf}. Run extract.py first.")
@@ -123,7 +124,7 @@ def check_sorted(course, week):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("course")
-    ap.add_argument("week", type=int)
+    ap.add_argument("week", help="week number, or 'practice'")
     ap.add_argument("what", choices=["transcripts", "audit", "sorted"])
     a = ap.parse_args()
     course = Path(a.course).resolve()
