@@ -2167,7 +2167,7 @@ function endCues(root) { if (root && root.cue) { root.cue = null; applyCues(root
 // when dictation began, so they stay untouched. `spoken` marks the question as dictated when it is sent.
 const DICT = { rec: null, stream: null, chunks: [], gen: 0, timer: 0, state: "idle",
   before: "", after: "", last: "", spoken: false, spaceHeld: false };
-const DICT_TITLE = { idle: "Dictate: speak your question, then edit it before sending (Ctrl+Space)", listening: "Stop and type out what you said (Ctrl+Space)",
+const DICT_TITLE = { idle: "Dictate: speak your question, then edit it before sending (hold Space, or Ctrl+Space)", listening: "Stop and type out what you said (Ctrl+Space)",
   hearing: "Writing down what you said…" };
 
 function dictateButton(ta) {
@@ -2185,7 +2185,7 @@ function dictShow(b = $("#dict-mic"), ta = $("#ask-input")) {
   b.classList.toggle("on", st === "listening");
   b.disabled = st === "hearing";
   if (ta) ta.readOnly = st !== "idle";              // what you said goes in at the cursor: typing meanwhile would be lost
-  if (ta) ta.placeholder = st === "listening" ? "Listening… tap ■ or Ctrl+Space to stop" : st === "hearing" ? "Writing down what you said…" : composeHint();
+  if (ta) ta.placeholder = st === "listening" ? DICT.spaceHeld ? "Listening… let go of Space to stop" : "Listening… tap ■ or Ctrl+Space to stop" : st === "hearing" ? "Writing down what you said…" : composeHint();
 }
 function dictSet(state) { DICT.state = state; dictShow(); }
 
@@ -2631,18 +2631,62 @@ function stopSpeaking() {
   voiceSet("idle");
 }
 
-// Hold Space to dictate into the Ask box (not while typing in a field or on a button, nor where Space scrolls: the
-// Read view, the thread).
-document.addEventListener("keydown", (e) => {
-  if (e.key !== " " || e.ctrlKey || e.metaKey || e.altKey || APP.tutor === "focus" || !$("#dict-mic") || !micOk() || $(".viewer.reading")
-    || e.target.closest("input, textarea, select, button, a, summary, [contenteditable], .spoiler, #thread, .side-sheet")) return;
-  e.preventDefault();
-  if (e.repeat || DICT.spaceHeld) return;
+// Hold Space to dictate into the Ask box, from anywhere a deck is open (into the ask bar while the tutor is closed), like
+// Ctrl+Space; let go and what you said is written down. Outside a text field the mic starts once Space has been held
+// SPACE_HOLD_MS, and a quick tap still does what Space did (press the focused button, scroll the chat). In the Ask box
+// the first press types its space as usual; when the key starts repeating (it's being held) that space is taken back
+// and the mic starts. Other text fields keep Space for typing. A press while listening (🎙 tapped) stops it.
+const SPACE_HOLD_MS = 300;
+const SPACE = { timer: 0, target: null, typed: null };
+function spaceDictate() {
+  if (DICT.state !== "idle") return;
   DICT.spaceHeld = true;
-  if (DICT.state === "idle") dictTap();
+  if (!$("#dict-mic")) { APP.tutor = "open"; renderTutor(); }   // the ask bar (tutor closed) has its own mic
+  dictTap();
+}
+// A tap that wasn't a hold: what Space would have done there.
+function spaceTap(el, up) {
+  const hit = el.closest?.("button, a[href], summary, [role=button], [role=radio], [role=tab], .spoiler");
+  if (hit) return hit.click();
+  let s = el instanceof Element ? el : null;
+  while (s && !(s.scrollHeight > s.clientHeight && /auto|scroll/.test(getComputedStyle(s).overflowY))) s = s.parentElement;
+  s = s || ($(".viewer.reading") && $("#thread")) || document.scrollingElement;
+  s.scrollBy({ top: (up ? -0.85 : 0.85) * s.clientHeight, behavior: "smooth" });
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key !== " " || e.ctrlKey || e.metaKey || e.altKey || !APP.deck || !micOk()) return;
+  const ask = e.target.id === "ask-input";
+  if (!ask && e.target.closest("input, textarea, select, [contenteditable]")) return;
+  if (!$("#dict-mic") && APP.tutor === "focus") return;
+  if (DICT.state === "listening" && !DICT.spaceHeld) { e.preventDefault(); if (!e.repeat) dictFinish(); return; }
+  if (DICT.spaceHeld || SPACE.timer || DICT.state !== "idle") { e.preventDefault(); return; }   // still held, or writing down
+  if (ask) {
+    const ta = e.target;
+    if (!e.repeat) { SPACE.typed = { value: ta.value, start: ta.selectionStart, end: ta.selectionEnd }; return; }   // types its space
+    e.preventDefault();
+    const t = SPACE.typed;
+    SPACE.typed = null;
+    if (!t) return;
+    ta.value = t.value;                             // take back the space the first press typed
+    ta.setSelectionRange(t.start, t.end);
+    ta.dispatchEvent(new Event("input"));
+    return spaceDictate();
+  }
+  e.preventDefault();
+  if (e.repeat) return;
+  SPACE.target = e.target;
+  SPACE.timer = setTimeout(() => { SPACE.timer = 0; spaceDictate(); }, SPACE_HOLD_MS);
 });
 document.addEventListener("keyup", (e) => {
-  if (e.key !== " " || !DICT.spaceHeld) return;
+  if (e.key !== " ") return;
+  SPACE.typed = null;
+  if (SPACE.timer) {
+    clearTimeout(SPACE.timer);
+    SPACE.timer = 0;
+    e.preventDefault();                             // (a button would also click itself on this keyup)
+    return spaceTap(SPACE.target, e.shiftKey);
+  }
+  if (!DICT.spaceHeld) return;
   e.preventDefault();
   DICT.spaceHeld = false;
   if (DICT.state === "listening") dictFinish();      // let go before the mic started: dictFinish cancels the start
