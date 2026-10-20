@@ -204,6 +204,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             c = self._course(qs.get("course"))
             return self._json([{k: r[k] for k in ("id", "concept", "warmup", "deck", "slides", "mistake")}
                                for r in S.due_reviews(c)] if c else [])
+        if path == "/api/drill/setup":     # the exam drill's setup dialog: decks by topic, papers, a default range
+            c = self._course(qs.get("course"))
+            return self._json(T.drill_setup(c) if c else {"error": "Unknown course."}, 200 if c else 404)
+        if path == "/api/drill":           # the phone's photo page for a drill
+            try:
+                return self._json(T.drill_status(qs.get("chat", "")))
+            except T.TutorError as e:
+                return self._json({"error": str(e)}, 404)
         if path == "/api/practice":
             rec = T.get_practice(qs.get("id"))
             return self._json(T.public_problem(rec) | {"photos": len(rec.get("photos", []))}) if rec else \
@@ -325,6 +333,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not c:
                 return self._json({"error": "That problem has expired."}, 404)
             return self._json(T.add_photo(c, rec["id"], req.get("data", "")))
+        if path == "/api/drill/photo":     # a photo of the page for the drill's open question
+            return self._json(T.add_drill_photo(str(req.get("chat", "")), req.get("data", "")))
         if path == "/api/practice/check":
             rec = T.get_practice(str(req.get("id", "")))
             c = self._course(rec["course"]) if rec else None
@@ -353,10 +363,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             q = str(req.get("question") or "")
             if mode in ("ask", "brush", "voice", "grill_reply") and not q.strip():
                 return self._json({"error": "Type a question first."}, 400)
+            drill = None
+            if mode == "drill":
+                d = req.get("drill") or {}
+                drill = T.drill_config(c, d.get("decks"), d.get("papers"), d.get("focus"))
             def work(emit):
                 chat, msg = T.chat_turn(c, tag, _int(req.get("n")), mode, q, model, web, emit,
-                                        whole_deck=req.get("scope") == "deck", spoken=req.get("spoken") is True)
-                return {"chat": chat["id"], "message": msg}
+                                        whole_deck=req.get("scope") == "deck", spoken=req.get("spoken") is True, drill=drill)
+                return {"chat": chat["id"], "message": msg, "drill": chat.get("drill")}
             return self._answer(req, work)
         if path == "/api/side":              # a side question about a term or a selection (forks the chat)
             tag = str(req.get("tag", ""))

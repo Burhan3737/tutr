@@ -428,7 +428,10 @@ async function showCourse(id, token) {
     h("button", { class: "btn block", type: "button", onclick: () => startSession(id) }, "Start session"),
     h("p", { class: "under", style: "text-align:left" }, reviewLine(c)),
     res ? h("a", { class: "link", href: `#c=${encodeURIComponent(id)}&d=${encodeURIComponent(res.deck)}&s=${res.slide}` },
-      `Continue reading: ${res.deck} · slide ${res.slide} ›`) : null);
+      `Continue reading: ${res.deck} · slide ${res.slide} ›`) : null,
+    res ? h("p", { class: "under", style: "text-align:left" }, h("button", { class: "link", type: "button",
+      title: "Exam-style questions from a range of decks, in the format of a practice paper, worked on paper",
+      onclick: () => { APP.pending = { drill: true }; go({ c: id, d: res.deck, s: res.slide }); } }, "Exam drill ›")) : null);
   page.append(actions);
   const topics = h("div", { class: "topics" });
   const openTopic = p.t || (res && findDeck(c, res.deck)?.topic);
@@ -507,7 +510,8 @@ async function showViewer(courseId, tag, n, token) {
     { label: deck.topic, href: `#c=${encodeURIComponent(courseId)}&t=${encodeURIComponent(deck.topic)}` }, { label: `${deck.tag} (W${deck.week})` });
   if (!same) buildViewer();
   showSlide();
-  if (APP.pending) { const p = APP.pending; APP.pending = null; startPracticeInPanel(p); }
+  if (APP.pending && APP.pending.drill) { APP.pending = null; APP.tutor = "open"; renderTutor(); openDrillSetup(false); }
+  else if (APP.pending) { const p = APP.pending; APP.pending = null; startPracticeInPanel(p); }
   else if (!same) renderTutor();
 }
 
@@ -816,7 +820,7 @@ function renamable(chat, cls, after) {
 }
 
 function chatBar(chat) {
-  return h("div", { class: "chat-bar" }, starButton(chat), renamable(chat));
+  return h("div", { class: "chat-bar" }, starButton(chat), renamable(chat), chat.drill ? drillStatus(chat.drill) : null);
 }
 
 async function newChat() {
@@ -854,7 +858,7 @@ function renderTutor() {
     // Closed, the tutor is an ask bar under the slide: sending opens the panel with the question in it.
     t.replaceChildren(h("div", { class: "askbar" },
       h("span", { class: "askbar-mark", "aria-hidden": "true" }, "✦"),
-      composeBox(composeHint(), (q, spoken) => tutorAsk(grilling() ? "grill_reply" : "ask", q, { spoken })),
+      composeBox(composeHint(), (q, spoken) => tutorAsk(replyMode(), q, { spoken })),
       h("button", { class: "icon-btn askbar-open", type: "button", title: "Open the tutor", "aria-label": "Open the tutor",
         onclick: () => { APP.tutor = "open"; renderTutor(); $("#ask-input")?.focus(); } }, "⇤")));
     return;
@@ -877,12 +881,13 @@ function renderTutor() {
         h("button", { class: "link", type: "button", onclick: () => tutorAsk("example") }, "Worked example"),
         h("button", { class: "link", type: "button", onclick: () => tutorAsk("explain") }, "Explain simply"),
         h("button", { class: "link", type: "button", title: "An oral exam: one question at a time, follow-ups on weak answers, a summary at the end", onclick: () => tutorAsk("grill") }, "Grill me"),
+        h("button", { class: "link", type: "button", title: "Exam-style questions from a range of decks, in the format of a practice paper, solved on paper: hints, marks, then the written solution", onclick: () => openDrillSetup() }, "Exam drill"),
         h("button", { class: "link", type: "button", onclick: () => tutorAsk("quiz") }, "Quiz prep"),
         h("button", { class: "link", type: "button", title: "What to know first: prerequisites, rules and symbols", onclick: () => tutorAsk("before") }, "Before you start"),
         h("button", { class: "link", type: "button", title: "Methods, formulas and shortcuts to copy onto your sheet (always the whole deck)", onclick: () => tutorAsk("cheatsheet_deck") }, "Cheat sheet"))),
     h("div", { class: "thread", id: "thread", "aria-live": "polite", tabindex: "-1" }),
     h("div", { class: "ask-area" }, viewSwitch(),
-      composeBox(composeHint(), (q, spoken) => tutorAsk(grilling() ? "grill_reply" : "ask", q, { spoken })), voiceRow())));
+      composeBox(composeHint(), (q, spoken) => tutorAsk(replyMode(), q, { spoken })), voiceRow())));
   fillVoices();
   voiceSet(VOICE.state);
   if (APP.view === "voice") warmOnce();       // Voice reads answers aloud: the voice loads meanwhile
@@ -1099,6 +1104,11 @@ const SLASH = [
   { cmd: "quiz", mode: "quiz", hint: "Quiz prep" },
   { cmd: "grill", mode: "grill", hint: "Grill me: an oral exam" },
   { cmd: "end", mode: "grill_end", hint: "End the grill", when: () => grilling() },
+  { cmd: "drill", hint: "Exam drill: exam-style questions from a range of decks", run: () => openDrillSetup() },
+  { cmd: "hint", mode: "drill_hint", hint: "A hint on the drill's question", when: () => drilling() },
+  { cmd: "answer", mode: "drill_reveal", hint: "Show the drill question's answer", when: () => drilling() },
+  { cmd: "skip", mode: "drill_skip", hint: "Skip the drill's question", when: () => drilling() },
+  { cmd: "enddrill", mode: "drill_end", hint: "End the drill: summary", when: () => drilling() },
   { cmd: "before", mode: "before", hint: "Before you start: what to know first" },
   { cmd: "deeper", mode: "deeper", hint: "Go deeper on the last answer", when: () => !!(APP.deck && APP.deck.chat && APP.deck.chat.messages.length) },
   { cmd: "bigpicture", mode: "map_deck", hint: "Big picture · whole deck" },
@@ -1114,6 +1124,7 @@ function slashCommand(text) {
   if (c.when && !c.when()) return { error: `/${c.cmd} isn't available right now.` };
   const extra = m[2].trim();
   if (c.needs && !extra) return { error: c.needs };
+  if (c.run) return { run: c.run };
   if (!c.mode) return { run: () => startPracticeInPanel({ kind: tryKind(), focus: extra }) };
   return { run: (spoken) => tutorAsk(c.mode, extra, { spoken }) };
 }
@@ -1121,10 +1132,12 @@ function slashCommand(text) {
 const MODE_LABEL = { explain: "Explain simply", example: "Worked example", deeper: "Go deeper", quiz: "Quiz prep",
   explain_deck: "Explain simply · whole deck", example_deck: "Worked example · whole deck", quiz_deck: "Quiz prep · whole deck",
   map_deck: "Big picture · whole deck", before: "Before you start", before_deck: "Before you start · whole deck",
-  cheatsheet_deck: "Cheat sheet · whole deck", grill: "Grill me", grill_deck: "Grill me · whole deck", grill_end: "End the grill" };
+  cheatsheet_deck: "Cheat sheet · whole deck", grill: "Grill me", grill_deck: "Grill me · whole deck", grill_end: "End the grill",
+  drill: "Exam drill", drill_hint: "Hint", drill_reveal: "Show the answer", drill_skip: "Skip this question", drill_end: "End the drill" };
 const DECK_MODES = ["explain", "example", "quiz", "before", "grill"];
 // The question line for a request: what the student typed, or the mode's label.
-const askText = (mode, question) => (mode === "ask" || mode === "grill_reply" ? question : mode === "brush" ? `Brush up: ${question}`
+const askText = (mode, question) => (mode === "ask" || mode === "grill_reply" || mode === "drill_reply" ? question
+  : mode === "drill" ? question || MODE_LABEL.drill : mode === "brush" ? `Brush up: ${question}`
   : question ? `${MODE_LABEL[mode]}: ${question}` : MODE_LABEL[mode]);     // a slash command's own words follow the mode
 
 // Grill me runs over several turns: while the chat's last answer is a grill question, what the student types is
@@ -1135,7 +1148,16 @@ function grilling() {
   const last = msgs[msgs.length - 1];
   return !!last && last.role === "a" && GRILL_MODES.includes(last.mode);
 }
-const composeHint = () => (grilling() ? "Your answer, or \"stuck\" / \"stop\""
+// An exam drill runs the same way while the chat's last answer is one of the drill's (drill_end closes it).
+const DRILL_MODES = ["drill", "drill_reply", "drill_hint", "drill_reveal", "drill_skip"];
+function drilling() {
+  const chat = APP.deck && APP.deck.chat, msgs = chat ? chat.messages : [];
+  const last = msgs[msgs.length - 1];
+  return !!chat && !!chat.drill && !!last && last.role === "a" && DRILL_MODES.includes(last.mode);
+}
+const replyMode = () => (drilling() ? "drill_reply" : grilling() ? "grill_reply" : "ask");
+const composeHint = () => (drilling() ? "Your answer or what you got on paper, a question, or \"give me the answer\""
+  : grilling() ? "Your answer, or \"stuck\" / \"stop\""
   : APP.tutor === "open" ? "Ask anything about this slide, or / for a mode"
   : `Ask about slide ${Math.min(APP.n, APP.deck ? APP.deck.slides : APP.n)}… or / for a mode`);
 function updateComposeHint() {
@@ -1201,7 +1223,9 @@ function answerTools(m, isLast) {
   // Drawn again while it is read aloud: this one is its ■ Stop now.
   if (VOICE.playBtn && VOICE.playBtn.msg === m) { VOICE.playBtn = play; play.textContent = "■ Stop"; }
   out.push(play);
-  if (isLast && GRILL_MODES.includes(m.mode)) {
+  if (isLast && DRILL_MODES.includes(m.mode) && APP.deck.chat && APP.deck.chat.drill) {
+    out.push(drillFoot());
+  } else if (isLast && GRILL_MODES.includes(m.mode)) {
     out.push(h("div", { class: "msg-foot" },
       h("button", { class: "link", type: "button", title: "Stop here: what held up and what's shaky", onclick: () => tutorAsk("grill_end") }, "End the grill: summary ›")));
   } else if (isLast) {
@@ -1844,8 +1868,15 @@ function metaText(m) {
 // a new one counts as 240px until its first frame).
 const bottom = (th) => { th.scrollTop = th.scrollHeight; requestAnimationFrame(() => requestAnimationFrame(() => { th.scrollTop = th.scrollHeight; })); };
 let askSeq = 0;     // the newest question: only its answer gets the "what next" links
-async function tutorAsk(mode, question = "", { spoken = false } = {}) {
+async function tutorAsk(mode, question = "", { spoken = false, drill = null } = {}) {
   if (APP.scope === "deck" && DECK_MODES.includes(mode)) mode += "_deck";
+  if (mode === "drill") {          // a drill always starts its own chat
+    const d0 = APP.deck;
+    if (d0.chat) d0.chats = [{ id: d0.chat.id, title: d0.chat.title, updated: d0.chat.updated }, ...(d0.chats || [])].slice(0, 5);
+    d0.chat = null;
+    d0.asked = [];
+    if ($("#thread")) drawThread();
+  }
   if (APP.tutor !== "open" || !$("#thread")) { APP.tutor = "open"; renderTutor(); }
   let th = $("#thread");
   const d = APP.deck;
@@ -1895,7 +1926,7 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
     } };
   TURNS.add(me);
   try {
-    const r = await apiStream("/api/tutor", { course: d.course, tag: d.tag, n, mode, question, spoken, model: APP.model, slides_only: slidesOnly(d.course) }, {
+    const r = await apiStream("/api/tutor", { course: d.course, tag: d.tag, n, mode, question, spoken, drill, model: APP.model, slides_only: slidesOnly(d.course) }, {
       status: (t) => { wait.textContent = `${t}…`; },
       text: (t) => {
         if (!acc) { wait.before(ans.root); wait.textContent = "Writing…"; }
@@ -1909,6 +1940,7 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
     // The voice goes on to the end of the saved text; if that isn't what streamed, the pacing is off: all shows.
     if (sp) { if (r.message.text.startsWith(acc.slice(0, fed))) sp.feed(r.message.text.slice(fed)); else ans.showAll(); sp.end(); }
     const chat = d.chat || { id: r.chat, title: askText(mode, question), updated: "", messages: [] };
+    if (r.drill) chat.drill = r.drill;
     chat.messages.push({ role: "q", mode, deck: d.tag, slide: n, text: askText(mode, question), ...(spoken ? { spoken } : {}) }, r.message);
     chat.updated = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
     d.chat = chat;
@@ -1921,6 +1953,7 @@ async function tutorAsk(mode, question = "", { spoken = false } = {}) {
     if (!wait.isConnected) { if (seq === askSeq) drawThread(); return; }
     // Swap in just the finished answer; the rest of the thread stays as it is.
     if (!$(".chat-bar", th)) th.prepend(chatBar(chat));      // the chat's first answer
+    else if (chat.drill) $(".chat-bar", th).replaceWith(chatBar(chat));     // the drill's tally moved on
     wait.remove();
     // Once all of it shows (now, or when the voice is done), the finished answer takes its place, drawings in the text.
     ans.settle = () => {
@@ -2714,6 +2747,102 @@ document.addEventListener("keyup", (e) => {
 
 function showAskedMark() { /* deliberately no marker on the slide */ }
 
+// ------------------------------------------------------------ exam drill
+// Exam-style questions from a range of decks the student picks, in the format of the practice papers they pick (or
+// of the course's assessments), one at a time, worked on paper. The server keeps the range and a log of the questions
+// on the chat (chat.drill); this file only sets it up, shows the tally and offers the drill's buttons.
+
+async function openDrillSetup(viewing = true) {      // viewing: a practice paper open now is the default format
+  const d = APP.deck;
+  if (!d) return;
+  let st;
+  try { st = await api(`/api/drill/setup?course=${encodeURIComponent(d.course)}`); } catch (e) { alert(e.message); return; }
+  const lecture = st.topics.flatMap((t) => t.decks);
+  const chosen = new Set(st.default.decks);
+  const papers = new Set(viewing && st.papers.some((p) => p.tag === d.tag) ? [d.tag] : st.default.papers);     // the paper being viewed
+  const deckBoxes = [], paperBoxes = [];
+  const option = (tag, label, set, list) => {
+    const i = h("input", { type: "checkbox", value: tag });
+    i.checked = set.has(tag);
+    list.push(i);
+    return h("label", { class: "drill-opt" }, i, h("span", {}, label));
+  };
+  const setRange = (tags) => deckBoxes.forEach((i) => { i.checked = tags.includes(i.value); });
+  const upto = h("select", { "aria-label": "From the first deck up to a deck" }, h("option", { value: "" }, "From the start up to…"),
+    ...lecture.map((x) => h("option", { value: x.tag }, x.tag)));
+  upto.onchange = () => { if (upto.value) setRange(lecture.slice(0, lecture.findIndex((x) => x.tag === upto.value) + 1).map((x) => x.tag)); };
+  const nx = st.next;
+  const focus = h("input", { type: "text", class: "drill-focus", "aria-label": "Focus",
+    placeholder: "Optional: e.g. calculations only, harder questions, design questions" });
+  focus.value = st.default.focus || "";
+  const err = h("p", { class: "err", hidden: true });
+  const dlg = h("dialog", { class: "dlg drill-dlg" },
+    h("div", { class: "dlg-head" }, h("h2", {}, "Exam drill"),
+      h("form", { method: "dialog" }, h("button", { class: "icon-btn", "aria-label": "Close" }, "×"))),
+    h("p", { class: "muted small" }, "Questions like the real paper, one at a time, from the decks you pick. Work on paper, then send what you got (typed, spoken or a photo). Hints when you ask; the answer only when you ask for it, then the written solution, a shortcut and the method for variants."),
+    h("h3", {}, "Decks in range"),
+    h("div", { class: "drill-quick" }, upto,
+      nx ? h("button", { class: "link", type: "button", onclick: () => setRange(lecture.filter((x) => x.week >= nx.weeks[0] && x.week <= nx.weeks[1]).map((x) => x.tag)) },
+        `${nx.name} (W${nx.weeks[0]}–${nx.weeks[1]}${nx.assumed ? ", assumed" : ""})`) : null,
+      h("button", { class: "link", type: "button", onclick: () => setRange(lecture.map((x) => x.tag)) }, "All"),
+      h("button", { class: "link", type: "button", onclick: () => setRange([]) }, "None")),
+    h("div", { class: "drill-decks" }, ...st.topics.map((t) => h("div", { class: "drill-topic" }, h("b", {}, t.name),
+      ...t.decks.map((x) => option(x.tag, `${x.tag} · W${x.week} · ${x.title}`, chosen, deckBoxes))))),
+    h("h3", {}, "Format from"),
+    st.papers.length
+      ? h("div", { class: "drill-decks" }, ...st.papers.map((p) => option(p.tag, `${p.tag} · ${p.title}`, papers, paperBoxes)),
+        h("p", { class: "muted small" }, "None ticked: the format of the course's assessments."))
+      : h("p", { class: "muted small" }, "No practice papers in this course yet: the drill follows the assessment format in the course notes."),
+    h("h3", {}, "Focus"), focus, err,
+    h("div", { class: "drill-go" }, h("button", { class: "btn", type: "button", onclick: () => {
+      const decks = deckBoxes.filter((i) => i.checked).map((i) => i.value);
+      if (!decks.length) { err.hidden = false; err.textContent = "Pick at least one deck."; return; }
+      dlg.close();
+      tutorAsk("drill", "", { drill: { decks, papers: paperBoxes.filter((i) => i.checked).map((i) => i.value), focus: focus.value.trim() } });
+    } }, "Start the drill")));
+  dlg.addEventListener("close", () => dlg.remove());
+  document.body.append(dlg);
+  dlg.showModal();
+}
+
+// On the chat bar: the range, questions done, marks so far, decks covered, what's coming back.
+function drillStatus(dr) {
+  const log = dr.log || [];
+  const asked = new Set(log.map((e) => e.deck));
+  let got = 0, set = 0;
+  for (const e of log) {
+    const m = /^\s*(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)/.exec(e.marks || "");
+    if (m) { got += +m[1]; set += +m[2]; }
+  }
+  const redo = log.filter((e) => ["hinted", "revealed", "skipped"].includes(e.outcome) || (e.mistake && e.mistake !== "none")).length;
+  const range = dr.decks.length > 1 ? `${dr.decks[0]} → ${dr.decks[dr.decks.length - 1]}` : dr.decks[0];
+  return h("span", { class: "drill-status", title: `Range: ${dr.decks.join(", ")}${dr.papers.length ? ` · format of ${dr.papers.join(", ")}` : ""}` },
+    `Drill · ${range} · ${log.length} done` + (set ? ` · ${got}/${set} marks` : "") +
+    ` · ${dr.decks.filter((t) => asked.has(t)).length}/${dr.decks.length} decks` + (redo ? ` · ${redo} to revisit` : ""));
+}
+
+// Under the drill's last answer: what the student can do besides typing an answer.
+function drillFoot() {
+  const chat = APP.deck.chat;
+  const target = { id: chat.id, drill: true, photos: (chat.drill.photos || []).length };
+  const count = h("span", { class: "count" });
+  const setPhotos = (k) => {
+    target.photos = k;
+    chat.drill.photos = Array(k).fill("");
+    count.replaceChildren(k ? [`${k} photo${k === 1 ? "" : "s"} added · `,
+      h("button", { class: "link", type: "button", onclick: () => tutorAsk("drill_reply", "My working is in the photo.") }, "Mark it ›")] : []);
+  };
+  setPhotos(target.photos);
+  return h("div", { class: "msg-foot drill-foot" },
+    h("button", { class: "link", type: "button", title: "The next hint, never the answer (/hint)", onclick: () => tutorAsk("drill_hint") }, "Hint"),
+    h("button", { class: "link", type: "button", title: "The written solution for full marks, a shortcut and the method for variants (/answer)", onclick: () => tutorAsk("drill_reveal") }, "Show the answer"),
+    h("button", { class: "link quiet", type: "button", title: "Move on; it comes back later in the drill (/skip)", onclick: () => tutorAsk("drill_skip") }, "Skip"),
+    h("button", { class: "link quiet", type: "button", title: "A photo of your page: it goes with your next reply", onclick: () => pickPhoto(target, setPhotos) }, "📷 Photo"),
+    APP.phoneUrl && !isPhone() ? h("button", { class: "link quiet", type: "button", title: "Take the photo with your phone", onclick: () => sendFromPhone(target, setPhotos) }, "📱 From phone") : null,
+    count,
+    h("button", { class: "link quiet", type: "button", title: "Stop: marks per topic, what held up, what's shaky (/enddrill)", onclick: () => tutorAsk("drill_end") }, "End the drill ›"));
+}
+
 // ------------------------------------------------------------ practice
 
 function openPractice(courseId, p) {
@@ -2901,7 +3030,7 @@ function pickPhoto(prob, setPhotos) {
     setPhotos(0);
     try {
       const data = await shrinkImage(f);
-      const r = await api("/api/practice/photo", { id: prob.id, data });
+      const r = await api(prob.drill ? "/api/drill/photo" : "/api/practice/photo", prob.drill ? { chat: prob.id, data } : { id: prob.id, data });
       setPhotos(r.photos);
     } catch (e) { alert(e.message); }
   };
@@ -2926,7 +3055,7 @@ function shrinkImage(file) {
 }
 
 function sendFromPhone(prob, setPhotos) {
-  const url = `${APP.phoneUrl}#upload=${prob.id}`;
+  const url = `${APP.phoneUrl}#upload=${prob.drill ? "drill-" : ""}${prob.id}`;
   const qr = qrcode(0, "M"); qr.addData(url); qr.make();
   $("#qr-title").textContent = "Send a photo from your phone";
   $("#qr-text").textContent = "Scan this with your phone's camera, take a photo of your working, and it appears here.";
@@ -2934,8 +3063,12 @@ function sendFromPhone(prob, setPhotos) {
   $("#qr-url").textContent = "";
   const dlg = $("#qr-dlg");
   dlg.showModal();
+  const sent = prob.photos || 0;        // the count before this phone's photo
   const timer = setInterval(async () => {
-    try { const r = await api(`/api/practice?id=${prob.id}`); setPhotos(r.photos); if (r.photos) dlg.close(); } catch { /* keep polling */ }
+    try {
+      const r = await api(prob.drill ? `/api/drill?chat=${prob.id}` : `/api/practice?id=${prob.id}`);
+      if (r.photos !== sent) { setPhotos(r.photos); dlg.close(); }
+    } catch { /* keep polling */ }
   }, 2500);
   dlg.addEventListener("close", () => clearInterval(timer), { once: true });
 }
@@ -2945,7 +3078,11 @@ async function showUpload(pid) {
   $("#session-bar").hidden = true;
   const main = $("#main");
   let prob;
-  try { prob = await api(`/api/practice?id=${encodeURIComponent(pid)}`); }
+  const drill = pid.startsWith("drill-") ? pid.slice(6) : null;
+  try {
+    prob = drill ? await api(`/api/drill?chat=${encodeURIComponent(drill)}`) : await api(`/api/practice?id=${encodeURIComponent(pid)}`);
+    if (drill) prob = { slides: `${prob.title} · Q${prob.q}`, problem_md: "Take a photo of your page for the open question. It goes with your next reply in the drill.", photos: prob.photos };
+  }
   catch (e) { main.replaceChildren(h("div", { class: "upload-page" }, h("p", { class: "err" }, e.message))); return; }
   const status = h("p", { class: "muted" }, prob.photos ? `${prob.photos} photo${prob.photos === 1 ? "" : "s"} sent so far.` : "");
   const btn = h("button", { class: "btn big", type: "button" }, "Take a photo of your working");
@@ -2957,7 +3094,8 @@ async function showUpload(pid) {
       if (!f) return;
       status.textContent = "Sending…";
       try {
-        const r = await api("/api/practice/photo", { id: pid, data: await shrinkImage(f) });
+        const data = await shrinkImage(f);
+        const r = await api(drill ? "/api/drill/photo" : "/api/practice/photo", drill ? { chat: drill, data } : { id: pid, data });
         status.textContent = `Sent ✓ (${r.photos} photo${r.photos === 1 ? "" : "s"}). Check your laptop, or add another.`;
         btn.textContent = "Add another photo";
       } catch (e) { status.textContent = e.message; }

@@ -7,6 +7,9 @@ study logic.
 Modes
 - chat (explain / example / quiz / map / before / cheatsheet / grill / ask / deeper / brush / side): Markdown answers
   streamed into the course's chat; a grill runs over several turns (the student's answers come back as grill_reply)
+- drill (drill / drill_reply / drill_hint / drill_reveal / drill_skip / drill_end): an exam drill in its own chat:
+  exam-style questions from a range of decks in the format of the practice papers picked, worked on paper; the
+  range and a log of the questions live on the chat (chat["drill"])
 - voice: a spoken question (the retired Talk tab's mode, still accepted), answered in plain spoken sentences
   (voice_prompt.md) in the same chat; afterwards the tutor's notes on the student (study/tutor-memory.md) are
   updated in the background. Dictated questions now go as asks with spoken: true.
@@ -354,17 +357,304 @@ they asked to stop or every branch is covered, the summary.""",
 If no grill has run in this chat, say so in one line instead.""",
 }
 
-DECK_MODES = {"explain_deck", "example_deck", "quiz_deck", "map_deck", "before_deck", "cheatsheet_deck", "grill_deck"}
+# Exam drill: exam-style questions one at a time from a range of decks the student picked, in the format of the
+# practice papers they picked (or of the course's assessments), solved on paper. Like the grill it runs over several
+# turns ("drill" opens, the student's replies come back as "drill_reply", the buttons send drill_hint / drill_reveal /
+# drill_skip / drill_end), but its range and papers live on the chat (chat["drill"]) and every turn's prompt carries
+# them again with a ledger of the questions so far, so the range and the rotation hold over a long chat. Each closed
+# question ends with a hidden <!--drill {...}--> line: the server strips it, logs the question, and sends a missed one
+# to the review queue (a clean solve marks its deck solved).
+DRILL_SUMMARY = """#### How the drill went
+**Marks:** <one line per topic asked: topic · marks earned/available>
+**Held up:** <bullets: what they showed they can write for full marks, each with its slide>
+**Shaky:** <bullets: each gap, the right idea in one line, its slide; "- nothing" if none>
+**Next:** <one line: the topic or question type to drill next>"""
+DRILL_RULES = """
+
+Range: ask only from these decks, never from a deck outside them, even one in the same topic:
+{range}
+Format model: {papers}
+{focus}So far in this drill (kept by the hub; trust it over your memory of the chat):
+{ledger}
+Known weak points of this student (steer towards any inside the range; don't mention the list):
+{mistakes}
+
+The paper is the format, never the source. From it take the question types, the parts and marks per part, how
+much working earns marks, the command verbs ("prove", "state the constants", "justify", "trace", "which and
+why") and the length. Write new questions of those types on any deck in the range, including decks the paper never
+asks about. Never reuse a paper's question or a slide's own example: change the setting, the numbers and what is
+asked. Before writing a question on a deck whose slides aren't included below, Read its transcript (the map has
+the path), and stay inside what it teaches.
+
+Choosing the next question:
+- Cover every deck in the range before repeating one, out of deck order; each question changes topic from the
+  last one and, where the format allows, question type.
+- Begin with the format's smaller parts; move to full-weight questions once two answers hold up.
+- A concept missed earlier comes back 2–4 questions later, in a different form.
+- A skipped question is listed under revisit and asked again later in the cycle, in a new form.
+
+Asking, this shape, then stop:
+**Q<n> · <topic> · <question type>** [<marks> marks] (style of [<paper tag> s<N>] <its question number>, when
+there is a paper)
+<the question, with its parts and the marks per part as the format sets them; a big design or proof question
+opens with a small part that gives a way in>
+**Slides you can use:** <2–4 slides, each with a few words on what it gives: the definition, the rule, a similar
+example>
+No hint, no method, no answer.
+
+The student works on paper. Never ask them to type out their working: they send the result and the key steps,
+often dictated by voice ("p squared", "10" for p), or a photo of the page. Read them generously, say in one
+line how you read anything unclear, and never take marks off for transcription. A photo is marked like typed work.
+A part they say is done on paper is taken as attempted; the write-up shows what it should contain.
+
+Each reply, until the drill ends:
+- An attempt, even a guess ("is it n²?"): for each part, "Right", "Right, but" or "Not quite" and the marks it
+  would earn as it stands, e.g. (2/3): method marks for a valid approach, accuracy marks for the result, none for
+  a bare answer where the format asks for working. Then the first wrong or missing step in one line, and a hint.
+- A question ("which slide?", "how do I get…?", "am I on track?"): answer it as a hint, never with the answer.
+- Hints climb one rung each time they stay stuck on the same point: (1) the slide and the rule or feature to use,
+  asked as a question; (2) the first line, or the working with blanks to fill; (3) tiny numbers, a small table or
+  a drawing aimed at what they misread. A hint never states the result it leads to. About 150 words.
+- Only when they ask for the answer in so many words (give me / show me / lay out / go to the answer, "let's
+  just solve it", "I give up"): the write-up at once, for the whole question unless they name a part.
+- When every part is right, by them or revealed: the write-up, then the next question.
+
+The write-up, this shape, up to about 450 words; keep it tight so the next question isn't buried:
+#### Q<n> · Solution 1: as written for full marks
+<the answer as it should look on paper, the shortest version that earns full marks: each line that earns a mark
+tagged at its end as [1], constants and conditions explicit, the rule behind each step named>
+#### Solution 2: shortcut
+<a faster route or a check (a theorem, a pattern, a small case, a bound), and one line on whether it earns full
+marks written alone or only checks the answer>
+#### Method for variants
+<a numbered recipe in general symbols that solves this kind of question, then 2–3 one-line variants it also
+solves: other numbers, a changed condition, the reverse question>
+**Common mistakes:** <2–3 one-liners; the student's own mistake first, if they made one>
+**Slides:** <every slide the write-up used>
+**Tally:** Q<n> <marks earned>/<marks set> · decks covered: <n of N> · revisit: <missed concepts, or none>
+<!--drill {{"q": <n>, "deck": "<the deck tag it tests>", "slides": "<e.g. TAG s14–s16>", "concept": "<at most 8 words>", "problem": "<the question as asked, under 120 words, Markdown/KaTeX>", "marks": "<earned>/<set>", "outcome": "<solo | hinted | revealed | skipped>", "mistake": "<none | No attempt | Concept gap | Setup | Method choice | Algebra slip | Skipped step>"}}-->
+
+---
+<the next question>
+
+The <!--drill …--> line is read by the hub, never shown: exactly one, on its own line, valid JSON, only in a reply
+that closes a question (the write-up, or a skip). outcome: solo = they reached it with no hints; hinted = they
+reached it after hints; revealed = you gave the answer; skipped = they moved on. mistake = their first error (none
+if there was none).
+
+End when the student asks to stop: instead of a new question, this summary:
+
+""" + DRILL_SUMMARY
+DRILL_PROMPTS = {
+    "drill": """Run an exam drill: questions like the real paper, one at a time, until the student stops.
+This turn: one line restating the range as its first and last deck and anything left out (e.g. "[A] → [F], not
+[D]"), so a wrong range shows up at once; one line naming the question types and mark weights you will mirror;
+then Q1.""" + DRILL_RULES,
+    "drill_reply": """The student's reply in the exam drill (they are on slide {where}):
+
+{question}{photos}
+
+Carry on the drill by its rules: mark it or hint, the answer only on an explicit request, then the write-up and
+the next question; or, if they asked to stop, the summary.""" + "{rules}",
+    "drill_hint": """The student asks for a hint on the open question. Give the next rung of the hint ladder, not the
+answer.{photos}""" + "{rules}",
+    "drill_reveal": """The student asks for the answer to the open question (all of it). Mark anything they sent first,
+then the write-up and the next question.{photos}""" + "{rules}",
+    "drill_skip": """The student skips the open question for now: no write-up. One line naming what it tested, the hidden
+drill line with outcome skipped, then the next question (a different topic).""" + "{rules}",
+    "drill_end": """End the drill now: no new question. If a question is open, close it first with its hidden drill
+line (outcome skipped). Then, from every answer in this drill, this summary:
+
+""" + DRILL_SUMMARY + """
+
+If no drill has run in this chat, say so in one line instead.""" + "{rules}",
+}
+DRILL_MODES = set(DRILL_PROMPTS)
+DRILL_TAG = re.compile(r"[ \t]*<!--\s*drill\s*(\{.*?\})\s*-->[ \t]*\n?", re.S)
+# Later drill turns get the rules again in short (the full set opened the drill; the ledger is what moves on).
+DRILL_REMIND = """
+
+Drill reminder: range {range_short}. {focus}So far:
+{ledger}
+Keep to the drill's rules from its first turn: one question at a time, never outside the range, the answer only on an
+explicit request, the write-up shape with the hidden drill line when a question closes."""
+
+
+def drill_config(cdir, decks, papers, focus=""):
+    """A drill's range and papers, checked against the course: lecture decks in lecture order, practice decks."""
+    info = L.course_info(cdir)
+    practice = set(info["practice"])
+    order = [d["tag"] for d in L.deck_order(cdir)]
+    want = {str(t) for t in decks or []}
+    decks = [t for t in order if t in want and t not in practice]
+    if not decks:
+        raise TutorError("Pick at least one deck for the drill.", 400)
+    want = {str(t) for t in papers or []}
+    papers = [t for t in order if t in want and t in practice]
+    return {"decks": decks, "papers": papers, "focus": " ".join(str(focus or "").split())[:500],
+            "started": time.strftime("%Y-%m-%d %H:%M"), "log": [], "photos": []}
+
+
+def drill_setup(cdir):
+    """What the drill's setup dialog shows: the decks by topic, the practice papers, and a default range (the next
+    test's weeks, or the last drill's choice)."""
+    info = L.course_info(cdir)
+    nxt = L.next_assessment(cdir)
+    lecture = [d for d in L.deck_order(cdir) if d["tag"] not in info["practice"]]
+    topics = []
+    for d in lecture:
+        if not topics or topics[-1]["name"] != d["topic"]:
+            topics.append({"name": d["topic"], "decks": []})
+        topics[-1]["decks"].append({"tag": d["tag"], "title": d["title"], "week": d["week"]})
+    last = next((c.get("drill") for c in map(load_chat, (x["id"] for x in course_chats(cdir))) if c and c.get("drill")), None)
+    if last:
+        default = {"decks": last["decks"], "papers": last["papers"], "focus": last.get("focus", "")}
+    else:
+        lo, hi = nxt["weeks"] if nxt else (0, 99)
+        default = {"decks": [d["tag"] for d in lecture if lo <= d["week"] <= hi], "papers": [], "focus": ""}
+    return {"topics": topics, "papers": [{"tag": t, "title": info["decks"][t]["title"]} for t in info["practice"]],
+            "default": default, "last": bool(last),
+            "next": nxt and {"name": nxt["name"], "weeks": nxt["weeks"], "assumed": nxt["assumed"]}}
+
+
+def _range_text(cdir, cfg):
+    info = L.course_info(cdir)
+    out, topic = [], None
+    for t in cfg["decks"]:
+        d = info["decks"][t]
+        if d["topic"] != topic:
+            topic = d["topic"]
+            out.append(f"- {topic}:")
+        out.append(f"  - [{t}] {d['title']}")
+    left = [d["tag"] for d in L.deck_order(cdir) if d["tag"] not in cfg["decks"] and d["tag"] not in info["practice"]]
+    if left:
+        out.append(f"Not in range (never ask from these): {', '.join(f'[{t}]' for t in left)}")
+    return "\n".join(out)
+
+
+def _range_short(cfg):
+    ds = cfg["decks"]
+    return f"[{ds[0]}] → [{ds[-1]}] ({len(ds)} decks: {', '.join(ds)})" if len(ds) > 1 else f"[{ds[0]}] only"
+
+
+def _papers_text(cdir, cfg):
+    if cfg["papers"]:
+        info = L.course_info(cdir)
+        return ("the practice paper(s) " + ", ".join(f"[{t}] {info['decks'][t]['title']}" for t in cfg["papers"]) +
+                " (their pages are included below). Questions only; any solution you give is your own.")
+    return ("no sample paper was picked: mirror the format of this course's next assessment (CLAUDE.md: its format, "
+            f"time and aids; question style: {STYLE.get(info_code(cdir), 'exam-style questions')}). Exercise and "
+            "self-check slides in the range show the kind of question the course sets.")
+
+
+def info_code(cdir):
+    return L.course_meta(cdir)[0]
+
+
+def _ledger(cfg):
+    """The questions so far, from the hidden drill lines: what's been asked, how it went, what's still to come."""
+    log_ = cfg.get("log", [])
+    if not log_:
+        return "- nothing yet: this is the first question."
+    out = [f"- Q{e.get('q', '?')} [{e.get('deck', '?')}] {e.get('concept', '')}: {e.get('marks', '?')}, {e.get('outcome', '?')}"
+           for e in log_[-15:]]
+    asked = {e.get("deck") for e in log_}
+    todo = [t for t in cfg["decks"] if t not in asked]
+    out.append(f"- Decks not asked yet this cycle: {', '.join(todo) if todo else 'none: start the next cycle, weakest first'}")
+    redo = [f"{e.get('concept') or 'Q' + str(e.get('q', '?'))} [{e.get('deck', '')}]" for e in log_[-15:] if e.get("outcome") in ("hinted", "revealed", "skipped")
+            or e.get("mistake", "none") != "none"]
+    out.append(f"- Revisit (in a new form): {'; '.join(redo) if redo else 'none'}")
+    out.append(f"- Next question number: Q{max([int(e.get('q') or 0) for e in log_ if str(e.get('q', '')).isdigit()] + [len(log_)]) + 1}")
+    return "\n".join(out)
+
+
+def drill_system_prompt(cdir, cfg, web):
+    """The system prompt of a drill chat: the same whichever deck is open (so jumping to a slide doesn't reopen the
+    conversation), with the papers' pages and, when they fit, every deck in the range."""
+    info = L.course_info(cdir)
+    papers = "\n\n".join(L.deck_context(cdir, t) for t in cfg["papers"])
+    decks = "\n\n".join(L.deck_context(cdir, t) for t in cfg["decks"])
+    parts = []
+    if papers:
+        parts.append(f"# The practice paper(s) the drill copies the format of\n\n{papers}")
+    if len(papers) + len(decks) <= 100_000:
+        parts.append(f"# Slides of every deck in the drill's range\n\n{decks}")
+    else:
+        parts.append("# Slides of the drill's range\n\nToo many to include: Read a deck's transcript (path in the map) "
+                     "before writing a question on it, only the deck you are asking about.")
+    return SYSTEM.format(code=info["code"], title=info["title"], sources=SOURCES_WEB if web else SOURCES_SLIDES,
+                         context="\n\n".join(parts), course_map=L.course_map(cdir))
+
+
+def chat_system(cdir, chat, tag, web):
+    return drill_system_prompt(cdir, chat["drill"], web) if chat and chat.get("drill") else system_prompt(cdir, tag, web)
+
+
+def _drill_prompt(cdir, chat, mode, tag, n, question):
+    cfg = chat["drill"]
+    photos = cfg.get("photos") or []
+    photo_txt = ("\n\nPhotos of the student's handwritten working (Read each image file):\n" +
+                 "\n".join(f"- {p}" for p in photos)) if photos and mode != "drill" else ""
+    focus = f"The student asked for: \"{cfg['focus']}\". Follow it inside the range.\n" if cfg.get("focus") else ""
+    fill = {"range": _range_text(cdir, cfg), "papers": _papers_text(cdir, cfg), "focus": focus, "ledger": _ledger(cfg),
+            "mistakes": weak_points(cdir), "where": where(cdir, tag, n), "question": question.strip() or "(see the photos)",
+            "photos": photo_txt}
+    if mode == "drill":
+        return DRILL_PROMPTS["drill"].format(**fill)
+    rules = DRILL_REMIND.format(range_short=_range_short(cfg), focus=focus, ledger=fill["ledger"])
+    return DRILL_PROMPTS[mode].format(**fill, rules=rules)
+
+
+def _drill_record(cdir, chat, text):
+    """Strip the hidden drill lines from an answer; log each closed question on the chat, and send a missed one to the
+    review queue (a clean solve marks its deck solved). Returns the text without them."""
+    cfg = chat["drill"]
+    for raw in DRILL_TAG.findall(text):
+        # KaTeX in "problem" comes with single backslashes (\sum, \frac): escape each lone one, keeping \\ and \"
+        raw = re.sub(r'\\\\|\\"|\\', lambda m: m.group(0) if len(m.group(0)) == 2 else "\\\\", raw)
+        try:
+            e = json.loads(raw, strict=False)
+        except json.JSONDecodeError:
+            log(f"drill tag unreadable chat={chat['id']}: {raw[:200]}")
+            continue
+        if not isinstance(e, dict):
+            continue
+        e = {k: str(e.get(k, "")).strip()[:2000] for k in ("q", "deck", "slides", "concept", "problem", "marks", "outcome", "mistake")}
+        e["mistake"] = e["mistake"] if e["mistake"] in MARK_SCHEMA["properties"]["mistake"]["enum"] else "none"
+        deck_ok = e["deck"] in cfg["decks"]
+        m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", e["marks"])
+        full = bool(m) and float(m.group(1)) >= float(m.group(2))
+        before = next((x for x in cfg.get("log", []) if e["q"] and x.get("q") == e["q"]), {})
+        if before.get("review_id"):         # the same question closed again (e.g. by End the drill): saved once
+            e["review_id"] = before["review_id"]
+        elif e["outcome"] == "solo" and e["mistake"] == "none" and (full or not m):
+            if deck_ok:
+                S.mark_solved(cdir, e["deck"])
+        elif e["outcome"] != "skipped" and e["problem"]:
+            mistake = e["mistake"] if e["mistake"] != "none" else {"revealed": "No attempt", "hinted": "Needed hints"}.get(
+                e["outcome"], "Skipped step")       # solo but marks lost: a justification left out
+            item = S.add_mistake(cdir, deck=e["deck"] if deck_ok else None, slides=e["slides"], concept=e["concept"],
+                                 problem_md=e["problem"], mistake=mistake)
+            e["review_id"] = item["id"]
+        if before:      # closed again: keep what the first close said
+            e = before | {k: v for k, v in e.items() if v and v != "none" and not (k == "outcome" and v == "skipped")}
+        e["at"] = time.strftime("%Y-%m-%d %H:%M")
+        cfg["log"] = [x for x in cfg.get("log", []) if not (x.get("q") == e["q"] and e["q"])] + [e]
+    return DRILL_TAG.sub("", text).rstrip()
+
+
+DECK_MODES = {"explain_deck","example_deck", "quiz_deck", "map_deck", "before_deck", "cheatsheet_deck", "grill_deck"}
 MODE_LABELS = {"explain": "Explain simply", "example": "Worked example", "deeper": "Go deeper", "quiz": "Quiz prep",
                "map_deck": "Big picture · whole deck", "before": "Before you start",
                "before_deck": "Before you start · whole deck", "cheatsheet_deck": "Cheat sheet · whole deck",
                "explain_deck": "Explain simply · whole deck", "example_deck": "Worked example · whole deck",
                "quiz_deck": "Quiz prep · whole deck", "grill": "Grill me", "grill_deck": "Grill me · whole deck",
-               "grill_end": "End the grill"}       # grill_reply is labelled with the student's answer, like ask
+               "grill_end": "End the grill", "drill": "Exam drill", "drill_hint": "Hint", "drill_reveal": "Show the answer",
+               "drill_skip": "Skip this question", "drill_end": "End the drill"}    # grill_reply / drill_reply: the student's words
 
 
 # A mode asked by slash command (/explain …) can carry the student's own words: added to the mode's prompt.
-QUESTION_MODES = {"ask", "brush", "grill_reply"}       # their prompts already are the student's words
+QUESTION_MODES = {"ask", "brush", "grill_reply", "drill_reply"}       # their prompts already are the student's words
 EXTRA = """
 
 The student added this to the request: "{extra}". Let it shape the answer (what to focus on, an example to use,
@@ -403,32 +693,44 @@ def current_chat(cdir):
     return chat_id
 
 
-def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=False, spoken=False):
+def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=False, spoken=False, drill=None):
     """One tutor answer inside the course's chat, about deck tag. Returns the saved message and the chat id. whole_deck: a voice
-    question asked with Whole deck chosen (about the deck, not slide n)."""
+    question asked with Whole deck chosen (about the deck, not slide n). drill: a new exam drill's config
+    (drill_config), for mode "drill": it always starts a new chat."""
     whole_deck = whole_deck and mode == "voice"
-    if mode not in CHAT_PROMPTS and mode != "voice":
+    if mode not in CHAT_PROMPTS and mode not in DRILL_MODES and mode != "voice":
         raise TutorError("Unknown request.", 400)
+    if mode == "drill" and not drill:
+        raise TutorError("Pick the drill's range first.", 400)
     extra = question.strip() if mode in CHAT_PROMPTS and mode not in QUESTION_MODES else ""
     label = MODE_LABELS.get(mode) or (f"Brush up: {question.strip()}" if mode == "brush" else question.strip())
     if extra and mode in MODE_LABELS:
         label = f"{MODE_LABELS[mode]}: {extra}"
+    if mode == "drill":
+        label = f"Exam drill: {_range_short(drill).split(' (')[0]}" + (f" · {', '.join(drill['papers'])}" if drill["papers"] else "")
     now = time.strftime("%Y-%m-%d %H:%M")
     lock = _course_lock(cdir)
     with lock:
-        chat_id = current_chat(cdir)
+        chat_id = None if mode == "drill" else current_chat(cdir)
         chat = load_chat(chat_id) if chat_id else None
         joined = chat is None and chat_id in _PENDING
         if joined:      # another turn is starting this chat right now: join it
             chat = dict(_PENDING[chat_id])
         created = chat is None
         if created:     # the file is saved only once Claude has answered
-            chat = {"id": _WARM_IDS.pop(cdir.name, None) or uuid.uuid4().hex[:12], "course": cdir.name,
-                    "code": L.course_meta(cdir)[0], "deck": tag, "created": now, "messages": [],
-                    "title": f"{label[:70]} · " + (tag if mode in DECK_MODES or whole_deck else f"s{n}")}
+            chat = {"id": (None if mode == "drill" else _WARM_IDS.pop(cdir.name, None)) or uuid.uuid4().hex[:12],
+                    "course": cdir.name, "code": L.course_meta(cdir)[0], "deck": tag, "created": now, "messages": [],
+                    "title": label[:90] if mode == "drill" else
+                    f"{label[:70]} · " + (tag if mode in DECK_MODES or whole_deck else f"s{n}")}
+            if mode == "drill":
+                chat["drill"] = drill
             _PENDING[chat["id"]] = dict(chat, messages=[])
             S.set_chat(cdir, chat["id"])
-    if mode == "voice":
+    if mode in DRILL_MODES and not chat.get("drill"):
+        raise TutorError("No drill is running in this chat. Start one with Exam drill.", 400)
+    if mode in DRILL_MODES:
+        prompt = _drill_prompt(cdir, chat, mode, tag, n, question)
+    elif mode == "voice":
         prompt = voice_prompt(cdir, f"the whole deck {deck_where(cdir, tag)}" if whole_deck else f"slide {where(cdir, tag, n)}",
                               question.strip())
     else:
@@ -438,8 +740,9 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=Fa
                                            mistakes=weak_points(cdir) if mode in ("grill", "grill_deck") else "")
         if extra:
             prompt += EXTRA.format(extra=extra[:2000])
+    sent_photos = list((chat.get("drill") or {}).get("photos") or []) if mode in DRILL_MODES and mode != "drill" else []
     try:
-        r = run_claude(cdir, system_prompt(cdir, tag, web), prompt, model=model, chat_key=(cdir.name, chat["id"]),
+        r = run_claude(cdir, chat_system(cdir, chat, tag, web), prompt, model=model, chat_key=(cdir.name, chat["id"]),
                        session=chat.get("session"), web=web, label=f"chat:{mode}", emit=emit)
         msg = {"role": "a", "mode": mode, "deck": tag, "slide": n, "text": r["text"], "ms": r["ms"], "cost": r["cost"], "model": model}
         with lock:      # reload: another turn on this chat may have been saved while this one was answered
@@ -447,6 +750,10 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=Fa
             if saved is None and not (created or joined):       # deleted while answering: don't bring it back
                 raise TutorError("That chat was deleted while it was answering.", 410)
             chat = saved or chat
+            if chat.get("drill"):       # the hidden drill lines go into the drill's log, not into the chat's text
+                msg["text"] = _drill_record(cdir, chat, msg["text"])
+                if sent_photos:         # photos sent with this turn have been read: the next turn starts empty
+                    chat["drill"]["photos"] = [p for p in chat["drill"].get("photos", []) if p not in sent_photos]
             chat["session"] = r["session"] or chat.get("session")       # the last finished turn's
             chat["updated"] = time.strftime("%Y-%m-%d %H:%M")
             q = {"role": "q", "mode": mode, "deck": tag, "slide": n, "text": label}
@@ -464,8 +771,8 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=Fa
         remember(cdir, tag, None if whole_deck else n, question.strip(), r["text"])
     elif spoken and mode == "ask":      # a spoken question typed into Ask is remembered like a voice turn
         remember(cdir, tag, n, question.strip(), r["text"])
-    elif mode == "grill_reply":     # a missed point in a grill goes into the same notes as a corrected voice mistake
-        remember(cdir, tag, n, question.strip(), r["text"], grill=True)
+    elif mode in ("grill_reply", "drill_reply"):    # a missed point goes into the same notes as a corrected voice mistake
+        remember(cdir, tag, n, question.strip(), msg["text"], grill=True)
     return chat, msg
 
 
@@ -479,7 +786,7 @@ def warm_chat(cdir, tag, model, web):
             return      # its first turn is already opening it
         if chat is None:
             chat = {"id": _WARM_IDS.setdefault(cdir.name, uuid.uuid4().hex[:12])}
-    engine.open_chat((cdir.name, chat["id"]), cdir, system_prompt(cdir, tag, web),
+    engine.open_chat((cdir.name, chat["id"]), cdir, chat_system(cdir, chat, tag, web),
                      model=model if model in MODELS else DEFAULT_MODEL, web=web, session=chat.get("session"), log=log)
 
 
@@ -750,7 +1057,8 @@ def list_chats():
         except (OSError, json.JSONDecodeError):
             continue
         out.append({k: c.get(k) for k in ("id", "title", "course", "code", "deck", "created", "updated")}
-                   | {"starred": bool(c.get("starred")), "count": sum(1 for m in c.get("messages", []) if m["role"] == "q")})
+                   | {"starred": bool(c.get("starred")), "drill": bool(c.get("drill")),
+                      "count": sum(1 for m in c.get("messages", []) if m["role"] == "q")})
     out.sort(key=lambda c: c["updated"] or "", reverse=True)
     return sorted(out, key=lambda c: not c["starred"])       # starred first, each group newest first
 
@@ -1066,12 +1374,9 @@ def check(cdir, pid, answer, model, web, emit=None):
             "ms": r["ms"], "cost": r["cost"]}
 
 
-def add_photo(cdir, pid, data):
-    """Save a photo of handwritten work inside the course folder (so the tutor may read it)."""
+def _save_image(cdir, stem, data):
+    """Save a photo of handwritten work inside the course folder (so the tutor may read it); its relative path."""
     import base64
-    rec = get_practice(pid)
-    if not rec:
-        raise TutorError("That problem has expired.", 404)
     m = re.match(r"^data:image/(jpeg|jpg|png|webp);base64,(.+)$", data or "", re.S)
     if not m:
         raise TutorError("That isn't an image.", 400)
@@ -1079,9 +1384,40 @@ def add_photo(cdir, pid, data):
     if len(raw) > 12_000_000:
         raise TutorError("That photo is too large (over 12 MB).", 400)
     ext = "jpg" if m.group(1) in ("jpeg", "jpg") else m.group(1)
-    rel = f".cache/uploads/{pid}-{len(rec['photos']) + 1}.{ext}"
+    rel = f".cache/uploads/{stem}.{ext}"
     (cdir / rel).parent.mkdir(parents=True, exist_ok=True)
     (cdir / rel).write_bytes(raw)
-    rec["photos"].append(rel)
+    return rel
+
+
+def add_photo(cdir, pid, data):
+    rec = get_practice(pid)
+    if not rec:
+        raise TutorError("That problem has expired.", 404)
+    rec["photos"].append(_save_image(cdir, f"{pid}-{len(rec['photos']) + 1}", data))
     _save_practice(rec)
     return {"photos": len(rec["photos"])}
+
+
+def add_drill_photo(chat_id, data):
+    """A photo of the page for the drill's open question: it goes with the student's next reply, then is cleared."""
+    with _CHAT_LOCK:
+        chat = load_chat(chat_id)
+    cdir = L.course_dir(chat["course"]) if chat and chat.get("drill") else None
+    if not cdir:
+        raise TutorError("That drill is no longer open.", 404)
+    with _course_lock(cdir):
+        chat = load_chat(chat_id)
+        k = sum(1 for _ in (cdir / ".cache" / "uploads").glob(f"drill-{chat_id}-*")) if (cdir / ".cache" / "uploads").is_dir() else 0
+        chat["drill"].setdefault("photos", []).append(_save_image(cdir, f"drill-{chat_id}-{k + 1}", data))
+        save_chat(chat)
+    return {"photos": len(chat["drill"]["photos"])}
+
+
+def drill_status(chat_id):
+    """For the phone's photo page: the drill's title, its open question's number and the photos waiting."""
+    chat = load_chat(chat_id)
+    if not chat or not chat.get("drill"):
+        raise TutorError("That drill is no longer open.", 404)
+    return {"title": chat.get("title", "Exam drill"), "photos": len(chat["drill"].get("photos") or []),
+            "q": len(chat["drill"].get("log") or []) + 1}
