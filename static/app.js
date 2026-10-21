@@ -2773,8 +2773,8 @@ async function openDrillSetup(viewing = true) {      // viewing: a practice pape
     ...lecture.map((x) => h("option", { value: x.tag }, x.tag)));
   upto.onchange = () => { if (upto.value) setRange(lecture.slice(0, lecture.findIndex((x) => x.tag === upto.value) + 1).map((x) => x.tag)); };
   const nx = st.next;
-  const focus = h("input", { type: "text", class: "drill-focus", "aria-label": "Focus",
-    placeholder: "Optional: e.g. calculations only, harder questions, design questions" });
+  const focus = h("textarea", { class: "drill-focus", rows: 4, "aria-label": "Focus",
+    placeholder: "Optional: e.g. calculations only, harder questions — or paste the test's study guide" });
   focus.value = st.default.focus || "";
   const err = h("p", { class: "err", hidden: true });
   const dlg = h("dialog", { class: "dlg drill-dlg" },

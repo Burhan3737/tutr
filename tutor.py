@@ -467,12 +467,18 @@ asks about. Never reuse a paper's question or a slide's own example: change the 
 asked. Before writing a question on a deck whose slides aren't included below, Read its transcript (the map has
 the path), and stay inside what it teaches.
 
-Choosing the next question:
-- Cover every deck in the range before repeating one, out of deck order; each question changes topic from the
-  last one and, where the format allows, question type.
+Choosing the next question: the drill runs in two phases; the ledger says which.
+Phase 1, coverage (the default):
+- Rounds of one question per deck in the range, in deck order; where the format allows, change the question type
+  from the last one.
+- Every question tests a concept not yet asked in this drill (the ledger lists them). Never re-ask a concept in
+  Phase 1, even a missed or skipped one: it waits on the weak list for Phase 2.
 - Begin with the format's smaller parts; move to full-weight questions once two answers hold up.
-- A concept missed earlier comes back 2–4 questions later, in a different form.
-- A skipped question is listed under revisit and asked again later in the cycle, in a new form.
+- When every concept in the range has been asked (the focus's topic list if there is one, else the decks' main
+  ideas), don't ask a new question: after the write-up, say so in one line and ask "Phase 2 (weak points), or stop?"
+Phase 2, weak points (only once the student says so):
+- Ask only from the weak list, each concept in a new form: a new setting, new numbers, a new angle.
+- A concept leaves the list when they get it right with no hints. When the list is empty, say so and offer to stop.
 
 Asking, this shape, then stop:
 **Q<n> · <topic> · <question type>** [<marks> marks] (style of [<paper tag> s<N>] <its question number>, when
@@ -498,7 +504,8 @@ Each reply, until the drill ends:
   a drawing aimed at what they misread. A hint never states the result it leads to. About 150 words.
 - Only when they ask for the answer in so many words (give me / show me / lay out / go to the answer, "let's
   just solve it", "I give up"): the write-up at once, for the whole question unless they name a part.
-- When every part is right, by them or revealed: the write-up, then the next question.
+- A question closes when every part is right (by them or revealed) or they skip it. Every close gets the full
+  write-up, whether they got it or not, then the next question.
 
 The write-up, this shape, up to about 450 words; keep it tight so the next question isn't buried:
 #### Q<n> · Solution 1: as written for full marks
@@ -512,8 +519,8 @@ marks written alone or only checks the answer>
 solves: other numbers, a changed condition, the reverse question>
 **Common mistakes:** <2–3 one-liners; the student's own mistake first, if they made one>
 **Slides:** <every slide the write-up used>
-**Tally:** Q<n> <marks earned>/<marks set> · decks covered: <n of N> · revisit: <missed concepts, or none>
-<!--drill {{"q": <n>, "deck": "<the deck tag it tests>", "slides": "<e.g. TAG s14–s16>", "concept": "<at most 8 words>", "problem": "<the question as asked, under 120 words, Markdown/KaTeX>", "marks": "<earned>/<set>", "outcome": "<solo | hinted | revealed | skipped>", "mistake": "<none | No attempt | Concept gap | Setup | Method choice | Algebra slip | Skipped step>"}}-->
+**Tally:** Q<n> <marks earned>/<marks set> · Phase <1|2> · weak list: <missed concepts, or none>
+<!--drill {{"q": <n>, "phase": <1 or 2>, "deck": "<the deck tag it tests>", "slides": "<e.g. TAG s14–s16>", "concept": "<at most 8 words>", "problem": "<the question as asked, under 120 words, Markdown/KaTeX>", "marks": "<earned>/<set>", "outcome": "<solo | hinted | revealed | skipped>", "mistake": "<none | No attempt | Concept gap | Setup | Method choice | Algebra slip | Skipped step>"}}-->
 
 ---
 <the next question>
@@ -541,8 +548,8 @@ the next question; or, if they asked to stop, the summary.""" + "{rules}",
 answer.{photos}""" + "{rules}",
     "drill_reveal": """The student asks for the answer to the open question (all of it). Mark anything they sent first,
 then the write-up and the next question.{photos}""" + "{rules}",
-    "drill_skip": """The student skips the open question for now: no write-up. One line naming what it tested, the hidden
-drill line with outcome skipped, then the next question (a different topic).""" + "{rules}",
+    "drill_skip": """The student skips the open question. Close it with the full write-up and the hidden drill line
+(outcome skipped), then the next question by the phase rules.""" + "{rules}",
     "drill_end": """End the drill now: no new question. If a question is open, close it first with its hidden drill
 line (outcome skipped). Then, from every answer in this drill, this summary:
 
@@ -558,7 +565,8 @@ DRILL_REMIND = """
 Drill reminder: range {range_short}. {focus}So far:
 {ledger}
 Keep to the drill's rules from its first turn: one question at a time, never outside the range, the answer only on an
-explicit request, the write-up shape with the hidden drill line when a question closes."""
+explicit request, the write-up shape with the hidden drill line when a question closes. Phase 1: never re-ask a
+concept already asked; Phase 2 only once the student agreed."""
 
 
 def drill_config(cdir, decks, papers, focus=""):
@@ -572,7 +580,7 @@ def drill_config(cdir, decks, papers, focus=""):
         raise TutorError("Pick at least one deck for the drill.", 400)
     want = {str(t) for t in papers or []}
     papers = [t for t in order if t in want and t in practice]
-    return {"decks": decks, "papers": papers, "focus": " ".join(str(focus or "").split())[:500],
+    return {"decks": decks, "papers": papers, "focus": str(focus or "").strip()[:8000],
             "started": time.strftime("%Y-%m-%d %H:%M"), "log": [], "photos": []}
 
 
@@ -641,10 +649,13 @@ def _ledger(cfg):
            for e in log_[-15:]]
     asked = {e.get("deck") for e in log_}
     todo = [t for t in cfg["decks"] if t not in asked]
-    out.append(f"- Decks not asked yet this cycle: {', '.join(todo) if todo else 'none: start the next cycle, weakest first'}")
+    phase = next((str(e.get("phase")) for e in reversed(log_) if str(e.get("phase", "")) in ("1", "2")), "1")
+    out.insert(0, f"- Phase {phase}")
+    out.append(f"- Concepts asked so far (Phase 1 never repeats these): {'; '.join(e.get('concept', '') for e in log_ if e.get('concept'))}")
+    out.append(f"- Decks not asked yet: {', '.join(todo) if todo else 'none: start the next round in deck order'}")
     redo = [f"{e.get('concept') or 'Q' + str(e.get('q', '?'))} [{e.get('deck', '')}]" for e in log_[-15:] if e.get("outcome") in ("hinted", "revealed", "skipped")
             or e.get("mistake", "none") != "none"]
-    out.append(f"- Revisit (in a new form): {'; '.join(redo) if redo else 'none'}")
+    out.append(f"- Weak list (Phase 2 only): {'; '.join(redo) if redo else 'none'}")
     out.append(f"- Next question number: Q{max([int(e.get('q') or 0) for e in log_ if str(e.get('q', '')).isdigit()] + [len(log_)]) + 1}")
     return "\n".join(out)
 
@@ -656,6 +667,9 @@ def drill_system_prompt(cdir, cfg, web):
     papers = "\n\n".join(L.deck_context(cdir, t) for t in cfg["papers"])
     decks = "\n\n".join(L.deck_context(cdir, t) for t in cfg["decks"])
     parts = []
+    if cfg.get("focus"):
+        parts.append("# What the student asked this drill to follow (e.g. the test's study guide)\n\n"
+                     f"{cfg['focus']}\n\nFollow it inside the range. Where it lists topics, those are the concepts to cover.")
     if papers:
         parts.append(f"# The practice paper(s) the drill copies the format of\n\n{papers}")
     if len(papers) + len(decks) <= 100_000:
@@ -676,7 +690,7 @@ def _drill_prompt(cdir, chat, mode, tag, n, question):
     photos = cfg.get("photos") or []
     photo_txt = ("\n\nPhotos of the student's handwritten working (Read each image file):\n" +
                  "\n".join(f"- {p}" for p in photos)) if photos and mode != "drill" else ""
-    focus = f"The student asked for: \"{cfg['focus']}\". Follow it inside the range.\n" if cfg.get("focus") else ""
+    focus = "Follow the student's focus (in the system prompt) inside the range.\n" if cfg.get("focus") else ""
     fill = {"range": _range_text(cdir, cfg), "papers": _papers_text(cdir, cfg), "focus": focus, "ledger": _ledger(cfg),
             "mistakes": weak_points(cdir), "where": where(cdir, tag, n), "question": question.strip() or "(see the photos)",
             "photos": photo_txt}
@@ -700,7 +714,7 @@ def _drill_record(cdir, chat, text):
             continue
         if not isinstance(e, dict):
             continue
-        e = {k: str(e.get(k, "")).strip()[:2000] for k in ("q", "deck", "slides", "concept", "problem", "marks", "outcome", "mistake")}
+        e = {k: str(e.get(k, "")).strip()[:2000] for k in ("q", "phase", "deck", "slides", "concept", "problem", "marks", "outcome", "mistake")}
         e["mistake"] = e["mistake"] if e["mistake"] in MARK_SCHEMA["properties"]["mistake"]["enum"] else "none"
         deck_ok = e["deck"] in cfg["decks"]
         m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", e["marks"])

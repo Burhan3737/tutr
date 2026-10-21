@@ -671,7 +671,7 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 .drill-opt { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; font-size: 14px; cursor: pointer; }
 .drill-opt input { accent-color: var(--accent); flex: none; }
 .drill-focus { width: 100%; border: 1px solid var(--line-strong); border-radius: 6px; padding: 8px 10px; font-size: 14px;
-  background: var(--surface); color: var(--text); }
+  background: var(--surface); color: var(--text); font-family: inherit; resize: vertical; }
 .drill-go { display: flex; justify-content: flex-end; margin-top: 16px; }
 .chat-bar:has(.drill-status) { flex-wrap: wrap; }
 .drill-status { flex-basis: 100%; font-size: 12px; color: var(--text-2); padding-left: 34px; white-space: nowrap; overflow: hidden;
