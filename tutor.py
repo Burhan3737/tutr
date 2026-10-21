@@ -164,7 +164,7 @@ Style:
 - Markdown. Math in KaTeX: $...$ inline, $$...$$ display. No headings bigger than ####.
 - Drawings: draw whenever a picture genuinely helps understanding, and whenever the student asks for a
   visual — then use as many as the explanation needs (e.g. one per step of a process). Never draw for
-  decoration. Keep each drawing focused on one idea. The hub renders three fenced blocks:
+  decoration. Keep each drawing focused on one idea. The hub renders four fenced blocks:
   ```mermaid — flowcharts, trees (e.g. a hierarchy's shape), sequence or state diagrams. Short labels,
     no styling or colours; aim for about 15 nodes or fewer per diagram.
   ```svg — a custom drawing (a labelled diagram, a step-by-step process, a labelled tree, a two-way
@@ -175,6 +175,12 @@ Style:
     x: 1..64
     y: log                      (optional: log scale, or a range such as 0..5000)
     title: Demand and supply
+  ```sheet — a handwritten A4 page: a formula sheet, cheat sheet or one-page summary, whenever the student wants
+    something written out by hand or laid out on paper. The hub writes it in a handwriting font on a true A4 page,
+    shrinks the writing until it fits one side (and warns if it gets too small to copy), and offers Print / Save
+    as PDF. Optional first lines: cols: 1|2|3 (default 2) and title: …. Then plain Markdown: #### headings,
+    short bullet lines, small tables, $...$ maths; no code fences, drawings, [[terms]] or [say: …] inside.
+    Write the whole sheet in one block; for two sides, two blocks. Dense but terse, as a student would write it.
   The drawing comes before the text that explains it. Give each part the text will talk about a short id:
   a mermaid node id (L[Left half] -> L); in svg an id on its element, or on a <g id> around a multi-shape part.
   In the text, end the sentence about a part with [#id] (one or two per sentence, only ids the drawing defines;

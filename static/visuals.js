@@ -3,6 +3,7 @@
 //   ```mermaid  flowcharts, trees, sequence/state diagrams — drawn by Mermaid (loaded on first use)
 //   ```svg      a free-form drawing — shown as an <img>, so any script inside it can never run
 //   ```plot     exact function plots — the hub evaluates the functions itself and draws the chart
+//   ```sheet    a handwritten A4 page (formula sheet, summary) — Markdown in a handwriting font, shrunk to fit one side
 "use strict";
 
 const VIS_COLORS = ["#2f5bb7", "#1f6f4a", "#b7791f", "#2b6cb0", "#8a3ffc", "#0f766e"];
@@ -27,6 +28,8 @@ function enhanceVisuals(root, openFence = false) {
         pre.replaceWith(svgImage(src));
       } else if (lang === "plot") {
         pre.replaceWith(plotFigure(src));
+      } else if (lang === "sheet") {
+        pre.replaceWith(sheetFigure(src));
       }
     } catch (e) {
       pre.before(visNote(`Couldn't draw this (${e.message}); here is its source.`));
@@ -337,4 +340,102 @@ function compileExpr(src) {
   const f = expr();
   if (i !== toks.length) throw new Error(`unexpected "${toks[i]}"`);
   return f;
+}
+
+// ---------------------------------------------------------------- Sheet (a handwritten A4 page)
+
+// ```sheet holds Markdown (maths, lists, tables) and optional first lines "cols: 1|2|3" (default 2) and
+// "title: …". It is laid out on a page of A4 proportions (794 × 1123 CSS px, i.e. 210 × 297 mm) in a handwriting
+// font, the writing shrunk until it all fits on one side, then the page is zoomed to the width it is shown at.
+// Print / Save as PDF prints that page alone, full size.
+const SHEET_W = 794, SHEET_H = 1123, SHEET_MAX = 24, SHEET_READABLE = 13, SHEET_MIN = 8;
+
+function sheetFigure(src) {
+  let cols = 2, title = "";
+  const lines = String(src).replace(/\r/g, "").split("\n");
+  while (lines.length) {
+    const m = lines[0].match(/^\s*(cols|title)\s*:\s*(.*?)\s*$/i);
+    if (m && m[1].toLowerCase() === "cols") cols = Math.min(3, Math.max(1, parseInt(m[2], 10) || 2));
+    else if (m) title = m[2];
+    else if (lines[0].trim()) break;
+    lines.shift();
+  }
+  const text = renderMd(unmark(lines.join("\n")));
+  text.className = "sheet-text";
+  text.style.columnCount = cols;
+  const page = document.createElement("div");
+  page.className = "sheet-page";
+  if (title) { const h = document.createElement("div"); h.className = "sheet-title"; h.textContent = title; page.append(h); }
+  page.append(text);
+
+  const note = visNote("");
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "btn sheet-print";
+  btn.textContent = "Print / Save as PDF";
+  btn.addEventListener("click", () => printSheet(page));
+  const frame = document.createElement("div");
+  frame.className = "sheet-frame";
+  frame.append(page);
+  const fig = document.createElement("figure");
+  fig.className = "diagram sheet-box";
+  fig.append(frame, note, btn);
+
+  // Fit once the page is on screen and the font has loaded; re-zoom whenever its width changes.
+  let tries = 0;
+  const start = () => {
+    if (!fig.isConnected) { if (++tries < 600) requestAnimationFrame(start); return; }
+    const font = document.fonts ? document.fonts.load(`${SHEET_MAX}px "Hand"`).catch(() => {}) : Promise.resolve();
+    font.then(() => {
+      const size = fitSheet(page, text);
+      note.textContent = size < SHEET_MIN + 0.01 && sheetOverflows(page, text)
+        ? "This doesn't fit on one side even at the smallest size: cut it down, or split it over two sheets."
+        : size < SHEET_READABLE ? `Fits, but small (${size.toFixed(1)} px): hard to copy by hand. Consider cutting it down.`
+        : `One A4 side · ${cols} column${cols > 1 ? "s" : ""}`;
+      const zoom = () => { if (frame.clientWidth) page.style.zoom = String(Math.min(1, frame.clientWidth / SHEET_W)); };
+      zoom();
+      if (window.ResizeObserver) new ResizeObserver(zoom).observe(frame);
+    });
+  };
+  requestAnimationFrame(start);
+  return fig;
+}
+
+function sheetOverflows(page, text) {
+  return text.scrollHeight > text.clientHeight + 1 || text.scrollWidth > text.clientWidth + 1;
+}
+
+// The largest font size (in 0.5 px steps) at which the writing fits the page; measured at zoom 1.
+function fitSheet(page, text) {
+  const zoom = page.style.zoom;
+  page.style.zoom = "1";
+  let lo = SHEET_MIN, hi = SHEET_MAX;
+  text.style.fontSize = `${hi}px`;
+  if (sheetOverflows(page, text)) {
+    while (hi - lo > 0.5) {
+      const mid = (lo + hi) / 2;
+      text.style.fontSize = `${mid}px`;
+      if (sheetOverflows(page, text)) hi = mid; else lo = mid;
+    }
+    hi = lo;
+  }
+  text.style.fontSize = `${hi}px`;
+  page.style.zoom = zoom;
+  return hi;
+}
+
+// Print the page alone on one A4 side (the browser's dialog offers "Save as PDF").
+function printSheet(page) {
+  document.getElementById("print-root")?.remove();
+  const root = document.createElement("article");
+  root.id = "print-root";
+  root.className = "sheet-print-root";
+  const copy = page.cloneNode(true);
+  copy.style.zoom = "1";
+  root.append(copy);
+  document.body.append(root);
+  document.body.classList.add("printing");
+  const done = () => { document.body.classList.remove("printing"); root.remove(); };
+  window.addEventListener("afterprint", done, { once: true });
+  setTimeout(() => window.print(), 80);
 }

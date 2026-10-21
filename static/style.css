@@ -677,3 +677,30 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 .drill-status { flex-basis: 100%; font-size: 12px; color: var(--text-2); padding-left: 34px; white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; }
 .drill-foot { flex-wrap: wrap; }
+/* A handwritten A4 page (```sheet, visuals.js): fixed 794 × 1123 px (210 × 297 mm), zoomed to fit the answer. */
+@font-face { font-family: "Hand"; src: url("vendor/fonts/Caveat.ttf") format("truetype"); font-weight: 400 700; font-display: block; }
+.sheet-box { text-align: left; background: var(--sunken); }
+.sheet-frame { width: 100%; max-width: 794px; margin: 0 auto; }
+.sheet-page { width: 794px; height: 1123px; box-sizing: border-box; padding: 38px 40px; display: flex; flex-direction: column;
+  background: #fffdf8; color: #1c2a6e; box-shadow: 0 1px 4px rgba(20,18,26,.25); font-family: "Hand", cursive; overflow: hidden; }
+.sheet-title { font-size: 32px; font-weight: 700; text-align: center; margin: 0 0 6px; border-bottom: 1.5px solid #1c2a6e; }
+.sheet-text { flex: 1; min-height: 0; overflow: hidden; column-fill: auto; column-gap: 22px; column-rule: 1px solid #c9cde0;
+  line-height: 1.12; font-size: 24px; }
+.sheet-text > :first-child { margin-top: 0; }
+.sheet-text p, .sheet-text ul, .sheet-text ol, .sheet-text table, .sheet-text .katex-display { margin: 0 0 .3em; }
+.sheet-text ul, .sheet-text ol { padding-left: 1.1em; }
+.sheet-text li { margin: 0; }
+.sheet-text h1, .sheet-text h2, .sheet-text h3, .sheet-text h4 { font-size: 1.25em; font-weight: 700; margin: .35em 0 .15em;
+  text-decoration: underline; text-underline-offset: 3px; break-after: avoid; }
+.sheet-text strong { font-weight: 700; color: #0e1a52; }
+.sheet-text table { border-collapse: collapse; font-size: .92em; break-inside: avoid; }
+.sheet-text th, .sheet-text td { border: 1px solid #8f96b8; padding: 0 .3em; }
+.sheet-text .katex { font-size: .82em; color: #1c2a6e; }
+.sheet-text .katex-display { overflow: hidden; }
+.sheet-text code { font-family: inherit; background: none; padding: 0; }
+.sheet-print { margin-top: 6px; }
+@page sheet { size: A4 portrait; margin: 0; }
+@media print {
+  body.printing #print-root.sheet-print-root { max-width: none; margin: 0; page: sheet; }
+  #print-root .sheet-page { box-shadow: none; width: 210mm; height: 297mm; break-inside: avoid; }
+}
