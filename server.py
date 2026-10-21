@@ -8,10 +8,11 @@ practice problems, marks your work and brings your mistakes back for review.
 
 Nothing is configured here. Any top-level folder with a `study/` subfolder is a course; its decks,
 topics and exam dates come from its CLAUDE.md and study/progress.md (see library.py). New slides
-show up on the next page load. The tutor's prompts are in tutor.py; its calls go through the Claude
-Agent SDK on the Claude Code login (engine.py). Tutor, practice and marking requests sent with
-"stream": true are answered as Server-Sent Events: "status" lines, "text" deltas, then "done" (or
-"error"). The log records timing and cost only, never question text.
+show up on the next page load. The tutor's prompts are in tutor.py; its calls go to one of two engines,
+chosen by the model: the Claude Agent SDK on the Claude Code login (engine.py) or a private OpenCode
+server (opencode_engine.py, models like "opencode/big-pickle"). Tutor, practice and marking requests
+sent with "stream": true are answered as Server-Sent Events: "status" lines, "text" deltas, then
+"done" (or "error"). The log records timing and cost only, never question text.
 """
 import argparse, base64, binascii, http.server, json, os, queue, re, shutil, socketserver, subprocess, sys, threading, webbrowser
 from pathlib import Path
@@ -216,8 +217,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             rec = T.get_practice(qs.get("id"))
             return self._json(T.public_problem(rec) | {"photos": len(rec.get("photos", []))}) if rec else \
                 self._json({"error": "That problem has expired."}, 404)
-        if path == "/api/models":
-            return self._json({"default": T.DEFAULT_MODEL, "models": [{"id": k, "label": v} for k, v in T.MODELS.items()]})
+        if path == "/api/models":       # Claude Code's models, then OpenCode's, each with an intelligence score
+            return self._json(T.model_catalog())
         if path == "/api/phone":
             return self._json({"url": PHONE_URL if self._local() else None})
         if path == "/api/chats":
@@ -259,7 +260,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 pass
 
     def _post(self, path, req):
-        model = req.get("model") if req.get("model") in T.MODELS else T.DEFAULT_MODEL
+        model = req.get("model") if T.valid_model(req.get("model")) else T.DEFAULT_MODEL
         web = not req.get("slides_only")
         if path == "/api/voice/warm":        # Voice chosen (or dictation started): load the speech models now
             V.warm()
@@ -304,7 +305,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if f and f.exists():
                 ch = T.load_chat(req.get("id"))
                 if ch and ch.get("course"):
-                    T.engine.close_chat((ch["course"], ch["id"]))
+                    T.close_chat((ch["course"], ch["id"]))
                     c = self._course(ch["course"])
                     if c and T.current_chat(c) == ch["id"]:
                         S.set_chat(c, None)
@@ -516,7 +517,7 @@ def main():
     finally:
         if tunnel:
             tunnel.terminate()
-        T.engine.shutdown()
+        T.shutdown()
 
 
 if __name__ == "__main__":

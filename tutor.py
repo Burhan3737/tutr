@@ -25,15 +25,19 @@ from pathlib import Path
 
 import engine
 import library as L
+import opencode_engine
 import state as S
 
 HERE = Path(__file__).resolve().parent
 WORK = HERE / ".cache"
 TIMEOUT = engine.TIMEOUT
-MODELS = {
-    "claude-opus-5-5": "Opus 5.5 — best answers, highest cost",
-    "claude-sonnet-5-5": "Sonnet 5.5 — balanced",
-    "claude-haiku-4-5": "Haiku 4.5 — fastest, cheapest",
+# The two tutor engines: Claude Code (engine.py) and OpenCode (opencode_engine.py). A model id with a provider
+# slash ("opencode/big-pickle") is an OpenCode one; a plain id ("claude-opus-5-5") is Claude's. The number is
+# the intelligence score the model picker shows (0–99, higher is more capable).
+CLAUDE_MODELS = {
+    "claude-opus-5-5": ("Opus 5.5", 96, "Claude Code"),
+    "claude-sonnet-5-5": ("Sonnet 5.5", 88, "Claude Code"),
+    "claude-haiku-4-5": ("Haiku 4.5", 74, "Claude Code"),
 }
 DEFAULT_MODEL = "claude-opus-5-5"
 _LOG_LOCK = threading.Lock()
@@ -48,11 +52,82 @@ def log(msg):
 TutorError = engine.EngineError
 
 
-def run_claude(cdir, system, prompt, *, model, session=None, fork=False, schema=None, web=True, label="", chat_key=None,
-               emit=None):
-    return engine.run(cdir, system, prompt, model=model if model in MODELS else DEFAULT_MODEL, web=web, schema=schema,
-                      chat_key=chat_key, session=session, fork=fork, emit=emit, log=log,
+def model_engine(model):
+    """Which engine runs this model."""
+    return "opencode" if "/" in str(model or "") else "claude"
+
+
+def valid_model(model):
+    """A Claude model, or an OpenCode provider/model id (new ones are allowed without a catalog refresh)."""
+    if not isinstance(model, str) or not model:
+        return False
+    if model in CLAUDE_MODELS:
+        return True
+    return bool(re.fullmatch(r"[a-z0-9][a-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:-]*", model))
+
+
+def model_catalog():
+    """Every model the tutor can use, grouped by provider: Claude Code first, then OpenCode's models (live if the
+    server can be reached, else the cached or curated list), each group by intelligence score."""
+    models = [{"id": k, "label": label, "iq": iq, "provider": provider}
+              for k, (label, iq, provider) in CLAUDE_MODELS.items()]
+    try:
+        found = opencode_engine.known_models()
+    except Exception:
+        found = []
+    groups = {}
+    for m in found:
+        groups.setdefault(m.get("provider") or "OpenCode", []).append(m)
+    for provider in sorted(groups, key=lambda p: -max(m.get("iq") or 0 for m in groups[p])):
+        models += sorted(groups[provider], key=lambda m: (-(m.get("iq") or 0), m.get("label") or ""))
+    return {"default": DEFAULT_MODEL, "models": models}
+
+
+def _claude_session(session):
+    return None if str(session or "").startswith("ses_") else session
+
+
+def _opencode_session(session):
+    return session if str(session or "").startswith("ses_") else None
+
+
+def run_model(cdir, system, prompt, *, model, session=None, fork=False, schema=None, web=True, label="", chat_key=None,
+              emit=None):
+    """Ask whichever engine the model belongs to. Returns {"text", "json", "session", "ms", "cost"}."""
+    model = model if valid_model(model) else DEFAULT_MODEL
+    if model_engine(model) == "opencode":
+        return opencode_engine.run(cdir, system, prompt, model=model, web=web, schema=schema, chat_key=chat_key,
+                                   session=_opencode_session(session), fork=fork, emit=emit, log=log,
+                                   label=f"{label} course={L.course_meta(cdir)[0]}")
+    return engine.run(cdir, system, prompt, model=model, web=web, schema=schema, chat_key=chat_key,
+                      session=_claude_session(session), fork=fork, emit=emit, log=log,
                       label=f"{label} course={L.course_meta(cdir)[0]}")
+
+
+def open_chat(chat_key, cdir, system, *, model, web=True, session=None, log=None):
+    """Warm a chat's engine before the first question (no turn, no cost)."""
+    model = model if valid_model(model) else DEFAULT_MODEL
+    log = log or globals()["log"]
+    if model_engine(model) == "opencode":
+        opencode_engine.open_chat(chat_key, cdir, system, model=model, web=web,
+                                  session=_opencode_session(session), log=log)
+    else:
+        engine.open_chat(chat_key, cdir, system, model=model, web=web, session=_claude_session(session), log=log)
+
+
+def close_chat(chat_key):
+    """Forget a chat in both engines (a saved chat's session is left on OpenCode's server for resume)."""
+    engine.close_chat(chat_key)
+    opencode_engine.close_chat(chat_key)
+
+
+def shutdown():
+    """Stop both engines when the hub stops."""
+    for stop in (engine.shutdown, opencode_engine.shutdown):
+        try:
+            stop()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------- the system prompt
@@ -742,7 +817,7 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=Fa
             prompt += EXTRA.format(extra=extra[:2000])
     sent_photos = list((chat.get("drill") or {}).get("photos") or []) if mode in DRILL_MODES and mode != "drill" else []
     try:
-        r = run_claude(cdir, chat_system(cdir, chat, tag, web), prompt, model=model, chat_key=(cdir.name, chat["id"]),
+        r = run_model(cdir, chat_system(cdir, chat, tag, web), prompt, model=model, chat_key=(cdir.name, chat["id"]),
                        session=chat.get("session"), web=web, label=f"chat:{mode}", emit=emit)
         msg = {"role": "a", "mode": mode, "deck": tag, "slide": n, "text": r["text"], "ms": r["ms"], "cost": r["cost"], "model": model}
         with lock:      # reload: another turn on this chat may have been saved while this one was answered
@@ -768,11 +843,11 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=Fa
             with lock:
                 _PENDING.pop(chat["id"], None)
     if mode == "voice":
-        remember(cdir, tag, None if whole_deck else n, question.strip(), r["text"])
+        remember(cdir, tag, None if whole_deck else n, question.strip(), r["text"], model=model)
     elif spoken and mode == "ask":      # a spoken question typed into Ask is remembered like a voice turn
-        remember(cdir, tag, n, question.strip(), r["text"])
+        remember(cdir, tag, n, question.strip(), r["text"], model=model)
     elif mode in ("grill_reply", "drill_reply"):    # a missed point goes into the same notes as a corrected voice mistake
-        remember(cdir, tag, n, question.strip(), msg["text"], grill=True)
+        remember(cdir, tag, n, question.strip(), msg["text"], grill=True, model=model)
     return chat, msg
 
 
@@ -786,8 +861,8 @@ def warm_chat(cdir, tag, model, web):
             return      # its first turn is already opening it
         if chat is None:
             chat = {"id": _WARM_IDS.setdefault(cdir.name, uuid.uuid4().hex[:12])}
-    engine.open_chat((cdir.name, chat["id"]), cdir, chat_system(cdir, chat, tag, web),
-                     model=model if model in MODELS else DEFAULT_MODEL, web=web, session=chat.get("session"), log=log)
+    open_chat((cdir.name, chat["id"]), cdir, chat_system(cdir, chat, tag, web),
+              model=model, web=web, session=chat.get("session"), log=log)
 
 
 # ---------------------------------------------------------------- voice turns and the tutor's memory
@@ -918,9 +993,10 @@ Your last reply put a summary in "memory". It must be the whole notebook itself:
 their bullets, as described above."""
 
 
-def remember(cdir, tag, n, question, answer, grill=False):
+def remember(cdir, tag, n, question, answer, grill=False, model=None):
     """Update the tutor's notes on the student after a voice turn (or a grill answer: grill=True), in the
-    background (nobody waits for it)."""
+    background (nobody waits for it). On an OpenCode chat the same model does it; otherwise a quick Claude one."""
+    mem_model = model if model and model_engine(model) == "opencode" else MEMORY_MODEL
     def work():
         with _MEMORY_LOCKS_LOCK:
             lock = _MEMORY_LOCKS.setdefault(cdir.name, threading.Lock())
@@ -937,8 +1013,8 @@ def remember(cdir, tag, n, question, answer, grill=False):
                                               memory=memory_text(cdir, text) or "(empty: this is the first exchange)",
                                               question=question[:2000], answer=answer[:4000])
                 for attempt in (1, 2):      # Haiku now and then returns a summary instead of the notebook: once more
-                    r = run_claude(cdir, MEMORY_SYSTEM, prompt + (MEMORY_RETRY if attempt == 2 else ""),
-                                   model=MEMORY_MODEL, schema=MEMORY_SCHEMA, web=False, label="memory")
+                    r = run_model(cdir, MEMORY_SYSTEM, prompt + (MEMORY_RETRY if attempt == 2 else ""),
+                                   model=mem_model, schema=MEMORY_SCHEMA, web=False, label="memory")
                     body = str(r["json"].get("memory", "")).strip()
                     if not r["json"].get("changed"):
                         return log(f"memory unchanged course={cdir.name}")
@@ -1009,7 +1085,7 @@ def side_turn(cdir, tag, n, side_id, chat_id, anchor, para, question, model, web
         prompt = (SIDE_SELECTION if question.strip() else SIDE_TERM).format(**fill)
         session = chat.get("session") if chat else None
         fork = bool(session)
-    r = run_claude(cdir, system_prompt(cdir, tag, web), prompt, model=model, chat_key=side["key"], session=session,
+    r = run_model(cdir, system_prompt(cdir, tag, web), prompt, model=model, chat_key=side["key"], session=session,
                    fork=fork, web=web, label="side", emit=emit)
     side["session"] = r["session"]
     with _SIDES_LOCK:
@@ -1021,7 +1097,7 @@ def side_close(side_id):
     with _SIDES_LOCK:
         side = _SIDES.pop(side_id, None)
     if side:
-        engine.close_chat(side["key"])
+        close_chat(side["key"])
 
 
 # ---------------------------------------------------------------- saved chats
@@ -1211,7 +1287,7 @@ def _generate(cdir, req, model, web, emit=None):
     prompt = PRACTICE_BASE.format(style=STYLE.get(info["code"], "an exam-style question for this course"),
                                   surface=SURFACE_NEW if kind != "yourturn" else "same structure as the example.",
                                   task=task)
-    r = run_claude(cdir, system_prompt(cdir, scope_tag, web), prompt, model=model, schema=PROBLEM_SCHEMA, web=web,
+    r = run_model(cdir, system_prompt(cdir, scope_tag, web), prompt, model=model, schema=PROBLEM_SCHEMA, web=web,
                    label=f"practice:{kind}", emit=emit)
     j = r["json"]
     deck_tag = j.get("deck") if L.deck(cdir, j.get("deck") or "") else (tag if kind in ("try", "deck", "yourturn") else
@@ -1341,7 +1417,7 @@ def check(cdir, pid, answer, model, web, emit=None):
                                 answer=answer.strip() or "(see the photos)", photos=photo_txt)
     tag = rec["deck"] if L.deck(cdir, rec["deck"] or "") else (rec["tag"] if L.deck(cdir, rec["tag"] or "") else
                                                                L.deck_order(cdir)[0]["tag"])
-    r = run_claude(cdir, system_prompt(cdir, tag, False), prompt, model=model, schema=MARK_SCHEMA, web=False,
+    r = run_model(cdir, system_prompt(cdir, tag, False), prompt, model=model, schema=MARK_SCHEMA, web=False,
                    label="check", emit=emit)
     j = r["json"]
     hinted = rec["hints_used"] > 0

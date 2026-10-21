@@ -165,7 +165,7 @@ main:has(> .viewer) { overflow: hidden; }
   background: none; border-radius: var(--r); cursor: pointer; text-align: left; font-size: 15px;
 }
 .menu > button:hover, .menu-row:hover { background: var(--sunken); }
-.menu-row select { margin-left: auto; max-width: 150px; border: 1px solid var(--line-strong); border-radius: 6px;
+.menu-row select { margin-left: auto; max-width: 175px; border: 1px solid var(--line-strong); border-radius: 6px;
   background: var(--surface); padding: 4px 6px; font-size: 13px; }
 .menu-row .muted { margin-left: auto; font-size: 13px; }
 .menu-row input { width: 18px; height: 18px; accent-color: var(--accent); }

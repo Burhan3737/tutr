@@ -1,5 +1,6 @@
 # Study Hub (python server.py). start.bat installs these if they're missing.
 claude-agent-sdk>=0.2.162   # the tutor's connection to Claude Code (no API key; uses the Claude Code login)
+# OpenCode is optional and has no Python package: install the `opencode` CLI on PATH to use its models.
 pymupdf>=1.24               # slide images and text for decks not yet prepared
 faster-whisper>=1.2         # Talk tab: speech to text, on this computer (Whisper small.en, downloads once)
 kokoro-onnx>=0.6            # Talk tab: the tutor's voice, on this computer (model files download once into .cache/voice)

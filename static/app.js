@@ -1861,7 +1861,8 @@ function printChat(chat, deck) {
 
 function metaText(m) {
   const who = APP.models.find((x) => x.id === m.model);
-  return [who ? who.label.split(" — ")[0] : "", m.ms ? `${(m.ms / 1000).toFixed(0)} s` : "", m.cost != null ? `$${(+m.cost).toFixed(2)}` : ""].filter(Boolean).join(" · ");
+  const name = who ? (who.iq !== undefined ? `${who.label} · ${who.iq}` : who.label) : "";
+  return [name, m.ms ? `${(m.ms / 1000).toFixed(0)} s` : "", m.cost != null ? `$${(+m.cost).toFixed(2)}` : ""].filter(Boolean).join(" · ");
 }
 
 // Scroll to the end now and again once a new answer is laid out (off-screen answers skip layout, content-visibility:
@@ -3389,7 +3390,15 @@ document.addEventListener("keydown", (e) => {
     APP.models = m.models;
     const saved = store.get("model", m.default);
     APP.model = m.models.some((x) => x.id === saved) ? saved : m.default;
-    $("#model-pick").replaceChildren(...m.models.map((x) => h("option", { value: x.id }, x.label.split(" — ")[0])));
+    // Grouped by engine/provider; each option ends with its intelligence score (higher = more capable).
+    const groups = new Map();
+    for (const x of m.models) {
+      const key = x.provider || "Models";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(x);
+    }
+    $("#model-pick").replaceChildren(...[...groups].map(([provider, xs]) => h("optgroup", { label: provider },
+      ...xs.map((x) => h("option", { value: x.id }, `${x.label} · ${x.iq}`)))));
     $("#model-pick").value = APP.model;
   } catch { /* the server default applies */ }
   try {
