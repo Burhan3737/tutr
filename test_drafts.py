@@ -213,6 +213,29 @@ def test_js():
         check(f"js {name}", ok, detail)
 
 
+# ------------------------------------------------------------ the course's chat, once per course
+
+def test_course_chat():
+    courses = L.course_dirs()
+    if not courses:
+        print("skip  chat: no course folders found")
+        return
+    c = courses[0]
+    tag = next(iter(L.course_info(c)["decks"]))
+    chat = {"id": "aaaaaaaaaaaa", "course": c.name, "deck": tag, "session": "secret",
+            "messages": [{"role": "q", "slide": 3, "text": "?"}, {"role": "a", "text": "!"}]}
+    listed = [{"id": f"{i:012d}", "title": f"c{i}", "course": c.name} for i in range(7)] + [{"id": chat["id"], "course": c.name}]
+    with Patch((server.T, "current_chat", lambda cdir: chat["id"]), (server.T, "load_chat", lambda i: chat if i == chat["id"] else None),
+               (server.T, "course_chats", lambda cdir: listed)):
+        v = server.deck_view(c, tag)
+        check("chat: a deck no longer carries the chat", v and not {"chat", "chats", "asked"} & v.keys() and "state" in v, v and sorted(v))
+        r = server.course_chat(c)
+        check("chat: the course's chat, without its session", r["chat"]["id"] == chat["id"] and "session" not in r["chat"])
+        check("chat: up to five earlier chats, not the current one", [x["id"] for x in r["chats"]] == [f"{i:012d}" for i in range(5)])
+    with Patch((server.T, "current_chat", lambda cdir: None), (server.T, "course_chats", lambda cdir: listed[:2])):
+        check("chat: none yet", server.course_chat(c) == {"chat": None, "chats": listed[:2]})
+
+
 # ------------------------------------------------------------ the hub's endpoints
 
 class Live:
@@ -318,6 +341,12 @@ def test_http(tmp, load):
         c.request("GET", "/api/live?course=nope&client=x")
         check("http: listening to an unknown course is refused", c.getresponse().status == 404)
         c.close()
+        r = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/api/course/chat?course={course}").read())
+        check("http: the course's chat comes on its own", set(r) == {"chat", "chats"})
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        c.request("GET", "/api/course/chat?course=nope")
+        check("http: an unknown course's chat is refused", c.getresponse().status == 404)
+        c.close()
 
         # a question sent from the phone: the laptop sees it start, stream and land (Claude replaced by a fake)
         tag = next(iter(L.course_info(courses[0])["decks"]))
@@ -415,7 +444,8 @@ def test_http(tmp, load):
         finally:
             for rel in made:
                 (courses[0] / rel).unlink(missing_ok=True)
-        st, _ = post(port, {"course": course, "client": "phone"}, "/api/chat/new")
+        with Patch((server.S, "set_chat", lambda cdir, chat_id: None)):      # (the real course keeps its chat)
+            st, _ = post(port, {"course": course, "client": "phone"}, "/api/chat/new")
         k, d, _ = laptop.next()
         check("http: New chat on the phone reaches the laptop", st == 200 and (k, d["chat"]) == ("chat", None))
         before = server.DRAFTS.watchers(course)
@@ -455,6 +485,7 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
         test_store(tmp)
+        test_course_chat()
         test_js()
         test_http(tmp, "--quick" not in sys.argv)
     print(f"\n{len(FAILED)} failed" + (": " + ", ".join(FAILED) if FAILED else ""))

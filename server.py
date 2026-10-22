@@ -71,23 +71,27 @@ def home():
 
 
 def deck_view(cdir, tag):
+    """A deck as the viewer shows it. The chat is the course's, not the deck's: it comes from course_chat()."""
     d = L.deck(cdir, tag)
     if not d:
         return None
     s = S.load(cdir)
-    chat_id = T.current_chat(cdir)
-    chat = T.load_chat(chat_id) if chat_id else None
-    asked = sorted({m["slide"] for m in (chat or {}).get("messages", [])       # older messages carry no deck: the chat's
-                    if m.get("slide") and (m["deck"] if isinstance(m.get("deck"), str) else chat.get("deck")) == tag})
     info = L.course_info(cdir)
     topic = next((t for t in info["topics"] if t["name"] == d["topic"]),
                  {"read_more": "", "decks": info["practice"]})       # a practice deck: its siblings are the practice decks
-    chats = [c for c in T.course_chats(cdir) if not chat or c["id"] != chat["id"]][:5]
-    return {**_deck_public(d), "course": cdir.name, "code": info["code"], "read_more": topic["read_more"], "chats": chats,
+    return {**_deck_public(d), "course": cdir.name, "code": info["code"], "read_more": topic["read_more"],
             "topic_decks": topic["decks"],
             "slides_text": [{"n": x["n"], "title": x["title"], "md": x["md"], "raw": x.get("raw", False)}
                             for x in L.slide_texts(cdir, tag)],
-            "state": s["decks"].get(tag, {}), "chat": chat and T.public_chat(chat), "asked": asked}
+            "state": s["decks"].get(tag, {})}
+
+
+def course_chat(cdir):
+    """The course's current chat and up to five earlier ones, fetched once per course (every deck shares them)."""
+    chat_id = T.current_chat(cdir)
+    chat = T.load_chat(chat_id) if chat_id else None
+    chats = [c for c in T.course_chats(cdir) if not chat or c["id"] != chat["id"]][:5]
+    return {"chat": chat and T.public_chat(chat), "chats": chats}
 
 
 # ---------------------------------------------------------------- HTTP
@@ -208,6 +212,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             c = self._course(qs.get("course"))
             v = deck_view(c, qs.get("tag", "")) if c else None
             return self._json(v) if v else self._json({"error": "Unknown deck."}, 404)
+        if path == "/api/course/chat":
+            c = self._course(qs.get("course"))
+            return self._json(course_chat(c)) if c else self._json({"error": "Unknown course."}, 404)
         if path == "/api/slide":
             c = self._course(qs.get("course"))
             try:

@@ -216,9 +216,9 @@ async function route() {
   closeMenu();
   draftFollow(p.c || null);         // the Ask box's live draft is the course's (before the box is drawn)
   renderSessionBar();
-  // A recording never outlives the page; speech only carries on while staying on the same deck (e.g. a citation).
+  // A recording never outlives the page; speech carries on while staying in the course's slides (another deck, a citation).
   cancelDictation();
-  if (!(APP.deck && p.c === APP.deck.course && p.d === APP.deck.tag)) stopSpeaking();
+  if (!(APP.deck && p.c === APP.deck.course && p.d && $(".viewer"))) stopSpeaking();
   const main = $("#main");
   try {
     if (p.upload) await showUpload(p.upload);
@@ -501,19 +501,87 @@ async function showNotes(id, path, token) {
 
 // ------------------------------------------------------------ slide viewer
 
+// The chat is the course's: every deck of a course reads and writes the same one (and its earlier chats) here, through
+// its `chat` / `chats`. Fetched on entering a course's viewer; the live channel keeps it current after that.
+APP.courseChat = {};         // course id -> { chat, chats }
+async function loadCourseChat(id) {
+  const r = await api(`/api/course/chat?course=${encodeURIComponent(id)}`);
+  return (APP.courseChat[id] = { chat: r.chat, chats: r.chats || [] });
+}
+
+// The slides of this deck asked about in the course's chat (older messages carry no deck: the chat's own).
+const askedIn = (chat, tag) => (chat ? [...new Set(chat.messages.filter((m) => m.slide && msgDeck(m, chat) === tag).map((m) => m.slide))].sort((a, b) => a - b) : []);
+
+// A deck from /api/deck, wired to its course's chat (again is fine: a cached reply is adopted each time it's shown).
+function adoptDeck(deck) {
+  const cc = () => APP.courseChat[deck.course] || (APP.courseChat[deck.course] = { chat: null, chats: [] });
+  return Object.defineProperties(deck, {
+    chat: { get: () => cc().chat, set: (v) => { cc().chat = v; }, configurable: true },
+    chats: { get: () => cc().chats, set: (v) => { cc().chats = v; }, configurable: true },
+    asked: { get: () => askedIn(deck.chat, deck.tag), configurable: true },
+  });
+}
+
+// /api/deck replies of the open course, so the decks either side open at once (prefetchNeighbours). A few at most.
+const DECKS = new Map();     // "course/tag" -> the reply (a promise)
+let decksCourse = null;
+function fetchDeck(course, tag) {
+  if (decksCourse !== course) { DECKS.clear(); decksCourse = course; }
+  const k = `${course}/${tag}`;
+  if (!DECKS.has(k)) {
+    DECKS.set(k, api(`/api/deck?course=${encodeURIComponent(course)}&tag=${encodeURIComponent(tag)}`).catch((e) => { DECKS.delete(k); throw e; }));
+    if (DECKS.size > 8) DECKS.delete(DECKS.keys().next().value);
+  }
+  return DECKS.get(k);
+}
+
+// After a deck shows: the decks either side and the slide each opens on, when the browser has nothing else to do.
+function prefetchNeighbours(d) {
+  const { prev, next } = neighbourDecks(d);
+  (window.requestIdleCallback || ((f) => setTimeout(f, 300)))(() => {
+    for (const [x, n] of [[next, 1], [prev, prev && prev.slides]]) {
+      if (!x || d.course !== decksCourse) continue;
+      fetchDeck(d.course, x.tag).catch(() => {});
+      new Image().src = slideSrc(d.course, x.tag, n);
+    }
+  });
+}
+
 async function showViewer(courseId, tag, n, token) {
-  const [c, deck] = await Promise.all([loadCourse(courseId), api(`/api/deck?course=${encodeURIComponent(courseId)}&tag=${encodeURIComponent(tag)}`)]);
+  // Another deck of the same course on screen: only the stage changes, the tutor panel stays as it is (the chat is the
+  // course's), like changing slide. Practice closes as before (a problem belongs to its deck): the viewer is built again.
+  const inCourse = () => !!(APP.deck && APP.deck.course === courseId && $(".viewer") && APP.tutor !== "focus");
+  const cached = decksCourse === courseId && DECKS.has(`${courseId}/${tag}`);
+  const chatNow = !(APP.deck && APP.deck.course === courseId && $(".viewer") && APP.courseChat[courseId]);   // entering the course's viewer: its chat as it is now
+  const [c, deck] = await Promise.all([loadCourse(courseId), fetchDeck(courseId, tag), chatNow ? loadCourseChat(courseId) : null]);
   if (token !== routeToken) return;
   const same = APP.deck && APP.deck.course === courseId && APP.deck.tag === tag && $(".viewer");
-  APP.deck = deck;
+  const swap = !same && inCourse();
+  APP.deck = adoptDeck(deck);
   APP.n = Math.min(Math.max(1, n || deck.state.last || 1), deck.slides + 1);
   setCrumbs({ label: "Home", href: "#" }, { label: c.code, href: `#c=${encodeURIComponent(courseId)}` },
     { label: deck.topic, href: `#c=${encodeURIComponent(courseId)}&t=${encodeURIComponent(deck.topic)}` }, { label: `${deck.tag} (W${deck.week})` });
-  if (!same) buildViewer();
+  if (swap) { if (APP.text) toggleText(false); }      // the stage as a new viewer has it (showSlide unzooms)
+  else if (!same) buildViewer();
   showSlide();
   if (APP.pending && APP.pending.drill) { APP.pending = null; APP.tutor = "open"; renderTutor(); openDrillSetup(false); }
   else if (APP.pending) { const p = APP.pending; APP.pending = null; startPracticeInPanel(p); }
+  else if (swap) keepTutor();
   else if (!same) renderTutor();
+  // A cached reply's state may be older than the deck's: shown at once, then put right.
+  if (cached) api(`/api/deck?course=${encodeURIComponent(courseId)}&tag=${encodeURIComponent(tag)}`).then((f) => { deck.state = f.state; }).catch(() => {});
+  prefetchNeighbours(deck);
+}
+
+// The kept panel, on its new deck: where it is, the hint, and each question's slide label (relative to the deck).
+function keepTutor() {
+  updateTutorWhere();
+  updateComposeHint();
+  $$("#thread .msg-q").forEach((q) => {
+    const w = $(".where", q);
+    if (q.__m && w) w.textContent = msgWhere(q.__m, APP.deck.chat, APP.deck.tag);
+  });
+  if (APP.side && !(APP.side.course === APP.deck.course && APP.side.tag === APP.deck.tag)) closeSide();
 }
 
 function buildViewer() {
@@ -558,7 +626,8 @@ function buildViewer() {
   if (APP.tutor === "focus") APP.tutor = "open";
 }
 
-function slideUrl(n) { return `/api/slide?course=${encodeURIComponent(APP.deck.course)}&tag=${encodeURIComponent(APP.deck.tag)}&n=${n}`; }
+const slideSrc = (course, tag, n) => `/api/slide?course=${encodeURIComponent(course)}&tag=${encodeURIComponent(tag)}&n=${n}`;
+function slideUrl(n) { return slideSrc(APP.deck.course, APP.deck.tag, n); }
 
 let seenTimer;
 function showSlide() {
@@ -829,7 +898,6 @@ async function newChat() {
   try { await api("/api/chat/new", { course: d.course, client: DRAFT.client }); } catch { /* the next question still starts fresh */ }
   if (d.chat) d.chats = [{ id: d.chat.id, title: d.chat.title, updated: d.chat.updated }, ...(d.chats || [])].slice(0, 5);
   d.chat = null;
-  d.asked = [];
   cancelDictation();
   stopSpeaking();
   drawThread();
@@ -842,7 +910,7 @@ async function openChat(id) {
     APP.tutor = "open";
     // One chat per course: in a deck of its course, it opens beside that deck; otherwise go to the deck it started on.
     if (APP.deck && APP.deck.course === r.course) {
-      APP.deck = await api(`/api/deck?course=${encodeURIComponent(r.course)}&tag=${encodeURIComponent(APP.deck.tag)}`);
+      await loadCourseChat(r.course);
       renderTutor();
     } else go({ c: r.course, d: r.deck, s: "" });
   } catch (e) { alert(e.message); }
@@ -1518,7 +1586,7 @@ function drawThread() {
   th.replaceChildren();
   // Turns still being written go back at the end, in order (place); another deck's turns are gone. An answer still
   // being read aloud keeps its element (VOICE.view), so its voice, glow and pacing carry on.
-  for (const t of TURNS) if (!sameDeck(t.d, APP.deck)) TURNS.delete(t);
+  for (const t of TURNS) if (t.d.course !== APP.deck.course) TURNS.delete(t);
   const msgs = APP.deck.chat ? APP.deck.chat.messages : [];
   if (APP.deck.chat && msgs.length) th.append(chatBar(APP.deck.chat));
   if (!msgs.length && !TURNS.size) {
@@ -1540,9 +1608,6 @@ function drawThread() {
   th.scrollTop = th.scrollHeight;
   updateComposeHint();
 }
-
-// The same deck, even when it was fetched again (a citation chip, the deck reopened).
-const sameDeck = (a, b) => !!a && !!b && a.course === b.course && a.tag === b.tag;
 
 // A question's bubble keeps where it was asked, so its label can follow the deck the panel is on (keepTutor).
 const qMeta = (el, m) => { el.__m = { deck: typeof m.deck === "string" ? m.deck : (APP.deck && APP.deck.chat && APP.deck.chat.deck) || "", slide: m.slide, whole: !!m.whole || String(m.mode || "").endsWith("_deck") }; foldable(el, m); return el; };
@@ -2241,7 +2306,6 @@ async function tutorAsk(mode, question = "", { spoken = false, drill = null } = 
     const d0 = APP.deck;
     if (d0.chat) d0.chats = [{ id: d0.chat.id, title: d0.chat.title, updated: d0.chat.updated }, ...(d0.chats || [])].slice(0, 5);
     d0.chat = null;
-    d0.asked = [];
     if ($("#thread")) drawThread();
   }
   if (APP.tutor !== "open" || !$("#thread")) { APP.tutor = "open"; renderTutor(); }
@@ -2332,11 +2396,9 @@ async function tutorAsk(mode, question = "", { spoken = false, drill = null } = 
     if (!chat.messages.some((m) => m.role === "a" && m.text === r.message.text && m.ms === r.message.ms))
       chat.messages.push({ role: "q", mode, deck: d.tag, slide: n, text: askText(mode, question), ...(spoken ? { spoken } : {}), ...(photos.length ? { photos } : {}) }, r.message);
     chat.updated = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
-    d.chat = chat;
-    if (!d.asked.includes(n)) d.asked.push(n);
+    d.chat = chat;            // (the course's: another deck of it open now has it too, the panel still on screen)
     scrollOn(null);
-    if (!sameDeck(APP.deck, d)) { ans.end(r.message.text); return; }     // (another deck: its voice was stopped on leaving)
-    if (APP.deck !== d) { APP.deck.chat = chat; APP.deck.asked = [...new Set([...(APP.deck.asked || []), ...d.asked])]; }
+    if (!APP.deck || APP.deck.course !== d.course) { ans.end(r.message.text); return; }     // (another course: its voice was stopped on leaving)
     // Not in the panel any more (New chat, practice): the newest question draws the panel from the chat; an older
     // one never redraws over it (its answer is in the chat for the next redraw).
     if (!wait.isConnected) { if (seq === askSeq) drawThread(); return; }
