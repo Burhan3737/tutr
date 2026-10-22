@@ -13,11 +13,16 @@ chosen by the model: the Claude Agent SDK on the Claude Code login (engine.py) o
 server (opencode_engine.py, models like "opencode/big-pickle"). Tutor, practice and marking requests
 sent with "stream": true are answered as Server-Sent Events: "status" lines, "text" deltas, then
 "done" (or "error"). The log records timing and cost only, never question text.
+Devices with the same course open see each other live (drafts.py) by long polling GET /api/live: the course's
+Ask-box draft (text and photos), the tutor turns being answered in its chat, and chat switches, each request
+answered as soon as something happens; POST /api/draft saves a change to the draft. (Not a long-lived stream:
+Cloudflare's quick tunnels hold a reply back until it ends, so a stream would never reach a phone on one.)
 """
-import argparse, base64, binascii, http.server, json, os, queue, re, shutil, socketserver, subprocess, sys, threading, webbrowser
+import argparse, base64, binascii, http.server, json, os, queue, re, shutil, socketserver, subprocess, sys, threading, time, webbrowser
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
+import drafts as D
 import library as L
 import state as S
 import tutor as T
@@ -25,6 +30,7 @@ import voice as V
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
+DRAFTS = D.Drafts(T.WORK / "drafts.json")
 PHONE_URL = None    # --lan: the address phones on the same network use; --tunnel: the public Cloudflare link
 
 
@@ -160,6 +166,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if alive:
             self._event("error", {"error": box["err"]}) if "err" in box else self._event("done", box.get("out"))
 
+    def _live(self, c, qs):
+        """One long poll of the course's live channel (drafts.py): waits until there's news for this device, then
+        answers with it. A snapshot also says which chat is the course's now, for a device catching up."""
+        try:
+            since = int(qs["since"]) if qs.get("since") else None
+        except ValueError:
+            since = None
+        out = DRAFTS.poll(c.name, qs.get("client", ""), since, qs.get("epoch"))
+        if out["snapshot"] is not None:
+            out["snapshot"]["chat"] = T.current_chat(c)
+        try:
+            self._json(out)
+        except OSError:         # the device went away while it waited (tab closed, phone asleep, network gone)
+            pass
+
     def _answer(self, req, work):
         """Stream when the browser asked for it; otherwise one JSON reply."""
         if req.get("stream"):
@@ -208,11 +229,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/drill/setup":     # the exam drill's setup dialog: decks by topic, papers, a default range
             c = self._course(qs.get("course"))
             return self._json(T.drill_setup(c) if c else {"error": "Unknown course."}, 200 if c else 404)
-        if path == "/api/drill":           # the phone's photo page for a drill
-            try:
-                return self._json(T.drill_status(qs.get("chat", "")))
-            except T.TutorError as e:
-                return self._json({"error": str(e)}, 404)
+        if path == "/api/upload":          # a photo attached in the Ask box, or sent with a question
+            c = self._course(qs.get("course"))
+            rel = qs.get("path", "")
+            ok = c and T.is_upload(c, rel)
+            return self._file(c / rel, {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp"}[rel.rsplit(".", 1)[-1]],
+                              cache=True) if ok else self._json({"error": "No such photo."}, 404)
         if path == "/api/practice":
             rec = T.get_practice(qs.get("id"))
             return self._json(T.public_problem(rec) | {"photos": len(rec.get("photos", []))}) if rec else \
@@ -221,6 +243,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._json(T.model_catalog())
         if path == "/api/phone":
             return self._json({"url": PHONE_URL if self._local() else None})
+        if path == "/api/live":
+            c = self._course(qs.get("course"))
+            return self._live(c, qs) if c else self._json({"error": "Unknown course."}, 404)
         if path == "/api/chats":
             return self._json(T.list_chats())
         if path == "/api/chat":
@@ -309,6 +334,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     c = self._course(ch["course"])
                     if c and T.current_chat(c) == ch["id"]:
                         S.set_chat(c, None)
+                        DRAFTS.chat_switched(c.name, None, req.get("client"))
                 f.unlink()
             return self._json({"ok": True})
         if path == "/api/chat/update":       # rename and/or star
@@ -319,6 +345,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not c or not ch.get("deck"):
                 return self._json({"error": "That chat can't be continued."}, 404)
             S.set_chat(c, ch["id"])
+            DRAFTS.chat_switched(c.name, ch["id"], req.get("client"))
             return self._json({"course": ch["course"], "deck": ch["deck"]})
         if path == "/api/client-log":        # a drawing that failed in the browser (visuals.js)
             clip = lambda k, n: json.dumps(str(req.get(k) or "")[:n], ensure_ascii=False)
@@ -334,8 +361,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not c:
                 return self._json({"error": "That problem has expired."}, 404)
             return self._json(T.add_photo(c, rec["id"], req.get("data", "")))
-        if path == "/api/drill/photo":     # a photo of the page for the drill's open question
-            return self._json(T.add_drill_photo(str(req.get("chat", "")), req.get("data", "")))
         if path == "/api/practice/check":
             rec = T.get_practice(str(req.get("id", "")))
             c = self._course(rec["course"]) if rec else None
@@ -352,7 +377,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._json({"error": "Unknown course."}, 404)
         if path == "/api/chat/new":          # the next question in this course starts a fresh conversation
             S.set_chat(c, None)
+            DRAFTS.chat_switched(c.name, None, req.get("client"))
             return self._json({"ok": True})
+        if path == "/api/draft":            # a change to the Ask box's unsent text (drafts.py)
+            try:
+                ok, d = DRAFTS.save(c.name, req.get("client"), req.get("text"), req.get("base"), req.get("spoken") is True)
+            except D.DraftError as e:
+                return self._json({"error": str(e)}, 400)
+            return self._json({"ok": ok, **d})
+        if path == "/api/draft/photo":      # attach a photo to the Ask box: it shows on every device (drafts.py)
+            if len(DRAFTS.get(c.name)["photos"]) >= D.MAX_PHOTOS:
+                return self._json({"error": f"A question can have {D.MAX_PHOTOS} photos at most."}, 400)
+            rel = T.save_ask_photo(c, req.get("data", ""))
+            try:
+                return self._json(DRAFTS.add_photo(c.name, req.get("client"), rel))
+            except D.DraftError as e:       # (another device's photo got there first)
+                (c / rel).unlink(missing_ok=True)
+                return self._json({"error": str(e)}, 400)
+        if path == "/api/draft/photo/remove":
+            rel = str(req.get("path", ""))
+            gone, d = DRAFTS.remove_photo(c.name, req.get("client"), rel)
+            if gone and T.is_upload(c, rel):        # never sent with a question: nothing else refers to it
+                (c / rel).unlink(missing_ok=True)
+            return self._json(d)
         if path == "/api/seen":
             ds = S.mark_seen(c, str(req.get("tag", "")), _int(req.get("n")))
             return self._json({"state": ds} if ds else {"error": "Unknown deck."}, 200 if ds else 404)
@@ -362,15 +409,38 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self._json({"error": "Open a deck first."}, 400)
             mode = str(req.get("mode", "ask"))
             q = str(req.get("question") or "")
-            if mode in ("ask", "brush", "voice", "grill_reply") and not q.strip():
+            photos = req.get("photos") if isinstance(req.get("photos"), list) else []
+            if mode in ("ask", "brush", "voice", "grill_reply") and not q.strip() and not photos:
                 return self._json({"error": "Type a question first."}, 400)
             drill = None
             if mode == "drill":
                 d = req.get("drill") or {}
                 drill = T.drill_config(c, d.get("decks"), d.get("papers"), d.get("focus"))
+            n, spoken = _int(req.get("n")), req.get("spoken") is True
             def work(emit):
-                chat, msg = T.chat_turn(c, tag, _int(req.get("n")), mode, q, model, web, emit,
-                                        whole_deck=req.get("scope") == "deck", spoken=req.get("spoken") is True, drill=drill)
+                # The photos attached in the Ask box go with this question: they come off the box on every device
+                # (back on if the turn fails).
+                sent = DRAFTS.take_photos(c.name, photos)
+                # The other devices with this course open watch the turn too: the question, then the answer as it's
+                # written (drafts.py). The asking device knows the turn by the id it sent.
+                turn = DRAFTS.turn_start(c.name, {"turn": req.get("turn"), "mode": mode, "question": q, "tag": tag,
+                                                  "n": n, "spoken": spoken, "whole": req.get("scope") == "deck", "photos": sent})
+                def both(kind, data):
+                    DRAFTS.turn_event(c.name, turn, kind, data)
+                    if emit:
+                        emit(kind, data)
+                try:
+                    chat, msg = T.chat_turn(c, tag, n, mode, q, model, web, both,
+                                            whole_deck=req.get("scope") == "deck", spoken=spoken, drill=drill, photos=sent)
+                except Exception as e:
+                    DRAFTS.turn_end(c.name, turn, error=str(e) if isinstance(e, T.TutorError) else "Something went wrong. Try again.")
+                    for rel in sent:
+                        try:
+                            DRAFTS.add_photo(c.name, "", rel)
+                        except D.DraftError:
+                            break
+                    raise
+                DRAFTS.turn_end(c.name, turn, chat=chat["id"])
                 return {"chat": chat["id"], "message": msg, "drill": chat.get("drill")}
             return self._answer(req, work)
         if path == "/api/side":              # a side question about a term or a selection (forks the chat)
@@ -403,6 +473,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
+    # Every listening device asks again the moment it's answered (long polling, drafts.py): many at once overflow
+    # the default queue of 5 waiting connections, and Windows retries a refused one only after 1-3 s.
+    request_queue_size = 128
     # On Windows, SO_REUSEADDR lets a second hub bind the same port silently and steal requests;
     # SO_EXCLUSIVEADDRUSE makes a second start fail loudly instead.
     allow_reuse_address = os.name != "nt"
@@ -453,6 +526,74 @@ def start_tunnel(port, found):
     return proc
 
 
+def _is_hub(port):
+    """True when a Study Hub answers on this port of this computer."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=1) as r:
+            return b"<title>Study Hub</title>" in r.read(4096)
+    except OSError:
+        return False
+
+
+def _port_pid(port):
+    """The process listening on a local port, or None."""
+    try:
+        if os.name == "nt":
+            out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, timeout=10).stdout
+            for line in out.splitlines():
+                f = line.split()
+                if len(f) == 5 and f[3] == "LISTENING" and f[1].rsplit(":", 1)[-1] == str(port):
+                    return int(f[4])
+        else:
+            out = subprocess.run(["lsof", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"], capture_output=True, text=True, timeout=10).stdout
+            return int(out.split()[0]) if out.split() else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def _hub_window(pid):
+    """On Windows, the start.bat window a hub runs in (so closing it leaves no window behind), else the hub itself."""
+    if os.name != "nt":
+        return pid
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command",
+                              f"$p = Get-CimInstance Win32_Process -Filter 'ProcessId={pid}'; "
+                              "$w = Get-CimInstance Win32_Process -Filter \"ProcessId=$($p.ParentProcessId)\"; "
+                              "if ($w -and $w.CommandLine -like '*start.bat*') { $w.ProcessId }"],
+                             capture_output=True, text=True, timeout=15).stdout.strip()
+        return int(out) if out else pid
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return pid
+
+
+def stop_other_hubs(first, count=20):
+    """Close every Study Hub already running on this computer (its window, and its Cloudflare tunnel with it), so there
+    is only ever one. Two hubs each keep their own live channel (drafts.py): devices on different ones never see each
+    other's typing or answers. Returns the ports they were on."""
+    stopped = []
+    for port in range(first, first + count):
+        pid = _is_hub(port) and _port_pid(port)
+        if not pid or pid == os.getpid():
+            continue
+        target = _hub_window(pid)
+        if os.name == "nt":
+            ok = subprocess.run(["taskkill", "/PID", str(target), "/T", "/F"], capture_output=True).returncode == 0
+        else:
+            try:
+                os.kill(target, 15)
+                ok = True
+            except OSError:
+                ok = False
+        if ok:
+            stopped.append(port)
+    end = time.time() + 5           # until their ports are free
+    while stopped and time.time() < end and any(_port_pid(p) for p in stopped):
+        time.sleep(0.2)
+    return stopped
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", type=int, default=8765)
@@ -465,7 +606,11 @@ def main():
     global PHONE_URL
     host = "0.0.0.0" if args.lan else "127.0.0.1"
     srv, wanted = None, args.port
-    for args.port in range(wanted, wanted + 20):     # port taken (another hub, or another app): try the next one
+    old = stop_other_hubs(wanted)
+    if old:
+        print(f"Closed the Study Hub that was already running (port {', '.join(map(str, old))}): only one runs at a time,\n"
+              "so every device sees the same live chat. Open the link below on your devices.\n")
+    for args.port in range(wanted, wanted + 20):     # port taken (another app): try the next one
         try:
             srv = Server((host, args.port), Handler)
             break
@@ -517,6 +662,7 @@ def main():
     finally:
         if tunnel:
             tunnel.terminate()
+        DRAFTS.flush()
         T.shutdown()
 
 

@@ -455,6 +455,14 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   background: var(--accent-soft); color: var(--text); border-radius: 14px 14px 4px 14px;
   font-size: 15px; line-height: 22px; font-weight: 400; white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg-q .where { font-size: 12px; color: var(--text-2); white-space: nowrap; }
+/* ▾ on a question folds its answer away; the folded bubble shows a dashed edge so the hidden answer isn't missed. */
+.msg-q .fold { all: unset; cursor: pointer; display: inline-block; width: 16px; margin-right: 6px; text-align: center;
+  color: var(--text-2); font-size: 13px; transition: transform .15s; }
+.msg-q .fold:hover { color: var(--text); }
+.msg-q .fold:focus-visible { outline: 2px solid var(--accent); border-radius: 4px; }
+.msg-q.folded { outline: 1px dashed var(--text-2); outline-offset: 2px; }
+.msg-q.folded .fold { transform: rotate(-90deg); }
+.msg-q.folded + .ans, .msg-q.folded + .waiting, .msg-q.folded + .ans + .waiting { display: none; }
 .msg-a { font-size: 16px; line-height: 26px; max-width: 62ch; }
 .msg-a p { margin: 0 0 10px; }
 .msg-a ul, .msg-a ol { padding-left: 22px; margin: 0 0 10px; }
@@ -485,6 +493,29 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
 .compose .btn { padding: 0 16px; }
 .compose .dictate { padding: 0 12px; font-size: 18px; }
 .compose .dictate.on { color: var(--on-accent); background: #c0392b; border-color: #c0392b; animation: rec-pulse 1.2s infinite; }
+/* Photos attached in the Ask box: a strip above it (over the ask bar when the tutor is closed), and 📷's menu. */
+.compose { flex-wrap: wrap; }
+.compose textarea { min-width: 0; }
+.ask-photos { flex: 0 0 100%; display: flex; gap: 8px; flex-wrap: wrap; }
+.ask-photos[hidden] { display: none; }
+.ask-photos .thumb { position: relative; width: 64px; height: 64px; border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--surface); overflow: hidden; display: grid; place-items: center; font-size: 11px; color: var(--text-2); }
+.ask-photos .thumb a { display: block; width: 100%; height: 100%; }
+.ask-photos img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ask-photos .x { position: absolute; top: 2px; right: 2px; width: 22px; height: 22px; border: 0; border-radius: 50%; padding: 0;
+  background: rgba(20,18,26,.65); color: #fff; font-size: 15px; line-height: 22px; cursor: pointer; }
+.askbar .ask-photos { position: absolute; left: 0; bottom: calc(100% + 8px); padding: 6px; background: var(--surface);
+  border: 1px solid var(--line); border-radius: var(--r-lg); box-shadow: var(--shadow-pop); }
+.attach-wrap { position: relative; display: flex; align-self: stretch; }
+.compose .attach { padding: 0 12px; font-size: 18px; }
+.askbar .compose .attach { width: 40px; padding: 0; font-size: 16px; }
+.attach-menu { position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 20; margin: 0; padding: 4px; list-style: none; min-width: 190px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); box-shadow: var(--shadow-pop); }
+.attach-menu[hidden] { display: none; }
+.attach-menu li { padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 14px; white-space: nowrap; }
+.attach-menu li:hover { background: var(--accent-soft); }
+.msg-photos { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.msg-photos img { width: 96px; height: 96px; object-fit: cover; border-radius: 6px; display: block; }
 
 /* ---------- reading view: the chat fills the viewer as one long page on a grey desk, like a PDF */
 .new-chat[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); }

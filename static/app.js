@@ -214,6 +214,7 @@ async function route() {
   const p = params();
   const token = ++routeToken;
   closeMenu();
+  draftFollow(p.c || null);         // the Ask box's live draft is the course's (before the box is drawn)
   renderSessionBar();
   // A recording never outlives the page; speech only carries on while staying on the same deck (e.g. a citation).
   cancelDictation();
@@ -825,7 +826,7 @@ function chatBar(chat) {
 
 async function newChat() {
   const d = APP.deck;
-  try { await api("/api/chat/new", { course: d.course }); } catch { /* the next question still starts fresh */ }
+  try { await api("/api/chat/new", { course: d.course, client: DRAFT.client }); } catch { /* the next question still starts fresh */ }
   if (d.chat) d.chats = [{ id: d.chat.id, title: d.chat.title, updated: d.chat.updated }, ...(d.chats || [])].slice(0, 5);
   d.chat = null;
   d.asked = [];
@@ -837,7 +838,7 @@ async function newChat() {
 
 async function openChat(id) {
   try {
-    const r = await api("/api/chat/open", { id });
+    const r = await api("/api/chat/open", { id, client: DRAFT.client });
     APP.tutor = "open";
     // One chat per course: in a deck of its course, it opens beside that deck; otherwise go to the deck it started on.
     if (APP.deck && APP.deck.course === r.course) {
@@ -1044,25 +1045,365 @@ function scopeSwitch() {
   return h("div", { class: "scope-switch", role: "radiogroup", "aria-label": "Work on" }, mk("slide", "This slide"), mk("deck", "Whole deck"));
 }
 
+// ------------------------------------------------------------ live draft
+// The Ask box's unsent text is shared by every device with the same course open: type on the laptop, carry on
+// on the phone, send from either. The hub keeps the one copy (drafts.py); this page listens to the course by long
+// polling (/api/live: each request is answered as soon as there's news, then the next one goes; a stream wouldn't
+// get through Cloudflare's quick tunnels) and saves what's typed (/api/draft), one save at a time, built on the
+// version (`rev`) it last had. A save built on an older version is refused with the newer text: both edits are
+// merged (drafts.js) and saved again. Another device's change goes into the box with the cursor left where it
+// was, except while a word is being composed or a question dictated (it waits until that ends). A page in the
+// background stops listening and catches up when it's back on screen (`since`: the last event it heard).
+// Photos attached in the box are part of the draft too, but aren't merged: the page always shows the hub's newest
+// list (photoRev), since they're only ever added or removed one at a time. Sending a question takes them along.
+//   local: this page's text (the box's, when there is one); spoken: it was dictated (even in part)
+//   base / rev / baseSpoken: the hub's copy that `local` was built on; remote: a newer copy waiting to be merged
+const DRAFT = { client: Math.random().toString(36).slice(2, 12) + Date.now().toString(36), course: null, poll: null, since: null, epoch: "",
+  local: "", spoken: false, base: "", rev: 0, baseSpoken: false, remote: null, inflight: false, sentAt: 0,
+  timer: 0, due: 0, composing: false, applying: false, photos: [], photoRev: -1, uploading: 0, onPhotos: null };
+const DRAFT_EVERY_MS = 150;      // at most one save this often while typing
+
+// The course whose draft this page follows (null: none). Called on every route.
+function draftFollow(course) {
+  if (course === DRAFT.course) { if (course && !DRAFT.poll && !document.hidden) draftListen(); return; }
+  if (DRAFT.course && DRAFT.local !== DRAFT.base)       // typed just before leaving the course: still saved
+    api("/api/draft", { course: DRAFT.course, client: DRAFT.client, text: DRAFT.local, base: DRAFT.rev, spoken: DRAFT.spoken }).catch(() => {});
+  draftUnlisten();
+  clearTimeout(DRAFT.timer);
+  Object.assign(DRAFT, { course, local: "", spoken: false, base: "", rev: 0, baseSpoken: false, remote: null, timer: 0, photos: [], photoRev: -1,
+    since: null, epoch: "" });
+  drawTray();
+  if (course && !document.hidden) draftListen();
+}
+
+// Listen until stopped: one request at a time, each picking up after the last event heard. The hub away: try
+// again, less often (up to every 10 s).
+function draftListen() {
+  draftUnlisten();
+  const ctl = new AbortController(), course = DRAFT.course;
+  DRAFT.poll = ctl;
+  (async () => {
+    let fails = 0;
+    while (DRAFT.poll === ctl) {
+      let r;
+      try {
+        const after = DRAFT.since == null ? "" : `&since=${DRAFT.since}&epoch=${DRAFT.epoch}`;
+        const res = await fetch(`/api/live?course=${encodeURIComponent(course)}&client=${DRAFT.client}${after}`, { signal: ctl.signal, cache: "no-store" });
+        if (!res.ok) throw new Error(String(res.status));
+        r = await res.json();
+      } catch {
+        if (DRAFT.poll !== ctl) return;
+        await new Promise((ok) => setTimeout(ok, Math.min(10000, 1000 * 2 ** fails++)));
+        continue;
+      }
+      if (DRAFT.poll !== ctl) return;
+      fails = 0;
+      const resumed = DRAFT.since != null;
+      Object.assign(DRAFT, { since: r.seq, epoch: r.epoch });
+      if (r.snapshot) liveSnapshot(r.snapshot, resumed);
+      for (const [kind, d] of r.events) liveEvent(kind, d);
+    }
+  })();
+}
+function draftUnlisten() { if (DRAFT.poll) DRAFT.poll.abort(); DRAFT.poll = null; }
+
+// Everything as it is now: on first listening, or when this page fell too far behind (or the hub restarted).
+function liveSnapshot(s, resumed) {
+  const d = s.draft;
+  if (d.rev < DRAFT.rev) {     // the hub lost its drafts (restarted without its file): this page's is the newest
+    draftPhotos(d, true);
+    Object.assign(DRAFT, { base: d.text, rev: d.rev, baseSpoken: d.spoken, remote: null });
+    draftKick();
+  } else draftRemote(d);
+  for (const t of s.turns) liveTurn("turn_start", t);
+  // Turns may have finished while this page wasn't listening: the course's chat as it is now.
+  const deck = APP.deck;
+  if (resumed && deck && deck.course === DRAFT.course) {
+    if (s.chat) liveRefresh(s.chat, null);
+    else if (deck.chat) liveChatSwitch({ chat: null });
+  }
+}
+
+function liveEvent(kind, d) {
+  if (kind === "draft") draftRemote(d);
+  else if (kind === "chat") liveChatSwitch(d);
+  else liveTurn(kind, d);
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) draftUnlisten();
+  else if (DRAFT.course) draftListen();         // back on screen: what happened meanwhile comes in at once
+});
+
+// The box changed here (typing, dictation, a / command filled in, sending).
+function draftTyped(ta) {
+  if (DRAFT.applying || !DRAFT.course) return;
+  DRAFT.local = ta.value;
+  DRAFT.spoken = !!ta.value && DICT.spoken;
+  draftKick(DRAFT.sentAt + DRAFT_EVERY_MS - Date.now());
+}
+
+// A newer copy from the hub: merged in by the next pump (not while a save is on its way: its answer comes first).
+function draftRemote(d) {
+  draftPhotos(d);
+  if (d.rev <= DRAFT.rev || (DRAFT.remote && DRAFT.remote.rev >= d.rev)) return;
+  DRAFT.remote = { text: String(d.text || ""), rev: d.rev, spoken: !!d.spoken };
+  draftKick();
+}
+
+function draftKick(delay = 0) {
+  const due = Date.now() + Math.max(0, delay);
+  if (DRAFT.timer && DRAFT.due <= due) return;
+  clearTimeout(DRAFT.timer);
+  DRAFT.due = due;
+  DRAFT.timer = setTimeout(draftPump, Math.max(0, delay));
+}
+
+// Merge in what came from the hub, then save what's new here: one request at a time, each built on the last.
+async function draftPump() {
+  DRAFT.timer = 0;
+  const course = DRAFT.course;
+  if (!course || DRAFT.inflight) return;
+  const ta = $("#ask-input");
+  if (ta && DICT.state === "idle") DRAFT.local = ta.value;
+  if (DRAFT.remote) {
+    if (DRAFT.composing || DICT.state !== "idle") return draftKick(300);
+    const d = DRAFT.remote;
+    DRAFT.remote = null;
+    draftApply(d);
+  }
+  const text = DRAFT.local, spoken = DRAFT.spoken;
+  if (text === DRAFT.base && spoken === DRAFT.baseSpoken) return;
+  const wait = DRAFT.sentAt + DRAFT_EVERY_MS - Date.now();
+  if (wait > 0) return draftKick(wait);
+  DRAFT.inflight = true;
+  DRAFT.sentAt = Date.now();
+  let r = null;
+  try { r = await api("/api/draft", { course, client: DRAFT.client, text, base: DRAFT.rev, spoken }); } catch { /* the hub didn't answer */ }
+  DRAFT.inflight = false;
+  if (DRAFT.course !== course) return draftKick();
+  if (!r) return draftKick(2000);
+  if (r.ok) { Object.assign(DRAFT, { base: text, rev: r.rev, baseSpoken: !!r.spoken }); draftPhotos(r); }
+  else draftRemote(r);                                  // someone else's change got there first: merge, then save again
+  draftKick();
+}
+
+function draftApply(d) {
+  if (d.rev <= DRAFT.rev) return;
+  const mine = DRAFT.local, edited = mine !== DRAFT.base;
+  const text = draftMerge(DRAFT.base, mine, d.text);
+  DRAFT.spoken = !!text && (d.spoken || (edited && DRAFT.spoken));
+  Object.assign(DRAFT, { base: d.text, rev: d.rev, baseSpoken: d.spoken, local: text });
+  if (DICT.state === "idle") DICT.spoken = DRAFT.spoken;
+  const ta = $("#ask-input");
+  if (!ta || ta.value === text) return;
+  const before = ta.value, focused = document.activeElement === ta, a = ta.selectionStart, b = ta.selectionEnd;
+  DRAFT.applying = true;
+  ta.value = text;
+  if (focused) ta.setSelectionRange(draftCaret(before, text, a), draftCaret(before, text, b));
+  ta.dispatchEvent(new Event("input"));                // resize the box, light up Ask
+  DRAFT.applying = false;
+  if (!focused) { const m = $("#slash-menu"); if (m) m.hidden = true; }      // the / menu is for whoever's typing
+}
+
+// ---- photos in the Ask box
+// Attached from the 📷 button (a file, the camera, or the phone by QR code), pasted or dropped into the box. Each is
+// saved by the hub at once and shows on every device; it goes with the next question, whatever its mode.
+const uploadUrl = (course, p) => `/api/upload?course=${encodeURIComponent(course)}&path=${encodeURIComponent(p)}`;
+const photoThumbs = (course, photos) => h("span", { class: "msg-photos" }, photos.map((p) =>
+  h("a", { href: uploadUrl(course, p), target: "_blank", rel: "noopener" }, h("img", { src: uploadUrl(course, p), alt: "Attached photo", loading: "lazy" }))));
+
+// The hub's newest list of photos (in a draft, a save's answer, or a snapshot), unless an older one.
+function draftPhotos(d, force = false) {
+  if (!d || !Array.isArray(d.photos) || (!force && d.rev <= DRAFT.photoRev)) return;
+  DRAFT.photoRev = d.rev;
+  const more = d.photos.length > DRAFT.photos.length;
+  if (DRAFT.photos.join("\n") === d.photos.join("\n")) return;
+  DRAFT.photos = d.photos.slice();
+  drawTray();
+  if (more && DRAFT.onPhotos) DRAFT.onPhotos();
+}
+
+function drawTray() {
+  const tray = $("#ask-photos");
+  if (tray) {
+    tray.hidden = !DRAFT.photos.length && !DRAFT.uploading;
+    tray.replaceChildren(...DRAFT.photos.map((p) => h("span", { class: "thumb" },
+      h("a", { href: uploadUrl(DRAFT.course, p), target: "_blank", rel: "noopener" }, h("img", { src: uploadUrl(DRAFT.course, p), alt: "Attached photo" })),
+      h("button", { class: "x", type: "button", title: "Remove this photo", "aria-label": "Remove this photo", onclick: () => removePhoto(p) }, "×"))),
+      DRAFT.uploading ? h("span", { class: "thumb adding" }, "Adding…") : null);
+  }
+  const ta = $("#ask-input"), send = $("#ask-send");
+  if (ta && send) send.classList.toggle("ghost", !ta.value.trim() && !DRAFT.photos.length);
+}
+
+async function attachPhotos(files) {
+  const course = DRAFT.course;
+  if (!course) return;
+  for (const f of files) {
+    DRAFT.uploading++; drawTray();
+    try {
+      const r = await api("/api/draft/photo", { course, client: DRAFT.client, data: await shrinkImage(f) });
+      if (DRAFT.course === course) draftPhotos(r);
+    } catch (e) { toast(e.message); }
+    finally { DRAFT.uploading--; drawTray(); }
+  }
+}
+
+async function removePhoto(p) {
+  const course = DRAFT.course;
+  DRAFT.photos = DRAFT.photos.filter((x) => x !== p);
+  drawTray();
+  try {
+    const r = await api("/api/draft/photo/remove", { course, client: DRAFT.client, path: p });
+    if (DRAFT.course === course) draftPhotos(r);
+  } catch (e) { toast(e.message); }
+}
+
+// The file picker: the camera straight away, or a choice of files (several at once).
+function photoPicker(camera, onFiles) {
+  const input = $("#photo-input");
+  input.value = "";
+  input.multiple = !camera;
+  if (camera) input.setAttribute("capture", "environment"); else input.removeAttribute("capture");
+  input.onchange = () => { const fs = [...input.files]; if (fs.length) onFiles(fs); };
+  input.click();
+}
+
+// 📷 next to the mic: on a phone, the camera or a picture; on the laptop, a file, or the phone's camera by QR code.
+function attachButton() {
+  const items = isPhone() ? [["Take a photo", () => photoPicker(true, attachPhotos)], ["Choose a picture", () => photoPicker(false, attachPhotos)]]
+    : [["Choose a file", () => photoPicker(false, attachPhotos)], APP.phoneUrl ? ["Take it with your phone", () => sendFromPhone({ ask: DRAFT.course })] : null].filter(Boolean);
+  const menu = h("ul", { class: "attach-menu", role: "menu", hidden: true },
+    items.map(([label, fn]) => h("li", { role: "menuitem", tabindex: "-1", onclick: () => { menu.hidden = true; fn(); } }, label)));
+  const b = h("button", { class: "btn ghost attach", type: "button", title: "Attach a photo: it goes with your next question",
+    "aria-label": "Attach a photo", "aria-haspopup": items.length > 1 ? "menu" : null, onclick: () => {
+      if (items.length === 1) return items[0][1]();
+      menu.hidden = !menu.hidden;
+      if (!menu.hidden) setTimeout(() => document.addEventListener("click", () => { menu.hidden = true; }, { once: true }));
+    } }, "📷");
+  return h("span", { class: "attach-wrap" }, menu, b);
+}
+
+// ---- the chat, live
+// The same channel brings the course chat's turns from the other devices: the question as soon as it's sent, the
+// answer as it's written (never read aloud here: the voice stays with the device that asked), then the chat as
+// saved. This page's own turns carry an id it made (MY_TURNS): their events go to the turn being drawn here.
+// A page that connects mid-answer gets the turn with its text so far.
+const MY_TURNS = new Map();     // turn id -> (event, data) for this page's own turn
+const REMOTE = new Map();       // turn id -> another device's turn being drawn here: { d, n, q, wait, ans, place }
+const newTurnId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+
+function liveTurn(kind, t) {
+  if (!t) return;
+  const mine = MY_TURNS.get(t.turn);
+  if (mine) return mine(kind, t);
+  const deck = APP.deck;
+  let r = REMOTE.get(t.turn);
+  if (kind === "turn_start") {
+    if (r || !deck || deck.course !== DRAFT.course) return;
+    const where = t.whole || String(t.mode).endsWith("_deck") ? ` · ${t.tag}` : ` · ${t.tag !== deck.tag ? `${t.tag} ` : ""}s${t.n}`;
+    r = { d: deck, n: t.n, tag: t.tag, pending: "", timer: 0,
+      q: qMeta(h("p", { class: "msg-q" }, (t.spoken || t.mode === "voice" ? "🎙 " : "") + askText(t.mode, t.question), h("span", { class: "where" }, where),
+        t.photos && t.photos.length ? photoThumbs(deck.course, t.photos) : null), { deck: t.tag, slide: t.n, whole: t.whole, mode: t.mode }),
+      wait: h("p", { class: "waiting" }, t.status ? `${t.status}…` : "Answering a question from another device…"),
+      ans: answerView(deck.course) };
+    r.place = (th) => { th.append(r.q, r.ans.root, r.wait); };
+    REMOTE.set(t.turn, r);
+    TURNS.add(r);
+    const th = $("#thread");
+    if (th) { $(".empty", th)?.remove(); $(".earlier", th)?.remove(); r.place(th); bottom(th); }
+    if (t.text) liveFeed(r, t.text);
+    return;
+  }
+  if (!r) {             // a turn this page didn't see start (its own, cut off; or from before it connected): the saved chat
+    if (kind === "turn_done") liveRefresh(t.chat, null);
+    return;
+  }
+  if (kind === "turn_status") r.wait.textContent = `${t.text}…`;
+  else if (kind === "turn_text") liveFeed(r, t.text);
+  else {
+    clearTimeout(r.timer);
+    REMOTE.delete(t.turn);
+    TURNS.delete(r);
+    if (kind === "turn_done") liveRefresh(t.chat, r);
+    else if (r.wait.isConnected) r.wait.replaceWith(h("p", { class: "err" }, t.error || "Something went wrong."));
+  }
+}
+
+// The answer as it's written, painted a few times a second (not on every piece).
+function liveFeed(r, text) {
+  r.wait.textContent = "Writing…";
+  r.pending += text;
+  if (r.timer) return;
+  r.timer = setTimeout(() => {
+    r.timer = 0;
+    const th = r.ans.root.closest(".thread"), follow = th && th.scrollHeight - th.scrollTop - th.clientHeight < 80;
+    r.ans.feed(r.pending);
+    r.pending = "";
+    if (follow) th.scrollTop = th.scrollHeight;
+  }, 80);
+}
+
+// Another device's turn is saved: fetch the chat and draw it. Messages already here keep their elements (an answer
+// being read aloud carries on).
+async function liveRefresh(chatId, r) {
+  let deck = APP.deck;
+  if (!chatId || !deck || deck.course !== DRAFT.course) return;
+  let chat;
+  try { chat = await api(`/api/chat?id=${encodeURIComponent(chatId)}`); } catch { return; }
+  if (!APP.deck || APP.deck.course !== deck.course) return;          // gone to another course meanwhile
+  deck = APP.deck;
+  const old = deck.chat;
+  if (old && old.id === chat.id)
+    chat.messages = chat.messages.map((m, i) => (old.messages[i] && old.messages[i].role === m.role && old.messages[i].text === m.text ? old.messages[i] : m));
+  else if (old) deck.chats = [{ id: old.id, title: old.title, updated: old.updated }, ...(deck.chats || []).filter((c) => c.id !== chat.id)].slice(0, 5);
+  deck.chat = chat;
+  if ($("#thread")) drawThread();
+  else updateComposeHint();
+}
+
+// Another device started a new chat, opened an older one, or deleted this one: follow it, so the next question here
+// goes where the chat shown says.
+async function liveChatSwitch(e) {
+  const deck = APP.deck;
+  if (!deck || deck.course !== DRAFT.course || (deck.chat ? deck.chat.id : null) === e.chat) return;
+  if (e.chat) return liveRefresh(e.chat, null);
+  if (deck.chat) deck.chats = [{ id: deck.chat.id, title: deck.chat.title, updated: deck.chat.updated }, ...(deck.chats || [])].slice(0, 5);
+  deck.chat = null;
+  if ($("#thread")) drawThread();
+  else updateComposeHint();
+}
+
 function composeBox(placeholder, onSend) {
   const ta = h("textarea", { id: "ask-input", rows: "1", placeholder, "aria-label": placeholder,
     "aria-autocomplete": "list", "aria-controls": "slash-menu" });
-  // A new box is empty, so nothing in it was dictated; one drawn mid-dictation takes over the text so far.
-  if (DICT.state === "idle") DICT.spoken = false; else ta.value = DICT.last;
-  const send = h("button", { class: "btn ghost", type: "submit" }, "Ask");
+  // A new box starts with the course's live draft (empty if there's none); one drawn mid-dictation takes over the
+  // text so far.
+  if (DICT.state === "idle") { ta.value = DRAFT.local; DICT.spoken = DRAFT.spoken; } else ta.value = DICT.last;
+  const send = h("button", { class: "btn ghost", id: "ask-send", type: "submit" }, "Ask");
   const menu = h("ul", { class: "slash-menu", id: "slash-menu", role: "listbox", hidden: true });
+  const tray = h("div", { class: "ask-photos", id: "ask-photos", hidden: true });
+  const empty = () => !ta.value.trim() && !DRAFT.photos.length;
   const form = h("form", { class: "compose", onsubmit: (e) => {
     e.preventDefault();
-    const q = ta.value.trim();
-    if (!q) return;
+    let q = ta.value.trim();
+    if (!q && !DRAFT.photos.length) return;
+    if (!q) q = DRAFT.photos.length > 1 ? "See the photos." : "See the photo.";
     const slash = q.startsWith("/") ? slashCommand(q) : null;
     if (slash && slash.error) return toast(slash.error);
     const spoken = DICT.spoken;                     // dictated (even in part)
     cancelDictation();                              // sending while still listening drops the recording
     DICT.spoken = false;
-    ta.value = ""; autosize(); send.classList.add("ghost"); slashMenu();
+    ta.value = ""; autosize(); slashMenu();
+    draftTyped(ta);                                 // sent: the box empties on the other devices too
     if (slash) slash.run(spoken); else onSend(q, spoken);
-  } }, menu, ta, micOk() ? dictateButton(ta) : null, send);
+    send.classList.toggle("ghost", empty());
+  } }, menu, tray, ta, attachButton(), micOk() ? dictateButton(ta) : null, send);
+  const images = (list) => [...(list || [])].filter((f) => f.type.startsWith("image/"));
+  ta.addEventListener("paste", (e) => { const fs = images(e.clipboardData && e.clipboardData.files); if (fs.length) { e.preventDefault(); attachPhotos(fs); } });
+  form.addEventListener("dragover", (e) => { if ([...e.dataTransfer.items].some((i) => i.type.startsWith("image/"))) e.preventDefault(); });
+  form.addEventListener("drop", (e) => { const fs = images(e.dataTransfer.files); if (fs.length) { e.preventDefault(); attachPhotos(fs); } });
   const autosize = () => {
     ta.style.height = "auto";
     ta.style.height = ta.value ? `${Math.min(160, ta.scrollHeight + 2)}px` : "";      // (empty: its own height, not the placeholder's)
@@ -1081,8 +1422,13 @@ function composeBox(placeholder, onSend) {
     if (shown.length) { ta.setAttribute("aria-activedescendant", `slash-${shown[pick].cmd}`); menu.children[pick].scrollIntoView({ block: "nearest" }); }
     else ta.removeAttribute("aria-activedescendant");
   };
-  ta.addEventListener("input", () => { autosize(); send.classList.toggle("ghost", !ta.value.trim()); pick = 0; slashMenu(); if (!ta.value.trim()) DICT.spoken = false; });
-  ta.addEventListener("blur", () => { menu.hidden = true; ta.setAttribute("aria-expanded", "false"); });
+  ta.addEventListener("input", () => { autosize(); send.classList.toggle("ghost", empty()); pick = 0; slashMenu(); if (!ta.value.trim()) DICT.spoken = false; draftTyped(ta); });
+  // A word being composed (phone keyboards, IMEs) isn't replaced under the keyboard: other devices' changes wait.
+  ta.addEventListener("compositionstart", () => { DRAFT.composing = true; });
+  ta.addEventListener("compositionend", () => { DRAFT.composing = false; draftKick(); });
+  if (ta.value) requestAnimationFrame(() => { if (ta.isConnected) autosize(); });
+  requestAnimationFrame(() => { if (tray.isConnected) drawTray(); });      // (once the box is in the page)
+  ta.addEventListener("blur", () => { menu.hidden = true; ta.setAttribute("aria-expanded", "false"); if (DRAFT.composing) { DRAFT.composing = false; draftKick(); } });
   ta.addEventListener("keydown", (e) => {
     if (!menu.hidden && shown.length) {
       if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); pick = (pick + (e.key === "ArrowDown" ? 1 : shown.length - 1)) % shown.length; slashMenu(); return; }
@@ -1184,7 +1530,8 @@ function drawThread() {
   }
   const spoken = VOICE.view && VOICE.view.msg;
   msgs.forEach((m, i) => {
-    if (m.role === "q") th.append(h("p", { class: "msg-q" }, m.spoken || m.mode === "voice" ? `🎙 ${m.text}` : m.text, h("span", { class: "where" }, msgWhere(m, APP.deck.chat, APP.deck.tag))));
+    if (m.role === "q") th.append(qMeta(h("p", { class: "msg-q" }, m.spoken || m.mode === "voice" ? `🎙 ${m.text}` : m.text, h("span", { class: "where" }, msgWhere(m, APP.deck.chat, APP.deck.tag)),
+      m.photos && m.photos.length ? photoThumbs(APP.deck.course, m.photos) : null), m));
     else if (m === spoken) th.append(VOICE.view.root);
     else th.append(answerEl(m, i === msgs.length - 1 && !TURNS.size));
   });
@@ -1196,6 +1543,25 @@ function drawThread() {
 
 // The same deck, even when it was fetched again (a citation chip, the deck reopened).
 const sameDeck = (a, b) => !!a && !!b && a.course === b.course && a.tag === b.tag;
+
+// A question's bubble keeps where it was asked, so its label can follow the deck the panel is on (keepTutor).
+const qMeta = (el, m) => { el.__m = { deck: typeof m.deck === "string" ? m.deck : (APP.deck && APP.deck.chat && APP.deck.chat.deck) || "", slide: m.slide, whole: !!m.whole || String(m.mode || "").endsWith("_deck") }; foldable(el, m); return el; };
+
+// A question's ▾ folds its answer away (CSS hides the .ans / .waiting after a .folded bubble, so an answer still
+// streaming in stays folded too). Kept on the message for this session, so a redraw of the thread keeps it.
+const FOLDED = new WeakSet();
+function foldable(q, m) {
+  const btn = h("button", { class: "fold", type: "button", "aria-expanded": "true", title: "Hide the answer",
+    onclick: () => set(!q.classList.contains("folded")) }, "▾");
+  const set = (on) => {
+    q.classList.toggle("folded", on);
+    btn.setAttribute("aria-expanded", String(!on));
+    btn.title = on ? "Show the answer" : "Hide the answer";
+    if (on) FOLDED.add(m); else FOLDED.delete(m);
+  };
+  q.prepend(btn);
+  if (FOLDED.has(m)) set(true);
+}
 
 // The deck a saved question is about: older ones carry none (the chat's own deck), and `deck: true` once meant Whole deck.
 const msgDeck = (m, chat) => (typeof m.deck === "string" ? m.deck : chat.deck) || "";
@@ -1883,10 +2249,17 @@ async function tutorAsk(mode, question = "", { spoken = false, drill = null } = 
   const d = APP.deck;
   const n = Math.min(APP.n, d.slides);
   const seq = ++askSeq;
+  const turn = newTurnId();
+  MY_TURNS.set(turn, () => {});
+  // The photos attached in the Ask box go with it (the hub takes them off the box on every device, and puts them
+  // back if the question fails).
+  const photos = d.course === DRAFT.course ? DRAFT.photos.slice() : [];
+  if (photos.length) { DRAFT.photos = []; drawTray(); }
   stopSpeaking();
   $(".empty", th)?.remove();
   $(".earlier", th)?.remove();
-  const q = th.appendChild(h("p", { class: "msg-q" }, (spoken ? "🎙 " : "") + askText(mode, question), h("span", { class: "where" }, mode.endsWith("_deck") ? ` · ${d.tag}` : ` · s${n}`)));
+  const q = th.appendChild(qMeta(h("p", { class: "msg-q" }, (spoken ? "🎙 " : "") + askText(mode, question), h("span", { class: "where" }, mode.endsWith("_deck") ? ` · ${d.tag}` : ` · s${n}`),
+    photos.length ? photoThumbs(d.course, photos) : null), { deck: d.tag, slide: n, mode }));
   // Voice: read aloud, the answer keeps pace with the voice; without it (models still loading, or failed), it shows
   // as it streams.
   const voiced = voiceOn() && VOICE.tts === "ready";
@@ -1926,23 +2299,38 @@ async function tutorAsk(mode, question = "", { spoken = false, drill = null } = 
       scrollOn(th);
     } };
   TURNS.add(me);
+  // The answer comes two ways, the same text on both: this request's own stream, and the live channel. Whichever
+  // is further on is shown (on a Cloudflare quick tunnel the stream only arrives at the end; the channel is live).
+  const grow = (full) => {
+    if (over || full.length <= acc.length) return;
+    if (!acc) { wait.before(ans.root); wait.textContent = "Writing…"; }
+    acc = full;
+    if (!queued) { queued = true; setTimeout(() => requestAnimationFrame(paint), Math.max(50, cost * 4)); }
+  };
+  const status = (t) => { if (!over) wait.textContent = `${t}…`; };
+  let streamed = "", heard = "";
+  MY_TURNS.set(turn, (kind, t) => {
+    if (kind === "turn_start") { if (t.status) status(t.status); if (t.text) grow(heard = t.text); }
+    else if (kind === "turn_status") status(t.text);
+    else if (kind === "turn_text") grow(heard += t.text);
+  });
   try {
-    const r = await apiStream("/api/tutor", { course: d.course, tag: d.tag, n, mode, question, spoken, drill, model: APP.model, slides_only: slidesOnly(d.course) }, {
-      status: (t) => { wait.textContent = `${t}…`; },
-      text: (t) => {
-        if (!acc) { wait.before(ans.root); wait.textContent = "Writing…"; }
-        acc += t;
-        if (!queued) { queued = true; setTimeout(() => requestAnimationFrame(paint), Math.max(50, cost * 4)); }
-      },
+    const r = await apiStream("/api/tutor", { course: d.course, tag: d.tag, n, mode, question, spoken, drill, model: APP.model, slides_only: slidesOnly(d.course),
+      turn, client: DRAFT.client, photos }, {
+      status,
+      text: (t) => grow(streamed += t),
     });
     over = true;
+    MY_TURNS.set(turn, () => {});          // (its end comes on the channel too: nothing to do, it's drawn)
     TURNS.delete(me);
     ans.msg = r.message;
     // The voice goes on to the end of the saved text; if that isn't what streamed, the pacing is off: all shows.
     if (sp) { if (r.message.text.startsWith(acc.slice(0, fed))) sp.feed(r.message.text.slice(fed)); else ans.showAll(); sp.end(); }
     const chat = d.chat || { id: r.chat, title: askText(mode, question), updated: "", messages: [] };
     if (r.drill) chat.drill = r.drill;
-    chat.messages.push({ role: "q", mode, deck: d.tag, slide: n, text: askText(mode, question), ...(spoken ? { spoken } : {}) }, r.message);
+    // (Unless the chat was fetched again meanwhile, after another device's turn, with this answer already in it.)
+    if (!chat.messages.some((m) => m.role === "a" && m.text === r.message.text && m.ms === r.message.ms))
+      chat.messages.push({ role: "q", mode, deck: d.tag, slide: n, text: askText(mode, question), ...(spoken ? { spoken } : {}), ...(photos.length ? { photos } : {}) }, r.message);
     chat.updated = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
     d.chat = chat;
     if (!d.asked.includes(n)) d.asked.push(n);
@@ -1973,6 +2361,7 @@ async function tutorAsk(mode, question = "", { spoken = false, drill = null } = 
   } catch (e) {
     over = true;
     TURNS.delete(me);
+    MY_TURNS.delete(turn);          // (if the hub answers it anyway, the live channel brings the answer in)
     if (speaking()) stopSpeaking();
     scrollOn(null);
     ans.root.remove();
@@ -2823,24 +3212,12 @@ function drillStatus(dr) {
 }
 
 // Under the drill's last answer: what the student can do besides typing an answer.
+// (A photo of the page is attached with 📷 in the Ask box, like any question's.)
 function drillFoot() {
-  const chat = APP.deck.chat;
-  const target = { id: chat.id, drill: true, photos: (chat.drill.photos || []).length };
-  const count = h("span", { class: "count" });
-  const setPhotos = (k) => {
-    target.photos = k;
-    chat.drill.photos = Array(k).fill("");
-    count.replaceChildren(k ? [`${k} photo${k === 1 ? "" : "s"} added · `,
-      h("button", { class: "link", type: "button", onclick: () => tutorAsk("drill_reply", "My working is in the photo.") }, "Mark it ›")] : []);
-  };
-  setPhotos(target.photos);
   return h("div", { class: "msg-foot drill-foot" },
     h("button", { class: "link", type: "button", title: "The next hint, never the answer (/hint)", onclick: () => tutorAsk("drill_hint") }, "Hint"),
     h("button", { class: "link", type: "button", title: "The written solution for full marks, a shortcut and the method for variants (/answer)", onclick: () => tutorAsk("drill_reveal") }, "Show the answer"),
     h("button", { class: "link quiet", type: "button", title: "Move on; it comes back later in the drill (/skip)", onclick: () => tutorAsk("drill_skip") }, "Skip"),
-    h("button", { class: "link quiet", type: "button", title: "A photo of your page: it goes with your next reply", onclick: () => pickPhoto(target, setPhotos) }, "📷 Photo"),
-    APP.phoneUrl && !isPhone() ? h("button", { class: "link quiet", type: "button", title: "Take the photo with your phone", onclick: () => sendFromPhone(target, setPhotos) }, "📱 From phone") : null,
-    count,
     h("button", { class: "link quiet", type: "button", title: "Stop: marks per topic, what held up, what's shaky (/enddrill)", onclick: () => tutorAsk("drill_end") }, "End the drill ›"));
 }
 
@@ -3023,19 +3400,13 @@ async function refreshDeckState() {
 // ---------- photos
 
 function pickPhoto(prob, setPhotos) {
-  const input = $("#photo-input");
-  input.value = "";
-  input.onchange = async () => {
-    const f = input.files[0];
-    if (!f) return;
+  photoPicker(true, async ([f]) => {
     setPhotos(0);
     try {
-      const data = await shrinkImage(f);
-      const r = await api(prob.drill ? "/api/drill/photo" : "/api/practice/photo", prob.drill ? { chat: prob.id, data } : { id: prob.id, data });
+      const r = await api("/api/practice/photo", { id: prob.id, data: await shrinkImage(f) });
       setPhotos(r.photos);
     } catch (e) { alert(e.message); }
-  };
-  input.click();
+  });
 }
 
 // Phones take 12-megapixel photos; 2000 px on the long side is plenty to read handwriting.
@@ -3055,19 +3426,26 @@ function shrinkImage(file) {
   });
 }
 
+// prob: a practice problem, or { ask: course } for the Ask box (the photo then arrives over the live draft).
 function sendFromPhone(prob, setPhotos) {
-  const url = `${APP.phoneUrl}#upload=${prob.drill ? "drill-" : ""}${prob.id}`;
+  const url = `${APP.phoneUrl}#upload=${prob.ask ? `ask-${encodeURIComponent(prob.ask)}` : prob.id}`;
   const qr = qrcode(0, "M"); qr.addData(url); qr.make();
   $("#qr-title").textContent = "Send a photo from your phone";
-  $("#qr-text").textContent = "Scan this with your phone's camera, take a photo of your working, and it appears here.";
+  $("#qr-text").textContent = prob.ask ? "Scan this with your phone's camera and take a photo: it goes into the Ask box here, with your next question."
+    : "Scan this with your phone's camera, take a photo of your working, and it appears here.";
   $("#qr").innerHTML = qr.createSvgTag({ cellSize: 6, margin: 2, scalable: true });
   $("#qr-url").textContent = "";
   const dlg = $("#qr-dlg");
   dlg.showModal();
+  if (prob.ask) {
+    DRAFT.onPhotos = () => dlg.close();
+    dlg.addEventListener("close", () => { DRAFT.onPhotos = null; }, { once: true });
+    return;
+  }
   const sent = prob.photos || 0;        // the count before this phone's photo
   const timer = setInterval(async () => {
     try {
-      const r = await api(prob.drill ? `/api/drill?chat=${prob.id}` : `/api/practice?id=${prob.id}`);
+      const r = await api(`/api/practice?id=${prob.id}`);
       if (r.photos !== sent) { setPhotos(r.photos); dlg.close(); }
     } catch { /* keep polling */ }
   }, 2500);
@@ -3079,30 +3457,24 @@ async function showUpload(pid) {
   $("#session-bar").hidden = true;
   const main = $("#main");
   let prob;
-  const drill = pid.startsWith("drill-") ? pid.slice(6) : null;
+  const ask = pid.startsWith("ask-") ? pid.slice(4) : null;         // the Ask box of this course
   try {
-    prob = drill ? await api(`/api/drill?chat=${encodeURIComponent(drill)}`) : await api(`/api/practice?id=${encodeURIComponent(pid)}`);
-    if (drill) prob = { slides: `${prob.title} · Q${prob.q}`, problem_md: "Take a photo of your page for the open question. It goes with your next reply in the drill.", photos: prob.photos };
+    prob = ask ? { slides: ask.replace(/_/g, " "), problem_md: "Take a photo of your page. It goes into the Ask box on your laptop, and with your next question.", photos: 0 }
+      : await api(`/api/practice?id=${encodeURIComponent(pid)}`);
   }
   catch (e) { main.replaceChildren(h("div", { class: "upload-page" }, h("p", { class: "err" }, e.message))); return; }
   const status = h("p", { class: "muted" }, prob.photos ? `${prob.photos} photo${prob.photos === 1 ? "" : "s"} sent so far.` : "");
   const btn = h("button", { class: "btn big", type: "button" }, "Take a photo of your working");
-  btn.onclick = () => {
-    const input = $("#photo-input");
-    input.value = "";
-    input.onchange = async () => {
-      const f = input.files[0];
-      if (!f) return;
-      status.textContent = "Sending…";
-      try {
-        const data = await shrinkImage(f);
-        const r = await api(drill ? "/api/drill/photo" : "/api/practice/photo", drill ? { chat: drill, data } : { id: pid, data });
-        status.textContent = `Sent ✓ (${r.photos} photo${r.photos === 1 ? "" : "s"}). Check your laptop, or add another.`;
-        btn.textContent = "Add another photo";
-      } catch (e) { status.textContent = e.message; }
-    };
-    input.click();
-  };
+  btn.onclick = () => photoPicker(true, async ([f]) => {
+    status.textContent = "Sending…";
+    try {
+      const data = await shrinkImage(f);
+      const r = ask ? await api("/api/draft/photo", { course: ask, client: DRAFT.client, data }) : await api("/api/practice/photo", { id: pid, data });
+      const k = ask ? r.photos.length : r.photos;
+      status.textContent = `Sent ✓ (${k} photo${k === 1 ? "" : "s"}${ask ? " in the Ask box" : ""}). Check your laptop, or add another.`;
+      btn.textContent = "Add another photo";
+    } catch (e) { status.textContent = e.message; }
+  });
   main.replaceChildren(h("div", { class: "upload-page" }, h("p", { class: "from" }, prob.slides || ""),
     h("div", { class: "problem msg-a" }, renderMd(prob.problem_md)), btn, status));
 }
@@ -3279,7 +3651,7 @@ async function showHistory() {
           `${c.code}${c.deck ? " · " + c.deck : ""} · ${c.count} question${c.count === 1 ? "" : "s"} · ${c.updated || c.created} · Open ›`)),
       h("button", { class: "link quiet", type: "button", onclick: async () => {
         if (!confirm(`Delete this chat?\n\n${c.title}`)) return;
-        await api("/api/chat/delete", { id: c.id }).catch(() => {});
+        await api("/api/chat/delete", { id: c.id, client: DRAFT.client }).catch(() => {});
         row.remove();
         if (APP.deck && APP.deck.chat && APP.deck.chat.id === c.id) { APP.deck.chat = null; drawThread(); }
       } }, "Delete"));

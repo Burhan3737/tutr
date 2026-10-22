@@ -685,19 +685,23 @@ def chat_system(cdir, chat, tag, web):
     return drill_system_prompt(cdir, chat["drill"], web) if chat and chat.get("drill") else system_prompt(cdir, tag, web)
 
 
-def _drill_prompt(cdir, chat, mode, tag, n, question):
+def photos_note(photos):
+    """The lines telling Claude which photos the student sent with this turn (it Reads each one)."""
+    return ("\n\nPhotos the student attached to this message (Read each image file; often their handwritten working):\n" +
+            "\n".join(f"- {p}" for p in photos)) if photos else ""
+
+
+def _drill_prompt(cdir, chat, mode, tag, n, question, photo_txt=""):
     cfg = chat["drill"]
-    photos = cfg.get("photos") or []
-    photo_txt = ("\n\nPhotos of the student's handwritten working (Read each image file):\n" +
-                 "\n".join(f"- {p}" for p in photos)) if photos and mode != "drill" else ""
     focus = "Follow the student's focus (in the system prompt) inside the range.\n" if cfg.get("focus") else ""
     fill = {"range": _range_text(cdir, cfg), "papers": _papers_text(cdir, cfg), "focus": focus, "ledger": _ledger(cfg),
             "mistakes": weak_points(cdir), "where": where(cdir, tag, n), "question": question.strip() or "(see the photos)",
             "photos": photo_txt}
     if mode == "drill":
-        return DRILL_PROMPTS["drill"].format(**fill)
+        return DRILL_PROMPTS["drill"].format(**fill) + photo_txt
     rules = DRILL_REMIND.format(range_short=_range_short(cfg), focus=focus, ledger=fill["ledger"])
-    return DRILL_PROMPTS[mode].format(**fill, rules=rules)
+    out = DRILL_PROMPTS[mode].format(**fill, rules=rules)
+    return out if "{photos}" in DRILL_PROMPTS[mode] else out + photo_txt
 
 
 def _drill_record(cdir, chat, text):
@@ -788,10 +792,12 @@ def current_chat(cdir):
     return chat_id
 
 
-def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=False, spoken=False, drill=None):
+def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=False, spoken=False, drill=None, photos=()):
     """One tutor answer inside the course's chat, about deck tag. Returns the saved message and the chat id. whole_deck: a voice
     question asked with Whole deck chosen (about the deck, not slide n). drill: a new exam drill's config
-    (drill_config), for mode "drill": it always starts a new chat."""
+    (drill_config), for mode "drill": it always starts a new chat. photos: images attached to the question in the Ask
+    box (paths in the course folder), in any mode."""
+    photos = [p for p in photos if is_upload(cdir, p)]
     whole_deck = whole_deck and mode == "voice"
     if mode not in CHAT_PROMPTS and mode not in DRILL_MODES and mode != "voice":
         raise TutorError("Unknown request.", 400)
@@ -823,8 +829,11 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=Fa
             S.set_chat(cdir, chat["id"])
     if mode in DRILL_MODES and not chat.get("drill"):
         raise TutorError("No drill is running in this chat. Start one with Exam drill.", 400)
+    # (A drill from before photos went with the Ask box may still have some waiting on it: they go with this turn.)
+    sent_photos = list((chat.get("drill") or {}).get("photos") or []) if mode in DRILL_MODES and mode != "drill" else []
+    photo_txt = photos_note(photos + [p for p in sent_photos if p not in photos])
     if mode in DRILL_MODES:
-        prompt = _drill_prompt(cdir, chat, mode, tag, n, question)
+        prompt = _drill_prompt(cdir, chat, mode, tag, n, question, photo_txt)
     elif mode == "voice":
         prompt = voice_prompt(cdir, f"the whole deck {deck_where(cdir, tag)}" if whole_deck else f"slide {where(cdir, tag, n)}",
                               question.strip())
@@ -835,7 +844,7 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=Fa
                                            mistakes=weak_points(cdir) if mode in ("grill", "grill_deck") else "")
         if extra:
             prompt += EXTRA.format(extra=extra[:2000])
-    sent_photos = list((chat.get("drill") or {}).get("photos") or []) if mode in DRILL_MODES and mode != "drill" else []
+        prompt += photo_txt
     try:
         r = run_model(cdir, chat_system(cdir, chat, tag, web), prompt, model=model, chat_key=(cdir.name, chat["id"]),
                        session=chat.get("session"), web=web, label=f"chat:{mode}", emit=emit)
@@ -856,6 +865,8 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=Fa
                 q["whole"] = True
             if spoken:
                 q["spoken"] = True
+            if photos:
+                q["photos"] = photos
             chat["messages"] = chat.get("messages", []) + [q, msg]
             save_chat(chat)
     finally:
@@ -1495,25 +1506,14 @@ def add_photo(cdir, pid, data):
     return {"photos": len(rec["photos"])}
 
 
-def add_drill_photo(chat_id, data):
-    """A photo of the page for the drill's open question: it goes with the student's next reply, then is cleared."""
-    with _CHAT_LOCK:
-        chat = load_chat(chat_id)
-    cdir = L.course_dir(chat["course"]) if chat and chat.get("drill") else None
-    if not cdir:
-        raise TutorError("That drill is no longer open.", 404)
-    with _course_lock(cdir):
-        chat = load_chat(chat_id)
-        k = sum(1 for _ in (cdir / ".cache" / "uploads").glob(f"drill-{chat_id}-*")) if (cdir / ".cache" / "uploads").is_dir() else 0
-        chat["drill"].setdefault("photos", []).append(_save_image(cdir, f"drill-{chat_id}-{k + 1}", data))
-        save_chat(chat)
-    return {"photos": len(chat["drill"]["photos"])}
+UPLOAD = re.compile(r"^\.cache/uploads/[A-Za-z0-9_-]{1,80}\.(jpg|png|webp)$")
 
 
-def drill_status(chat_id):
-    """For the phone's photo page: the drill's title, its open question's number and the photos waiting."""
-    chat = load_chat(chat_id)
-    if not chat or not chat.get("drill"):
-        raise TutorError("That drill is no longer open.", 404)
-    return {"title": chat.get("title", "Exam drill"), "photos": len(chat["drill"].get("photos") or []),
-            "q": len(chat["drill"].get("log") or []) + 1}
+def is_upload(cdir, rel):
+    """True for a photo saved by _save_image in this course."""
+    return isinstance(rel, str) and bool(UPLOAD.match(rel)) and (cdir / rel).is_file()
+
+
+def save_ask_photo(cdir, data):
+    """A photo attached in the Ask box (any mode): kept in the course folder, so the tutor may read it."""
+    return _save_image(cdir, f"ask-{uuid.uuid4().hex[:12]}", data)
