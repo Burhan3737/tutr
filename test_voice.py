@@ -6,7 +6,7 @@
 Nothing here calls Claude (run_claude is replaced) or touches a real course: chats, memory and state live in a
 temporary folder.
 """
-import asyncio, io, re, sys, tempfile, threading, time, types, wave
+import asyncio, base64, io, re, sys, tempfile, threading, time, types, wave
 from pathlib import Path
 
 import numpy as np
@@ -592,6 +592,377 @@ def test_voice_errors():
         w.writeframes(b"\0" * 64000)
     check("transcribe: stereo -> 400", status_of(lambda: V.transcribe(buf.getvalue())) == 400)
     check("VoiceError defaults to 503", V.VoiceError("x").status == 503)
+    check("transcribe_audio: < 0.3 s -> ''", V.transcribe_audio(np.zeros(4000, np.float32)) == "")
+    check("whisper runs on 6 threads", V.WHISPER_THREADS == 6)
+
+
+# ---------------------------------------------------------------- dictation written down while you talk (dictation.py)
+
+def tone(s):
+    t = np.arange(round(s * 16000)) / 16000
+    return (0.3 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+
+
+def quiet(s):
+    return np.zeros(round(s * 16000), np.float32)
+
+
+def pcm(x):
+    return (np.clip(x, -1, 1) * 32767).astype("<i2").tobytes()
+
+
+def feed(d, x, seq=0, step=0.3, sync=None):
+    """Send x to a dictation in step-second chunks, as the browser does; returns the next seq. sync: run after each
+    chunk (to let the worker take a piece before the next is cut, so no two pieces share a call)."""
+    n = round(step * 16000)
+    for i in range(0, len(x), n):
+        d.add(pcm(x[i:i + n]), seq)
+        seq += 1
+        if sync:
+            sync()
+    return seq
+
+
+def cuts(d):
+    """The pieces d cuts, in seconds, as they're queued (whatever the worker then joins into one call)."""
+    out, put = [], d._q.put
+
+    def rec(item, *a, **kw):
+        if isinstance(item, np.ndarray):
+            out.append(len(item) / 16000)
+        put(item, *a, **kw)
+    d._q.put = rec
+    return out
+
+
+def taken(w, pieces):
+    """A sync for feed(): wait until the worker has called Whisper for every piece cut so far."""
+    return lambda: until(lambda: len(w.calls) >= len(pieces), 2)
+
+
+def fake_speech(a):
+    """Speech = runs where the signal isn't silent (a tone's zero crossings don't split a run)."""
+    on = np.flatnonzero(np.abs(a) > 0.01)
+    if not len(on):
+        return []
+    br = np.flatnonzero(np.diff(on) > 1600)
+    return list(zip(np.r_[on[0], on[br + 1]].tolist(), np.r_[on[br] + 1, on[-1] + 1].tolist()))
+
+
+class FakeWhisper:
+    """Records (seconds, prompt) per call and answers p1, p2…; gate: an Event every call waits on."""
+    def __init__(self, reply=None, gate=None):
+        self.calls, self.reply, self.gate = [], reply, gate
+
+    def __call__(self, audio, prompt=""):
+        self.calls.append((len(audio) / 16000, prompt))
+        if self.gate:
+            self.gate.wait(5)
+        n = len(self.calls)
+        return self.reply(n) if self.reply else f"p{n}"
+
+
+def until(cond, s=1.0):
+    end = time.time() + s
+    while not cond() and time.time() < end:
+        time.sleep(0.01)
+    return cond()
+
+
+def status_of(fn):
+    try:
+        fn()
+    except V.VoiceError as e:
+        return e.status
+    return None
+
+
+THREE = np.r_[tone(5), quiet(1), tone(5), quiet(1), tone(2)]       # three pieces: two cut at pauses, one at finish
+FOUR = np.r_[tone(5), quiet(1), tone(5), quiet(1), tone(5), quiet(1), tone(5), quiet(1)]
+
+
+def test_dictation():
+    import dictation as D
+    with Patch((D, "SPEECH", fake_speech)):
+        w = FakeWhisper()
+        with Patch((D, "TRANSCRIBE", w)):
+            d = D.Dictation()
+            feed(d, np.r_[tone(5), quiet(0.8)])
+            until(lambda: w.calls)
+            check("dictation: pause sends the piece before it", len(w.calls) == 1 and 5.0 <= w.calls[0][0] <= 5.4, w.calls)
+            d.cancel()
+
+        w = FakeWhisper()
+        with Patch((D, "TRANSCRIBE", w)):
+            d = D.Dictation()
+            seq = feed(d, np.r_[tone(2), quiet(0.8)])
+            time.sleep(0.2)
+            waited = not w.calls
+            feed(d, np.r_[tone(3), quiet(0.8)], seq)
+            until(lambda: w.calls)
+            check("dictation: short pause-separated bits wait", waited and len(w.calls) == 1 and 5.0 <= w.calls[0][0] <= 6.4, w.calls)
+            d.cancel()
+
+        w = FakeWhisper()
+        with Patch((D, "TRANSCRIBE", w)):
+            d = D.Dictation()
+            feed(d, tone(20))
+            until(lambda: w.calls)
+            check("dictation: no pause: cut by 12 s", w.calls and all(c[0] <= 12.0 for c in w.calls), w.calls)
+            d.cancel()
+
+        w = FakeWhisper()
+        with Patch((D, "TRANSCRIBE", w)):
+            d = D.Dictation()
+            small = cuts(d)
+            feed(d, THREE, sync=taken(w, small))
+            check("dictation: finish returns the pieces in order", d.finish() == "p1 p2 p3", w.calls)
+
+        w = FakeWhisper()
+        with Patch((D, "TRANSCRIBE", w)):
+            d = D.Dictation()
+            big = cuts(d)
+            feed(d, THREE, step=len(THREE) / 16000)
+            d.finish()
+            check("dictation: big chunk cuts like small ones",
+                  len(big) == len(small) == 3 and all(abs(a - b) <= 0.05 for a, b in zip(small, big)), f"{small} vs {big}")
+
+        w = FakeWhisper()
+        with Patch((D, "TRANSCRIBE", w)):
+            d = D.Dictation("Price elasticity")
+            feed(d, FOUR[:round(12 * 16000)], sync=taken(w, cuts(d)))
+            until(lambda: len(w.calls) >= 2)
+            p = w.calls[1][1] if len(w.calls) > 1 else ""
+            check("dictation: prompt carries hint and text so far", "Price elasticity" in p and p.endswith("p1"), w.calls)
+            d.cancel()
+
+        forty = " ".join(f"w{i}" for i in range(1, 41))
+        for n_words, want in ((D.CONTEXT_WORDS, "Price elasticity " + " ".join(f"w{i}" for i in range(41 - D.CONTEXT_WORDS, 41))),
+                              (0, "Price elasticity")):
+            w = FakeWhisper(reply=lambda n: forty if n == 1 else f"p{n}")
+            with Patch((D, "TRANSCRIBE", w), (D, "CONTEXT_WORDS", n_words)):
+                d = D.Dictation("Price elasticity")
+                feed(d, FOUR[:round(12 * 16000)], sync=taken(w, cuts(d)))
+                until(lambda: len(w.calls) >= 2)
+                p = w.calls[1][1] if len(w.calls) > 1 else None
+                name = "context is the last whole words" if n_words else "CONTEXT_WORDS = 0 sends the hint alone"
+                check(f"dictation: {name}", p == want, repr(p))
+                d.cancel()
+
+        w = FakeWhisper()
+        with Patch((D, "TRANSCRIBE", w)):
+            d = D.Dictation()
+            feed(d, np.r_[tone(5), quiet(5), tone(5)], sync=taken(w, cuts(d)))
+            d.finish()
+            check("dictation: long silence is never transcribed", len(w.calls) == 2 and all(c[0] <= 6 for c in w.calls), w.calls)
+
+        w = FakeWhisper()
+        with Patch((D, "TRANSCRIBE", w)):
+            d = D.Dictation()
+            feed(d, quiet(4))
+            check("dictation: silence only", d.finish() == "" and not w.calls, w.calls)
+
+            d = D.Dictation()
+            check("dictation: seq out of order -> 409", status_of(lambda: d.add(pcm(quiet(0.3)), 1)) == 409)
+            check("dictation: odd bytes -> 400", status_of(lambda: d.add(b"\0\0\0", 0)) == 400)
+            check("dictation: over 130 s -> 413", status_of(lambda: feed(d, quiet(131), step=1)) == 413)
+            d.cancel()
+
+        gate = threading.Event()
+        w = FakeWhisper(gate=gate)
+        with Patch((D, "TRANSCRIBE", w)):
+            d = D.Dictation()
+            seq = feed(d, FOUR[:round(6 * 16000)])
+            started = until(lambda: w.calls) and len(w.calls) == 1     # the worker is busy with the first piece
+            feed(d, FOUR[round(6 * 16000):], seq)
+            gate.set()
+            text = d.finish()
+            check("dictation: a busy worker merges what queued up",
+                  started and len(w.calls) == 2 and 15 <= w.calls[1][0] <= D.MAX_CALL_S and text == "p1 p2", f"{w.calls} {text!r}")
+
+        gate = threading.Event()
+        w = FakeWhisper(gate=gate)
+        with Patch((D, "TRANSCRIBE", w)):
+            sid = D.start("")
+            d = D.get(sid)
+            feed(d, FOUR[:round(12 * 16000)])
+            until(lambda: w.calls)
+            d.cancel()
+            gate.set()
+            time.sleep(0.3)
+            check("dictation: cancel: nothing transcribed after", len(w.calls) <= 1 and status_of(lambda: D.get(sid)) == 404, w.calls)
+
+        def boom(audio, prompt=""):
+            raise RuntimeError("model fell over")
+        with Patch((D, "TRANSCRIBE", boom)):
+            d = D.Dictation()
+            feed(d, THREE)
+            check("dictation: a failed piece -> finish 503", status_of(d.finish) == 503)
+
+        with Patch((D, "IDLE_S", 0)):
+            a = D.start("")
+            b = D.start("")
+            check("dictation: idle session expires", status_of(lambda: D.get(a)) == 404 and D.get(b) is not None)
+            D.drop(b)
+
+        def finishing(d):
+            """finish() on a thread, while the gated fake holds the worker; -> (thread, box with "text" or "status")."""
+            box = {}
+
+            def run():
+                try:
+                    box["text"] = d.finish()
+                except V.VoiceError as e:
+                    box["status"] = e.status
+            t = threading.Thread(target=run, daemon=True)
+            t.start()
+            return t, box
+
+        gate = threading.Event()
+        w = FakeWhisper(gate=gate)
+        with Patch((D, "TRANSCRIBE", w)):
+            sid = D.start("")
+            d = D.get(sid)
+            feed(d, THREE)
+            t, box = finishing(d)
+            until(lambda: d.finishing and w.calls)
+            with Patch((D, "IDLE_S", 0)):
+                other = D.start("")         # its sweep finds sid idle, but it is being finished
+            gate.set()
+            t.join(5)
+            check("dictation: the idle sweep leaves a finishing session alone",
+                  not d.cancelled and box.get("text", "").startswith("p1"), f"{box} {w.calls}")
+            D.drop(other)
+
+        gate = threading.Event()
+        w = FakeWhisper(gate=gate)
+        with Patch((D, "TRANSCRIBE", w)):
+            d = D.Dictation()
+            feed(d, THREE)
+            t, box = finishing(d)
+            until(lambda: d.finishing and w.calls)
+            d.cancel()
+            gate.set()
+            t.join(5)
+            check("dictation: cancelled during finish -> 503", box == {"status": 503}, box)
+
+        gate = threading.Event()
+        w = FakeWhisper(gate=gate)
+        with Patch((D, "TRANSCRIBE", w)):
+            d = D.Dictation()
+            feed(d, THREE)
+            until(lambda: w.calls)
+            check("dictation: finish timeout -> 503", status_of(lambda: d.finish(timeout=0.2)) == 503)
+            gate.set()
+
+
+def test_dictation_http():
+    import http.client, json
+    import dictation as D
+    import server
+
+    def post(path, body, ctype="application/json"):
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        c.request("POST", path, body if isinstance(body, bytes) else json.dumps(body), {"Content-Type": ctype})
+        r = c.getresponse()
+        out = r.status, json.loads(r.read() or b"{}")
+        c.close()
+        return out
+
+    def chunk(sid, seq, data):
+        return post(f"/api/voice/dictate/chunk?id={sid}&seq={seq}", data, "application/octet-stream")
+
+    srv = server.Server(("127.0.0.1", 0), server.Handler)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    w = FakeWhisper()
+    try:
+        with Patch((D, "SPEECH", fake_speech), (D, "TRANSCRIBE", w), (server.V, "warm", lambda: None)):
+            st, r = post("/api/voice/dictate/start", {"course": "nope", "tag": "", "n": 1, "scope": "slide"})
+            sid = r.get("id")
+            check("http dictate: start -> id", st == 200 and isinstance(sid, str) and len(sid) >= 8, r)
+            first = THREE[:round(6 * 16000)]
+            st, r = chunk(sid, 0, pcm(first))
+            until(lambda: len(w.calls) == 1)        # (so the next piece isn't joined to this one in one call)
+            check("http dictate: chunk -> 200 with text", st == 200 and isinstance(r.get("text"), str), (st, r))
+            st, r = chunk(sid, 5, pcm(quiet(0.3)))
+            check("http dictate: chunk wrong seq -> 409", st == 409 and r.get("error"), (st, r))
+            st, r = chunk("nope", 0, pcm(quiet(0.3)))
+            check("http dictate: chunk unknown id -> 404", st == 404 and r.get("error"), (st, r))
+            st, r = chunk(sid, 1, b"\0" * 2_000_000)
+            check("http dictate: chunk 2 MB -> 413", st == 413 and r.get("error"), (st, r))
+            st, r = chunk(sid, 1, pcm(THREE[len(first):]))
+            until(lambda: len(w.calls) == 2)
+            st, r = post("/api/voice/dictate/finish", {"id": sid})
+            check("http dictate: finish -> joined text", st == 200 and r.get("text") == "p1 p2 p3", (st, r, w.calls))
+            st, r = post("/api/voice/dictate/finish", {"id": sid})
+            check("http dictate: finished id -> 404", st == 404, (st, r))
+            st, r = post("/api/voice/dictate/cancel", {"id": "nope"})
+            check("http dictate: cancel unknown id -> ok", st == 200 and r == {"ok": True}, (st, r))
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as f:
+                f.setnchannels(1)
+                f.setsampwidth(2)
+                f.setframerate(16000)
+                f.writeframes(pcm(quiet(0.2)))      # under 0.3 s: answered without loading the models
+            st, r = post("/api/voice/transcribe", {"course": "nope", "audio": base64.b64encode(buf.getvalue()).decode()})
+            check("http dictate: transcribe route still works", st == 200 and r == {"text": ""}, (st, r))
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+    courses = L.course_dirs()
+    if not courses:
+        print("skip  voice hint: no course folders found")
+        return
+    c = courses[0]
+    tag = next(iter(L.course_info(c)["decks"]))
+    d = L.deck(c, tag)
+    s = next((x for x in L.slide_texts(c, tag) if x["title"] and x["title"] != d["title"]), None)
+    if s:
+        got = server._voice_hint({"course": c.name, "tag": tag, "n": s["n"], "scope": "slide"})
+        want = f"{d['title']}. {s['title']}"
+        check("voice hint: slide scope is the deck title. the slide title", got == want, f"{got!r} vs {want!r}")
+    got = server._voice_hint({"course": c.name, "tag": tag, "n": 1, "scope": "deck"})
+    check("voice hint: deck scope fits ~600 chars and ends with the deck title",
+          got.endswith(d["title"]) and len(got) <= 600 + len(". " + d["title"]), f"{len(got)} {got[-80:]!r}")
+    check("voice hint: unknown course -> ''", server._voice_hint({"course": "nope", "tag": tag}) == "")
+
+
+def test_stream_round_trip():
+    """Kokoro says two sentences with a pause between; they're streamed in at real-time pace like the browser does."""
+    import dictation as D
+    one = "Demand falls as the price rises, and supply rises with it, until the two curves meet."
+    two = "That meeting point is the equilibrium price, where the amount bought equals the amount sold."
+    hint = "Supply and Demand. Price elasticity"
+    clips = []
+    for s in (one, two):
+        with wave.open(io.BytesIO(to_16k_mono(V.speak(s, "af_heart", 1.0)))) as w:
+            clips.append(np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype(np.float32) / 32768)
+    audio = np.r_[clips[0], np.zeros(16000, np.float32), clips[1]]
+    d = D.Dictation(hint)
+    n = round(0.3 * 16000)
+    for seq, i in enumerate(range(0, len(audio), n)):
+        d.add(pcm(audio[i:i + n]), seq)
+        time.sleep(0.3)
+    t0 = time.time()
+    heard = d.finish()
+    t1 = time.time()
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(pcm(audio))
+    t2 = time.time()
+    V.transcribe(buf.getvalue(), hint)
+    t3 = time.time()
+    exp, got = words(one + " " + two), words(heard)
+    overlap = sum(min(exp.count(x), got.count(x)) for x in set(exp)) / len(exp)
+    print(f"      heard: {heard}\n      overlap {overlap:.0%}  ({len(audio) / 16000:.1f} s clip: finish {t1 - t0:.1f}s "
+          f"after the last chunk; the whole clip in one transcribe() {t3 - t2:.1f}s)")
+    check("stream round trip: >= 80% of the words heard back", overlap >= 0.8, f"{overlap:.0%}")
+    check("stream round trip: finish() < 5 s after the last chunk", t1 - t0 < 5, f"{t1 - t0:.1f}s")
 
 
 def test_round_trip():
@@ -627,8 +998,11 @@ def main():
         test_spoken_flag(tmp)
         test_practice_focus(tmp)
     test_voice_errors()
+    test_dictation()
+    test_dictation_http()
     if "--no-models" not in sys.argv:
         test_round_trip()
+        test_stream_round_trip()
     print(f"\n{len(FAILED)} failed" + (": " + ", ".join(FAILED) if FAILED else ""))
     sys.exit(1 if FAILED else 0)
 

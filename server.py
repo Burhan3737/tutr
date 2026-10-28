@@ -22,6 +22,7 @@ import argparse, base64, binascii, http.server, json, os, queue, re, shutil, soc
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
+import dictation as DI
 import drafts as D
 import library as L
 import state as S
@@ -102,6 +103,25 @@ def _int(v, default=1):
         return int(v or default)
     except (TypeError, ValueError, OverflowError):
         return default
+
+
+def _voice_hint(req):
+    """What dictation should listen for: the deck's and slide's titles (every slide's, for Whole deck), so course
+    terms are heard right. Whole titles only, so a word is never cut."""
+    c = L.course_dir(req.get("course") or "")
+    tag = str(req.get("tag", ""))
+    d = L.deck(c, tag) if c else None
+    if not d:
+        return ""
+    slides = L.slide_texts(c, tag)
+    if req.get("scope") == "deck":
+        titles = [t for t in dict.fromkeys(x["title"] for x in slides if x["title"]) if t != d["title"]]
+        keep = []       # Whisper only keeps the end of its prompt: the last titles that fit in ~600 chars
+        while titles and len(". ".join([titles[-1]] + keep)) <= 600:
+            keep.insert(0, titles.pop())
+        return ". ".join(keep + [d["title"]])
+    s = next((x for x in slides if x["n"] == _int(req.get("n"))), None)
+    return ". ".join(x for x in (d["title"], s and s["title"]) if x)
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -271,12 +291,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except (json.JSONDecodeError, ValueError):
             return None
 
+    def _chunk(self):
+        """A piece of a dictation streamed while you talk: raw 16 kHz int16 PCM, not JSON."""
+        qs = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
+        n = _int(self.headers.get("Content-Length"), 0)
+        if n > 1_000_000:
+            left = n if n <= 20_000_000 else 0       # read it anyway, so the browser gets the answer, not a reset
+            while left > 0 and (got := self.rfile.read(min(left, 1 << 16))):
+                left -= len(got)
+            return self._json({"error": "That piece of the recording is too big."}, 413)
+        pcm = self.rfile.read(n) if n > 0 else b""
+        return self._json({"text": DI.get(qs.get("id")).add(pcm, _int(qs.get("seq"), -1))})
+
     def do_POST(self):
         path = urlparse(self.path).path
-        req = self._body()
-        if req is None:
-            return self._json({"error": "Bad request."}, 400)
         try:
+            if path == "/api/voice/dictate/chunk":      # before _body(): this one isn't JSON
+                return self._chunk()
+            req = self._body()
+            if req is None:
+                return self._json({"error": "Bad request."}, 400)
             return self._post(path, req)
         except T.TutorError as e:
             return self._json({"error": str(e)}, e.status)
@@ -316,22 +350,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 audio = base64.b64decode(str(req.get("audio") or "").split(",")[-1], validate=True)
             except (binascii.Error, ValueError):
                 return self._json({"error": "The recording didn't arrive. Try again."}, 400)
-            c = self._course(req.get("course"))
-            tag = str(req.get("tag", ""))
-            d = L.deck(c, tag) if c else None
-            hint = ""
-            if d:           # the deck's and slide's titles (every slide's, for Whole deck), so course terms are heard right
-                slides = L.slide_texts(c, tag)
-                if req.get("scope") == "deck":
-                    titles = [t for t in dict.fromkeys(x["title"] for x in slides if x["title"]) if t != d["title"]]
-                    keep = []       # Whisper only keeps the end of its prompt: the last titles that fit in ~600 chars
-                    while titles and len(". ".join([titles[-1]] + keep)) <= 600:
-                        keep.insert(0, titles.pop())
-                    hint = ". ".join(keep + [d["title"]])
-                else:
-                    s = next((x for x in slides if x["n"] == _int(req.get("n"))), None)
-                    hint = ". ".join(x for x in (d["title"], s and s["title"]) if x)
-            return self._json({"text": V.transcribe(audio, hint)})
+            return self._json({"text": V.transcribe(audio, _voice_hint(req))})
+        # Dictation streamed while you talk (dictation.py): start -> id, chunks (in _chunk), finish -> the text.
+        # Any failure and the browser sends the whole recording to /api/voice/transcribe instead.
+        if path == "/api/voice/dictate/start":
+            V.warm()
+            return self._json({"id": DI.start(_voice_hint(req))})
+        if path == "/api/voice/dictate/finish":
+            return self._json({"text": DI.get(str(req.get("id") or "")).finish()})
+        if path == "/api/voice/dictate/cancel":     # leaving the deck mid-dictation: nothing more is written down
+            try:
+                DI.get(str(req.get("id") or "")).cancel()
+            except V.VoiceError:
+                pass        # already gone: that's fine
+            return self._json({"ok": True})
         if path == "/api/chat/delete":
             f = T.chat_file(str(req.get("id", "")))
             if f and f.exists():

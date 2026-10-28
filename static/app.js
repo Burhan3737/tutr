@@ -31,10 +31,12 @@ const store = {
 const isPhone = () => matchMedia("(max-width: 760px)").matches;
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
-async function api(path, body) {
+async function api(path, body, ms = 0) {
   const opt = body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {};
+  const ctl = ms ? new AbortController() : null, timer = ctl && setTimeout(() => ctl.abort(), ms);   // ms: give up after
+  if (ctl) opt.signal = ctl.signal;
   let r;
-  try { r = await fetch(path, opt); } catch { throw new Error("The hub isn't responding. Start it again with start.bat, then retry."); }
+  try { r = await fetch(path, opt); } catch { throw new Error("The hub isn't responding. Start it again with start.bat, then retry."); } finally { clearTimeout(timer); }
   const data = await r.json().catch(() => ({}));
   if (!r.ok || data.error) throw new Error(data.error || "Something went wrong. Try again.");
   return data;
@@ -2447,7 +2449,7 @@ async function tutorAsk(mode, question = "", { spoken = false, drill = null } = 
 const VOICE = { state: "idle", gen: 0, ctrl: null, el: null, voices: null, tts: undefined, poll: 0, playBtn: null, done: null, view: null, lit: null,
   warned: false, loadWarned: false };
 const talking = () => VOICE.state === "waiting" || VOICE.state === "speaking";
-const micOk = () => window.isSecureContext && !!navigator.mediaDevices?.getUserMedia && !!window.MediaRecorder;
+const micOk = () => window.isSecureContext && !!navigator.mediaDevices?.getUserMedia && !!window.AudioWorkletNode;
 const VOICE_LINE = { waiting: "Getting the voice ready…", speaking: "Speaking…",
   blocked: "The browser blocked the voice: tap ▶ Play under the answer (once it's written) to hear it." };
 const VOICE_OFF = "Voice isn't available; showing the answer without it.";
@@ -2647,13 +2649,21 @@ function endCues(root) { if (root && root.cue) { root.cue = null; applyCues(root
 
 // ------------------------------------------------------------ dictation
 // 🎙 next to Ask: speak a question, and what the hub heard is typed into the box to check and edit before sending.
-// Nothing is sent until Ask. The clip is written down in one pass when you stop (a live draft re-read the whole
-// clip every 1.5 s and made the final pass wait its turn). `before`/`after` are the text either side of the cursor
-// when dictation began, so they stay untouched. `spoken` marks the question as dictated when it is sent.
-const DICT = { rec: null, stream: null, chunks: [], gen: 0, timer: 0, state: "idle",
-  before: "", after: "", last: "", spoken: false, spaceHeld: false };
+// Nothing is sent until Ask. While you talk, the recording streams to the hub as 16 kHz PCM (pcm-worklet.js) in small
+// POSTs, one at a time; the hub writes each piece down at a pause (dictation.py), so Stop only waits for the last few
+// seconds. The whole recording is kept too: if streaming fails anywhere, Stop sends it to /api/voice/transcribe in one
+// pass, as before. `before`/`after` are the text either side of the cursor when dictation began, so they stay
+// untouched. `spoken` marks the question as dictated when it is sent.
+//   ctx/node/stream: the mic's audio graph; id: the hub's session (null until `started` resolves); all: every block
+//   recorded; queue: blocks not sent yet, sent in `seq` order; sending: the request in flight; failed: streaming gave
+//   up (the fallback runs at Stop); text: the words written down so far.
+const DICT = { ctx: null, node: null, stream: null, id: null, started: null, all: [], queue: [], seq: 0, sending: null,
+  failed: false, text: "", gen: 0, timer: 0, state: "idle", before: "", after: "", last: "", spoken: false, spaceHeld: false };
 const DICT_TITLE = { idle: "Dictate: speak your question, then edit it before sending (hold Space, or Ctrl+Space)", listening: "Stop and type out what you said (Ctrl+Space)",
   hearing: "Writing down what you said…" };
+const DICT_SEND_MAX = 150;                          // blocks per request: 15 s of audio, well under the hub's 1 MB
+const DICT_WAIT_MS = 8000;                          // a start or a chunk not answered by then: the tunnel stalled, fall back
+const dictPreview = () => !!store.get("dictPreview", false);
 
 function dictateButton(ta) {
   const b = h("button", { class: "btn ghost dictate", id: "dict-mic", type: "button", onclick: dictTap });
@@ -2671,6 +2681,7 @@ function dictShow(b = $("#dict-mic"), ta = $("#ask-input")) {
   b.disabled = st === "hearing";
   if (ta) ta.readOnly = st !== "idle";              // what you said goes in at the cursor: typing meanwhile would be lost
   if (ta) ta.placeholder = st === "listening" ? DICT.spaceHeld ? "Listening… let go of Space to stop" : "Listening… tap ■ or Ctrl+Space to stop" : st === "hearing" ? "Writing down what you said…" : composeHint();
+  if (ta && st !== "idle") dictLive(ta);            // a box drawn mid-dictation keeps the preview
 }
 function dictSet(state) { DICT.state = state; dictShow(); }
 
@@ -2678,59 +2689,188 @@ async function dictTap() {
   if (DICT.state === "listening") return dictFinish();
   if (DICT.state !== "idle") return;
   stopSpeaking();                                   // so the mic doesn't hear the tutor
-  const tok = ++DICT.gen;
+  const tok = ++DICT.gen, d = APP.deck;
   DICT.last = $("#ask-input")?.value || "";         // a redraw before the mic starts keeps what's in the box
+  Object.assign(DICT, { id: null, started: null, all: [], queue: [], seq: 0, sending: null, failed: false, text: "", before: "", after: "" });
   dictSet("listening");
-  api("/api/voice/warm", {}).catch(() => {});       // the speech models load while you talk (the first time ~10 s)
+  // The hub opens the session (and loads the speech models, the first time ~10 s) while the mic starts.
+  const started = DICT.started = !d ? Promise.resolve(null) : api("/api/voice/dictate/start",
+    { course: d.course, tag: d.tag, n: Math.min(APP.n, d.slides), scope: APP.scope }, DICT_WAIT_MS).then((r) => {
+    if (tok !== DICT.gen) { dictCancelId(r.id); return null; }     // cancelled meanwhile
+    DICT.id = r.id;
+    dictPump();
+    return r.id;
+  }, () => null);
+  started.then((id) => { if (!id && tok === DICT.gen) DICT.failed = true; });
+  let ctx, loaded;
+  try {
+    ctx = DICT.ctx = new AudioContext();            // made in the tap itself, so Safari lets it run
+    ctx.resume().catch(() => {});
+    loaded = ctx.audioWorklet.addModule("/pcm-worklet.js");
+    loaded.catch(() => {});                         // (awaited below)
+  } catch {
+    cancelDictation();
+    return toast("This browser couldn't start recording. Try Chrome or Edge.");
+  }
   let stream;
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
   } catch {
-    if (tok === DICT.gen) { dictSet("idle"); toast("The microphone is blocked: allow it from the site settings."); }
+    if (tok === DICT.gen) { cancelDictation(); toast("The microphone is blocked: allow it from the site settings."); }
     return;
   }
   if (tok !== DICT.gen) { stream.getTracks().forEach((t) => t.stop()); return; }   // cancelled meanwhile
+  DICT.stream = stream;
   try {
-    const rec = new MediaRecorder(stream), chunks = [];
-    rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
-    rec.start();
+    await loaded;
+    if (tok !== DICT.gen) return;                   // cancelDictation closed the mic and the context
+    const node = new AudioWorkletNode(ctx, "pcm16k");
+    node.port.onmessage = (e) => dictBlock(tok, e.data);
+    ctx.createMediaStreamSource(stream).connect(node);
+    node.connect(ctx.destination);                  // it writes silence; some browsers don't run a node that goes nowhere
+    ctx.resume().catch(() => {});                   // again: iOS Safari can suspend it when capture starts
     // Where the words go: at the cursor, replacing a selection (it keeps its place after tapping 🎙 takes the focus).
     const ta = $("#ask-input"), at = ta ? ta.selectionStart ?? ta.value.length : 0;
-    Object.assign(DICT, { rec, stream, chunks,
+    Object.assign(DICT, { node,
       last: ta ? ta.value : "", before: ta ? ta.value.slice(0, at) : "", after: ta ? ta.value.slice(ta.selectionEnd ?? at) : "" });
-    DICT.timer = setTimeout(() => { if (DICT.rec === rec) dictFinish(); }, MAX_RECORDING_MS);
+    const track = stream.getAudioTracks()[0];
+    if (track) track.onended = () => { if (DICT.node === node) dictFinish(); };   // mic unplugged or blocked: as Stop
+    DICT.timer = setTimeout(() => { if (DICT.node === node) dictFinish(); }, MAX_RECORDING_MS);
   } catch {
-    stream.getTracks().forEach((t) => t.stop());
-    dictSet("idle");
+    if (tok !== DICT.gen) return;
+    cancelDictation();
     toast("This browser couldn't start recording. Try Chrome or Edge.");
   }
 }
 
+// A block of 16 kHz samples from the worklet: kept for the fallback, and queued for the hub.
+function dictBlock(tok, data) {
+  if (tok !== DICT.gen || !(data instanceof Float32Array)) return;
+  DICT.all.push(data);
+  DICT.queue.push(data);
+  dictPump();
+}
+
+// One request at a time; what piled up meanwhile (a phone over the tunnel) goes in the next one. A failure stops the
+// streaming but not the recording: Stop falls back to the whole clip. Returns the request in flight, if any.
+function dictPump() {
+  if (DICT.sending || !DICT.id || DICT.failed || !DICT.queue.length) return DICT.sending;
+  const tok = DICT.gen;
+  DICT.sending = dictSend(tok, DICT.queue.splice(0, DICT_SEND_MAX)).then(() => {
+    if (tok !== DICT.gen) return;
+    DICT.sending = null;
+    dictPump();
+  });
+  return DICT.sending;
+}
+async function dictSend(tok, blocks) {
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), DICT_WAIT_MS);
+  try {
+    const r = await fetch(`/api/voice/dictate/chunk?id=${encodeURIComponent(DICT.id)}&seq=${DICT.seq}`,
+      { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: pcm16(blocks), signal: ctl.signal });
+    const data = await r.json();
+    if (!r.ok || data.error) throw new Error(data.error);
+    if (tok !== DICT.gen) return;
+    DICT.seq++;
+    if (data.text !== DICT.text) { DICT.text = data.text || ""; dictLive(); }   // shown only with the preview on
+  } catch {
+    if (tok === DICT.gen) DICT.failed = true;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Live preview (☰ "Show words while dictating", off by default): the words so far, between `before` and `after`. The
+// box stays read-only and the focus stays where it is; DICT.last isn't touched, so a cancel puts the box back.
+function dictLive(ta = $("#ask-input")) {
+  if (!ta || !DICT.text || !dictPreview() || DICT.state !== "listening") return;
+  const { before, after } = DICT;
+  dictBox(ta, before + (before && !/\s$/.test(before) ? " " : "") + DICT.text + (after && !/^\s/.test(after) ? " " : "") + after);
+}
+// Set the box's text and its height, without the input event (that would send a draft to the other devices).
+function dictBox(ta, value) {
+  if (ta.value === value) return;
+  ta.value = value;
+  ta.style.height = "auto";
+  ta.style.height = ta.value ? `${Math.min(160, ta.scrollHeight + 2)}px` : "";
+}
+
 async function dictFinish() {
-  const { rec, stream, chunks, gen: tok } = DICT;
-  if (!rec) { DICT.gen++; return dictSet("idle"); }   // tapped again before the mic had started: don't start it
+  const { node, ctx, stream, gen: tok } = DICT;
+  if (!node) return cancelDictation();              // tapped again before the mic had started: don't start it
   clearTimeout(DICT.timer);
-  Object.assign(DICT, { rec: null, stream: null, chunks: [] });
+  DICT.node = null;
   dictSet("hearing");
   const d = APP.deck;
   let text = "", msg = "Didn't catch that. Tap 🎙 and try again.";
   try {
-    if (rec.state !== "inactive") await new Promise((res) => { rec.onstop = res; rec.onerror = res; rec.stop(); setTimeout(res, 3000); });   // never stuck on "…"
-    const wav = await toWav16k(new Blob(chunks, { type: rec.mimeType }));
+    // The last samples still in the worklet (never stuck on "…"), then the mic goes.
+    await new Promise((res) => {
+      node.port.onmessage = (e) => { if (e.data === "done") res(); else dictBlock(tok, e.data); };
+      node.port.postMessage("flush");
+      setTimeout(res, 500);
+    });
+    dictStop(node, ctx, stream);
     if (tok !== DICT.gen) return;
-    text = (await dictTranscribe(d, wav)).trim();
-  } catch (e) { if (e && e.message && !(e instanceof DOMException)) msg = e.message; } finally {   // a recording that won't decode: "didn't catch that"
-    stream.getTracks().forEach((t) => t.stop());
+    await DICT.started;                             // Stop before the session id came back: wait for it (or the fallback)
+    if (tok !== DICT.gen) return;
+    text = (await dictText(tok, d)).trim();
+  } catch (e) { if (e && e.message && !(e instanceof DOMException)) msg = e.message; } finally {
+    dictStop(node, ctx, stream);
   }
   if (tok !== DICT.gen) return;
+  Object.assign(DICT, { id: null, text: "" });      // done: nothing for a cancel to send, nothing for the next preview
   dictSet("idle");
   const ta = $("#ask-input");
-  if (!text) return toast(msg);
+  if (!text) { if (ta) dictBox(ta, DICT.last); return toast(msg); }   // (a preview shown meanwhile goes)
   if (ta && APP.deck === d) dictInsert(text);       // into the box to check; nothing is sent
+  else if (ta) dictBox(ta, DICT.last);
+}
+
+// What you said: the hub's session, once the last blocks are sent; if streaming failed, the whole clip in one pass.
+async function dictText(tok, d) {
+  if (DICT.id && !DICT.failed) {
+    dictPump();
+    while (tok === DICT.gen && DICT.sending) await DICT.sending;
+    if (tok !== DICT.gen) return "";
+    if (!DICT.failed) {
+      // The hub may still be writing down what queued before Stop: normally one call (~3 s), at worst the whole
+      // recording in one pass (~0.22x its length). 15 s + 0.1 s per second recorded covers that (27 s at 120 s);
+      // past it the tunnel has stalled and the whole clip goes by the old route.
+      const ms = 15000 + 100 * DICT.all.reduce((n, b) => n + b.length, 0) / 16000;
+      try {
+        const text = (await api("/api/voice/dictate/finish", { id: DICT.id }, ms)).text || "";
+        DICT.id = null;                             // the hub dropped the session
+        return text;
+      } catch { /* the fallback below */ }
+      if (tok !== DICT.gen) return "";
+    }
+  }
+  dictCancelId(DICT.id);                            // a session that's no use any more (it would expire anyway)
+  DICT.id = null;
+  const all = new Float32Array(DICT.all.reduce((n, b) => n + b.length, 0));
+  DICT.all.reduce((o, b) => { all.set(b, o); return o + b.length; }, 0);
+  return dictTranscribe(d, new Blob([pcmWav(all, 16000)], { type: "audio/wav" }));
 }
 
 const dictTranscribe = async (d, wav) => (await api("/api/voice/transcribe",
   { course: d.course, tag: d.tag, n: Math.min(APP.n, d.slides), scope: APP.scope, audio: await blobBase64(wav) })).text;
+
+const dictCancelId = (id) => { if (id) api("/api/voice/dictate/cancel", { id }).catch(() => {}); };   // not waited for
+
+function dictStop(node, ctx, stream) {
+  if (node) { node.port.onmessage = null; try { node.disconnect(); } catch { /* not connected */ } }
+  stream?.getTracks().forEach((t) => t.stop());
+  if (ctx && ctx.state !== "closed") ctx.close().catch(() => {});
+}
+
+// Blocks of float samples -> one buffer of 16-bit samples (little-endian, as every browser's platform is).
+function pcm16(blocks) {
+  const out = new Int16Array(blocks.reduce((n, b) => n + b.length, 0));
+  let o = 0;
+  for (const b of blocks) for (let i = 0; i < b.length; i++) out[o++] = Math.max(-1, Math.min(1, b[i])) * 32767;
+  return out;
+}
 
 // Put `text` in the box between `before` and `after`, with the cursor after it and the focus in the box.
 function dictInsert(text) {
@@ -2750,28 +2890,14 @@ function cancelDictation() {
   DICT.gen++;
   DICT.spaceHeld = false;
   clearTimeout(DICT.timer);
-  const rec = DICT.rec;
-  if (rec) {
-    rec.onstop = rec.onerror = rec.ondataavailable = null;
-    if (rec.state !== "inactive") { try { rec.stop(); } catch { /* already stopping */ } }
-  }
-  DICT.stream?.getTracks().forEach((t) => t.stop());
-  Object.assign(DICT, { rec: null, stream: null, chunks: [] });
-  if (DICT.state !== "idle") dictSet("idle");
+  dictStop(DICT.node, DICT.ctx, DICT.stream);
+  dictCancelId(DICT.id);                            // nothing more is written down (a start still on its way cancels itself)
+  const ta = $("#ask-input"), was = DICT.state;
+  Object.assign(DICT, { ctx: null, node: null, stream: null, id: null, started: null, all: [], queue: [], sending: null, text: "" });
+  if (was !== "idle") { if (ta) dictBox(ta, DICT.last); dictSet("idle"); }   // a preview shown meanwhile goes
 }
 
-// Whatever the browser recorded (webm/opus, mp4…) → 16 kHz mono 16-bit WAV, what Whisper wants.
-async function toWav16k(blob) {
-  const ctx = new AudioContext();
-  let buf;
-  try { buf = await ctx.decodeAudioData(await blob.arrayBuffer()); } finally { ctx.close(); }
-  const off = new OfflineAudioContext(1, Math.max(1, Math.ceil(buf.duration * 16000)), 16000);
-  const src = off.createBufferSource();
-  src.buffer = buf;
-  src.connect(off.destination);
-  src.start();
-  return new Blob([pcmWav((await off.startRendering()).getChannelData(0), 16000)], { type: "audio/wav" });
-}
+// Float samples -> a mono 16-bit WAV (the fallback's whole recording, and SILENT_WAV).
 function pcmWav(pcm, rate) {
   const v = new DataView(new ArrayBuffer(44 + pcm.length * 2));
   const str = (o, s) => [...s].forEach((ch, i) => v.setUint8(o + i, ch.charCodeAt(0)));
@@ -3679,6 +3805,7 @@ function openMenu() {
   const c = cid && APP.courses[cid];
   $("#slides-only-row").hidden = !c;
   if (c) { $("#slides-only").checked = slidesOnly(cid); $("#slides-only-course").textContent = c.code; }
+  $("#dict-preview").checked = dictPreview();
   m.hidden = false;
   $("#menu-btn").setAttribute("aria-expanded", "true");
 }
@@ -3686,6 +3813,7 @@ function closeMenu() { $("#menu").hidden = true; $("#menu-btn").setAttribute("ar
 $("#menu-btn").addEventListener("click", (e) => { e.stopPropagation(); $("#menu").hidden ? openMenu() : closeMenu(); });
 document.addEventListener("click", (e) => { if (!$("#menu").hidden && !e.target.closest("#menu")) closeMenu(); });
 $("#slides-only").addEventListener("change", (e) => { const cid = currentCourseId(); if (cid) store.set(`slidesOnly:${cid}`, e.target.checked); });
+$("#dict-preview").addEventListener("change", (e) => store.set("dictPreview", e.target.checked));   // from the next words written down
 $("#model-pick").addEventListener("change", (e) => { APP.model = e.target.value; store.set("model", APP.model); });
 $("#menu").addEventListener("click", (e) => {
   const act = e.target.closest("[data-act]")?.dataset.act;

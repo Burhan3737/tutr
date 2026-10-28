@@ -15,6 +15,8 @@ DIR = HERE / ".cache" / "voice"
 KOKORO_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
 KOKORO_FILES = ("kokoro-v1.0.int8.onnx", "voices-v1.0.bin")
 WHISPER_MODEL = "small.en"
+# Measured on the same laptop, a 39 s clip: 4 threads (the default) 8.4 s, 6 threads 6.9 s, 22 threads 10.3 s (E-cores).
+WHISPER_THREADS = 6
 # Measured on a Core Ultra 7 155H: 12 threads ran Kokoro at ~0.4x real time; the default (all 22) at ~0.8x.
 TTS_THREADS = min(12, os.cpu_count() or 4)
 VOICES = {      # Kokoro voice id -> label shown in the Talk tab
@@ -71,7 +73,7 @@ def _load():
                 sess = ort.InferenceSession(str(model), so, providers=["CPUExecutionProvider"])
                 _m["tts"] = Kokoro.from_session(sess, str(voices))
             if not _m["stt"]:
-                _m["stt"] = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+                _m["stt"] = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8", cpu_threads=WHISPER_THREADS)
         except VoiceError as e:
             _m["error"] = str(e)
             raise
@@ -132,12 +134,18 @@ def transcribe(wav_bytes, hint=""):
         raise VoiceError("The recording was empty or damaged. Try again.", 400) from e
     if rate != 16000:       # the browser resamples already; this is only a fallback
         audio = np.interp(np.arange(0, len(audio), rate / 16000), np.arange(len(audio)), audio).astype(np.float32)
+    return transcribe_audio(audio, hint)
+
+
+def transcribe_audio(audio, prompt=""):
+    """16 kHz mono float32 samples -> text. prompt: words likely to come up, and (for a piece of a longer
+    dictation) the last words written down before it."""
     if len(audio) < 16000 * 0.3:
         return ""
     _load()
     with _stt_lock:
         segs, _ = _m["stt"].transcribe(audio, language="en", beam_size=1, vad_filter=True,
-                                       initial_prompt=hint or None, condition_on_previous_text=False)
+                                       initial_prompt=prompt or None, condition_on_previous_text=False)
         return " ".join(s.text.strip() for s in segs).strip()
 
 
