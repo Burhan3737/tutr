@@ -3,7 +3,7 @@
     python test_voice.py              # everything (loads the speech models: ~10 s warm, longer the first time)
     python test_voice.py --no-models  # only the checks that need no models and no Claude
 
-Nothing here calls Claude (run_claude is replaced) or touches a real course: chats, memory and state live in a
+Nothing here calls Claude (run_model is replaced) or touches a real course: chats, memory and state live in a
 temporary folder.
 """
 import asyncio, base64, io, re, sys, tempfile, threading, time, types, wave
@@ -108,7 +108,7 @@ def test_remember(tmp):
         return {"json": {"changed": reply["changed"], "memory": reply["memory"]}, "text": "", "session": None,
                 "ms": 0, "cost": 0}
     shim = types.SimpleNamespace(Thread=SyncThread, Lock=threading.Lock)
-    with Patch((T, "run_claude", fake_run), (T, "log", logs.append), (T, "threading", shim)):
+    with Patch((T, "run_model", fake_run), (T, "log", logs.append), (T, "threading", shim)):
         reply.update(changed=True, memory=four + "\n## My own section\n- keep me")
         T.remember(cdir, "S&D-2", 3, "so elasticity is just the slope, right?", "Not quite. It's a ratio of percentage changes because...")
         check("remember: correction hint passed to the model", "opens with a correction" in prompts[-1])
@@ -152,7 +152,7 @@ def test_chat_turn(tmp):
         time.sleep(DELAYS[q])
         return {"text": f"answer to {q}", "json": None, "session": f"sess-{q}", "ms": 1, "cost": 0}
     DELAYS = {}
-    patches = Patch((T, "run_claude", fake_run), (T, "CHATS", tmp / "chats"), (T, "log", lambda m: None),
+    patches = Patch((T, "run_model", fake_run), (T, "CHATS", tmp / "chats"), (T, "log", lambda m: None),
                     (T, "system_prompt", lambda *a: "SYSTEM"), (T, "deck_where", lambda c, t: f"[{t}]"),
                     (T, "where", lambda c, t, n: f"[{t} s{n}]"),
                     (L, "course_meta", lambda c: ("DEMO", "Test")),
@@ -199,7 +199,7 @@ def test_chat_turn(tmp):
         def boom(*a, **kw):
             raise T.TutorError("no")
         state.clear()
-        with Patch((T, "run_claude", boom)):
+        with Patch((T, "run_model", boom)):
             try:
                 T.chat_turn(cdir, "S&D-2", 1, "ask", "Q5", "m", False)
             except T.TutorError:
@@ -212,7 +212,7 @@ def test_chat_turn(tmp):
         def delete_meanwhile(*a, **kw):        # the student deletes the chat while it's answering
             T.chat_file(chat["id"]).unlink()
             return {"text": "late", "json": None, "session": "s", "ms": 1, "cost": 0}
-        with Patch((T, "run_claude", delete_meanwhile)):
+        with Patch((T, "run_model", delete_meanwhile)):
             try:
                 T.chat_turn(cdir, "S&D-2", 1, "ask", "Q8", "m", False)
                 status = None
@@ -381,8 +381,8 @@ def test_chat_turn_scope(tmp):
         return {"text": "an answer", "json": None, "session": "s", "ms": 1, "cost": 0}
     f = tmp / "scope-prompt.md"
     f.write_text("W: {where}\nQ: {question}\n", encoding="utf-8")
-    patches = Patch((T, "run_claude", fake_run), (T, "CHATS", tmp / "scope-chats"), (T, "log", lambda m: None),
-                    (T, "VOICE_PROMPT", f), (T, "remember", lambda *a: remembered.append(a)),
+    patches = Patch((T, "run_model", fake_run), (T, "CHATS", tmp / "scope-chats"), (T, "log", lambda m: None),
+                    (T, "VOICE_PROMPT", f), (T, "remember", lambda *a, **kw: remembered.append(a)),
                     (T, "system_prompt", lambda *a: "SYSTEM"),
                     (T, "deck_where", lambda c, t: f"[{t}] \"Deck title\" (slides 1–9)"),
                     (T, "where", lambda c, t, n: f"[{t} s{n}] \"Slide title\""),
@@ -428,7 +428,7 @@ def test_slash_extra(tmp):
     def fake_run(cdir_, system, prompt, **kw):
         prompts.append(prompt)
         return {"text": "an answer", "json": None, "session": "s", "ms": 1, "cost": 0}
-    patches = Patch((T, "run_claude", fake_run), (T, "CHATS", tmp / "slash-chats"), (T, "log", lambda m: None),
+    patches = Patch((T, "run_model", fake_run), (T, "CHATS", tmp / "slash-chats"), (T, "log", lambda m: None),
                     (T, "remember", lambda *a, **kw: None), (T, "system_prompt", lambda *a: "SYSTEM"),
                     (T, "weak_points", lambda c: "(none)"),
                     (T, "deck_where", lambda c, t: f"[{t}] \"Deck title\" (slides 1–9)"),
@@ -500,7 +500,7 @@ def test_spoken_flag(tmp):
 
     def fake_run(cdir_, system, prompt, **kw):
         return {"text": "an answer", "json": None, "session": "s", "ms": 1, "cost": 0}
-    patches = Patch((T, "run_claude", fake_run), (T, "CHATS", tmp / "spoken-chats"), (T, "log", lambda m: None),
+    patches = Patch((T, "run_model", fake_run), (T, "CHATS", tmp / "spoken-chats"), (T, "log", lambda m: None),
                     (T, "remember", lambda *a, **kw: remembered.append((a, kw))), (T, "system_prompt", lambda *a: "SYSTEM"),
                     (T, "where", lambda c, t, n: f"[{t} s{n}]"),
                     (L, "course_meta", lambda c: ("DEMO", "Test")),
@@ -526,7 +526,7 @@ def test_practice_focus(tmp):
     def fake_run(cdir_, system, prompt, **kw):
         prompts.append(prompt)
         return {"text": "", "json": dict(problem), "session": None, "ms": 1, "cost": 0}
-    patches = Patch((T, "run_claude", fake_run), (T, "PRACTICE_DIR", tmp / "practice"), (T, "log", lambda m: None),
+    patches = Patch((T, "run_model", fake_run), (T, "PRACTICE_DIR", tmp / "practice"), (T, "log", lambda m: None),
                     (T, "system_prompt", lambda *a: "SYSTEM"), (T, "where", lambda c, t, n: f"[{t} s{n}]"),
                     (L, "deck", lambda c, t: {"title": "D", "slides": 9} if t == "S&D-1" else None),
                     (L, "course_info", lambda c: {"code": "DEMO", "topics": []}))
