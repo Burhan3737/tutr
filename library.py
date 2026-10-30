@@ -34,6 +34,7 @@ def _library_root():
         path = cfg.get("library") if isinstance(cfg, dict) else None
     except (OSError, ValueError):
         path = None
+    path = path if isinstance(path, str) else None      # a number or a list there is ignored, not a crash at start
     return (HERE / path).resolve() if path else (HERE / "library").resolve()
 
 
