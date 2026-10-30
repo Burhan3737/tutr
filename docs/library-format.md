@@ -54,7 +54,7 @@ library/
 |---|---|
 | `code` | Short label shown in the hub and the tutor's prompts. Missing: the folder name. |
 | `title` | Course title. Missing: the folder name. |
-| `assessment_style` | What a typical assessment question looks like; the tutor words its practice and drill questions to match. Missing: "exam-style question". |
+| `assessment_style` | What a typical assessment question looks like; the tutor words its practice and drill questions to match. Missing: each prompt falls back to its own generic wording (e.g. "exam-style questions"). |
 | `topics` | Topic list: `name` must match the `topic` of decks; `read_more` is the pointer shown under "Read more". The order of topics in the hub follows the first deck in each topic, not this list. |
 
 The skill appends a topic here when it files a deck under a new one. Unknown keys are kept.
@@ -131,5 +131,5 @@ chapters with their PDF pages. The tutor searches and cites them. They are not s
 | `library/CLAUDE.md` | How you study with Claude Code: layout, file conventions, the `progress.md` protocol, mocks and marking, cheat sheets, AI-rule warnings | Claude Code, when run in `library/`. Not the hub or the tutor |
 | `me/progress.md` | Deadlines, weak topics, error log | The hub (Deadlines table) and Claude Code |
 | `me/notes/**` | Your writing | The hub (shown to you); you |
-| `me/private/**` | Answer keys and anything to keep out | Claude Code only |
+| `me/private/**` | Answer keys | Claude Code. Never listed or served by the hub; the tutor's direct reads of it are refused (a broad search can still touch it), so keep answer keys here, not secrets |
 | `sources/**`, `.work/**` | PDFs and scratch | The `preparing-slides` skill only |
