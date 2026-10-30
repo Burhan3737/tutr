@@ -409,7 +409,6 @@ async function showHome(token) {
 
 function reviewLine(c) {
   const r = c.reviews;
-  if (r.count && r.warmup === r.count) return [`Warm-up: basic maths · ${r.count} · ~${r.minutes} min · `, h("a", { href: `#review=${encodeURIComponent(c.id)}` }, "Do them now")];
   if (r.count) return [`${r.count} quick review${r.count === 1 ? "" : "s"} · ~${r.minutes} min first · `, h("a", { href: `#review=${encodeURIComponent(c.id)}` }, "Just the reviews")];
   const res = c.resume;
   return res ? ["Nothing due. ", h("a", { href: `#c=${encodeURIComponent(c.id)}&d=${encodeURIComponent(res.deck)}&s=${res.slide}` }, `Pick up at ${res.deck} →`)] : "Nothing due.";
@@ -3496,7 +3495,7 @@ async function runPractice(area, req, nextFor, opts = {}) {
     return;
   }
   if (opts.onProblem) opts.onProblem(prob);
-  const from = prob.warmup ? "Warm-up" : prob.slides ? `From ${prob.slides}` : "";
+  const from = prob.slides ? `From ${prob.slides}` : "";
   const answer = h("textarea", { class: "answer", placeholder: "Your working… (or add a photo of it)", "aria-label": "Your working" });
   const photoCount = h("span", { class: "count" });
   const hints = h("div", {});
@@ -3707,9 +3706,9 @@ async function showReview(courseId, token) {
     if (i >= items.length) return finish();
     const it = items[i];
     const area = h("div", { class: "practice" });
-    page.replaceChildren(h("p", { class: "count" }, `${i + 1} of ${total}${it.warmup ? " · Warm-up: basic maths" : ""}`), area);
+    page.replaceChildren(h("p", { class: "count" }, `${i + 1} of ${total}`), area);
     i += 1;
-    runPractice(area, { course: courseId, kind: it.warmup ? "warmup" : "review", review_id: it.id }, () =>
+    runPractice(area, { course: courseId, kind: "review", review_id: it.id }, () =>
       ({ label: i < items.length ? "Next review" : "Finish", run: next }), {
       waitText: "Writing a fresh variation…",
       afterResult: (box) => {

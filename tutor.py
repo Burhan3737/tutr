@@ -1208,7 +1208,7 @@ PROBLEM_SCHEMA = {
                                  "method. Hint 2: the first step of the setup only. Neither gives the answer."},
         "concept": {"type": "string", "description": "The concept tested, at most 8 words."},
         "slides": {"type": "string", "description": "The slides it comes from, e.g. 'S&D-2 s14–s16'."},
-        "deck": {"type": "string", "description": "The deck tag it comes from, e.g. 'S&D-2' (empty for warm-ups)."},
+        "deck": {"type": "string", "description": "The deck tag it comes from, e.g. 'S&D-2'."},
     },
     "required": ["problem_md", "solution_md", "final_answer", "hints", "concept", "slides", "deck"],
 }
@@ -1250,8 +1250,6 @@ TASKS = {
               "attempt: change the setting and form, so the idea has to be recognised, and prefer a neighbouring "
               "method as the tempting wrong choice. If it was Algebra slip or Skipped step: keep the form familiar "
               "and change the numbers, so the same rule or check is needed.",
-    "warmup": "A short algebra warm-up (1–3 minutes, not tied to a slide) on: {concept}. Leave `deck` empty and "
-              "set `slides` to 'Warm-up'.",
 }
 
 _PRACTICE = {}          # id -> record (also saved to .cache/practice)
@@ -1284,7 +1282,7 @@ def get_practice(pid):
 def public_problem(rec):
     return {"id": rec["id"], "kind": rec["kind"], "problem_md": rec["problem_md"], "concept": rec["concept"],
             "slides": rec["slides"], "deck": rec["deck"], "hints_total": len(rec["hints"]),
-            "review_id": rec.get("review_id"), "warmup": rec["kind"] == "warmup", "ms": rec.get("ms"),
+            "review_id": rec.get("review_id"), "ms": rec.get("ms"),
             "cost": rec.get("cost")}
 
 
@@ -1294,13 +1292,11 @@ def _generate(cdir, req, model, web, emit=None):
     tag = req.get("tag") or ""
     n = int(req.get("n") or 1)
     review = S.get_review(cdir, req["review_id"]) if req.get("review_id") else None
-    if review and review["warmup"]:
-        kind = "warmup"
     if kind in ("try", "deck", "yourturn") and not L.deck(cdir, tag):
         raise TutorError("Open a deck first.", 400)
     if kind == "review" and not review:
         raise TutorError("That review item no longer exists.", 404)
-    if kind in ("mixed",) or (kind == "review" and not (review.get("deck") and L.deck(cdir, review["deck"]))) or kind == "warmup":
+    if kind in ("mixed",) or (kind == "review" and not (review.get("deck") and L.deck(cdir, review["deck"]))):
         # no single deck: give the tutor the first deck in scope for its context; the map covers the rest
         scope_tag = tag if L.deck(cdir, tag) else (review or {}).get("deck") or L.deck_order(cdir)[0]["tag"]
     else:

@@ -44,7 +44,7 @@ def course_summary(cdir):
     return {
         "id": cdir.name, "code": info["code"], "title": info["title"],
         "next": L.next_assessment(cdir),
-        "reviews": {"count": len(due), "warmup": sum(1 for r in due if r["warmup"]),
+        "reviews": {"count": len(due),
                     "minutes": max(1, round(len(due) * 1.5)) if due else 0},
         "topics": [{"name": t["name"], "read_more": t["read_more"], "decks": [_deck_row(info, s, tag) for tag in t["decks"]]}
                    for t in info["topics"]],
@@ -251,7 +251,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._json(L.search(qs.get("q", "")))
         if path == "/api/reviews":
             c = self._course(qs.get("course"))
-            return self._json([{k: r[k] for k in ("id", "concept", "warmup", "deck", "slides", "mistake")}
+            return self._json([{k: r[k] for k in ("id", "concept", "deck", "slides", "mistake")}
                                for r in S.due_reviews(c)] if c else [])
         if path == "/api/drill/setup":     # the exam drill's setup dialog: decks by topic, papers, a default range
             c = self._course(qs.get("course"))

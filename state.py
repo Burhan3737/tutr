@@ -2,7 +2,7 @@
 
 - decks:   which slides were seen, where the student stopped, read (reached the end) and solved
            (a problem from the deck answered correctly with no hint)
-- reviews: saved mistakes and warm-ups, brought back on a 1 → 3 → 7 → 14 → 30 day schedule
+- reviews: saved mistakes, brought back on a 1 → 3 → 7 → 14 → 30 day schedule
 - chat:    the course's current tutor chat, whichever deck is open (`chats`, the old pointer per deck, is
            kept but no longer used)
 
@@ -14,24 +14,8 @@ import datetime as dt, json, re, threading, uuid
 import library as L
 
 INTERVALS = [1, 3, 7, 14, 30]
-DAILY_CAP = 5          # reviews per course per day (warm-ups included)
-WARMUP_CAP = 3         # warm-ups per course per day
+DAILY_CAP = 5          # reviews per course per day
 _LOCK = threading.RLock()
-
-WARMUPS = {   # course code -> warm-up concepts seeded once (the algebra the slides assume)
-    "DEMO": [
-        "Percentages: finding a percentage of a number",
-        "Percentages: percentage increase and decrease",
-        "Ratios: simplifying a ratio",
-        "Ratios: sharing in a given ratio",
-        "Linear equations: solving for one unknown",
-        "Linear equations: rearranging a formula",
-        "Graphs: reading the slope of a line",
-        "Graphs: finding where two lines meet",
-        "Averages: mean, median and mode",
-        "Averages: weighted average",
-    ],
-}
 
 
 def today():
@@ -53,14 +37,6 @@ def load(cdir):
         s.setdefault("decks", {})
         s.setdefault("reviews", [])
         s.setdefault("chats", {})
-        code = L.course_meta(cdir)[0]
-        if code in WARMUPS and not s.get("warmups_seeded"):
-            start = dt.date.today()
-            for i, concept in enumerate(WARMUPS[code]):
-                s["reviews"].append(_item(concept=concept, warmup=True,
-                                          due=(start + dt.timedelta(days=i // WARMUP_CAP)).isoformat()))
-            s["warmups_seeded"] = today()
-            save(cdir, s)
         return s
 
 
@@ -75,7 +51,7 @@ def save(cdir, s):
 
 def _item(**kw):
     base = {"id": uuid.uuid4().hex[:10], "deck": None, "slides": "", "concept": "", "problem_md": "",
-            "mistake": "", "note": "", "step": 0, "due": today(), "created": today(), "last": None, "warmup": False}
+            "mistake": "", "note": "", "step": 0, "due": today(), "created": today(), "last": None}
     base.update(kw)
     return base
 
@@ -132,25 +108,20 @@ def resume_point(cdir, s):
 
 # ---------------------------------------------------------------- reviews
 
+def _live(r):
+    """Open items only. Old warm-up items (`"warmup": true`) stay in the file but are ignored everywhere."""
+    return not r.get("retired") and not r.get("warmup")
+
+
 def due_reviews(cdir, s=None):
     """Due items for today, within the daily caps (answered-today items count against the caps)."""
     s = s or load(cdir)
     t = today()
-    done_today = [r for r in s["reviews"] if r.get("last") == t]
+    done_today = [r for r in s["reviews"] if _live(r) and r.get("last") == t]
     left = max(0, DAILY_CAP - len(done_today))
-    warm_left = max(0, WARMUP_CAP - sum(1 for r in done_today if r["warmup"]))
-    due = sorted((r for r in s["reviews"] if not r.get("retired") and r["due"] <= t and r.get("last") != t),
-                 key=lambda r: (r["warmup"], r["due"], r["created"]))
-    out = []
-    for r in due:
-        if len(out) >= left:
-            break
-        if r["warmup"]:
-            if warm_left <= 0:
-                continue
-            warm_left -= 1
-        out.append(r)
-    return out
+    due = sorted((r for r in s["reviews"] if _live(r) and r["due"] <= t and r.get("last") != t),
+                 key=lambda r: (r["due"], r["created"]))
+    return due[:left]
 
 
 def add_mistake(cdir, *, deck, slides, concept, problem_md, mistake, note=""):
@@ -222,7 +193,7 @@ def _mirror_progress(cdir, s):
     prog = cdir / "study" / "progress.md"
     if not prog.exists():
         return
-    items = [r for r in s["reviews"] if not r.get("retired") and not r["warmup"]]
+    items = [r for r in s["reviews"] if _live(r)]
     lines = [START, "## Mistakes saved in the Study Hub", "",
              "Written by the Study Hub from `study/hub-state.json`; don't edit by hand. Use it for mocks and cheat sheets.", ""]
     if items:
