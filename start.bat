@@ -11,7 +11,7 @@ echo      (anyone on that Wi-Fi can open it; the hub shows a QR code for your ph
 echo   3  This computer + anywhere, through a Cloudflare link (any Wi-Fi or mobile data)
 echo      (anyone with the link can open it; the link changes every time)
 echo.
-python -c "import claude_agent_sdk, fitz, faster_whisper, kokoro_onnx" 2>nul || (
+python -c "import claude_agent_sdk, faster_whisper, kokoro_onnx" 2>nul || (
   echo   First run: installing the Study Hub's Python packages...
   python -m pip install -q -r requirements.txt
   echo.

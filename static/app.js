@@ -462,10 +462,12 @@ async function showCourse(id, token) {
       })));
   }
   const label = { exams: "Mock tests & cheat sheets", labs: "Labs", assignments: "Assignments", tutor: "Voice tutor" };
-  for (const kind of ["exams", "labs", "assignments", "tutor"]) {
+  // Any other folder in the course's me/notes/ is listed under its own name, before the tutor's notes.
+  const other = [...new Set(c.docs.map((g) => g.kind))].filter((k) => !Object.hasOwn(label, k));
+  for (const kind of ["exams", "labs", "assignments", ...other, "tutor"]) {
     const groups = c.docs.filter((g) => g.kind === kind);
     if (!groups.length) continue;
-    page.append(h("p", { class: "notes-line" }, `${label[kind]}: `,
+    page.append(h("p", { class: "notes-line" }, `${Object.hasOwn(label, kind) ? label[kind] : kind}: `,
       ...groups.flatMap((g) => [g.name ? h("span", { class: "muted" }, `${g.name} `) : null,
         ...g.files.map((f) => h("a", { href: `#c=${encodeURIComponent(id)}&notes=${encodeURIComponent(f.path)}` }, f.name))])));
   }
@@ -483,14 +485,14 @@ function deckRow(id, d, unit = "slides") {
 
 const stateLabel = (s) => ({ new: "Not started", started: "Started", read: "Read · solve one to finish", solved: "Solved" })[s] || s;
 function findDeck(c, tag) { for (const t of c.topics) for (const d of t.decks) if (d.tag === tag) return d; return (c.practice || []).find((d) => d.tag === tag) || null; }
-// Lecture order (week, then the deck table's order), not topic order: topics can interleave within a week.
+// Lecture order (week, then each deck's order), not topic order: topics can interleave within a week.
 function courseDeckOrder(c) { return c.topics.flatMap((t) => t.decks).sort((a, b) => a.week - b.week || (a.order ?? 0) - (b.order ?? 0)); }
 
 async function showNotes(id, path, token) {
   const c = await loadCourse(id);
   if (token !== routeToken) return;
   const n = c.notes.find((x) => x.path === path);
-  const label = n ? `Class notes W${n.week}` : path === "study/tutor-memory.md" ? "What your tutor remembers"
+  const label = n ? `Class notes W${n.week}` : path === "me/tutor-memory.md" ? "What your tutor remembers"
     : path.split("/").slice(-2).join(" · ").replace(/\.md$/, "");
   setCrumbs({ label: "Home", href: "#" }, { label: c.code, href: `#c=${encodeURIComponent(id)}` }, { label });
   const r = await fetch(`/api/note?course=${encodeURIComponent(id)}&path=${encodeURIComponent(path)}`);

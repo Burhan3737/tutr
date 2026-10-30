@@ -22,8 +22,8 @@ login — no API key.
   before the first text 1–9 s (400–1000 thinking tokens); then output speed, so a turn with a drawing
   (~2,000 tokens) takes 10–20 s in all. The log records first= (ms to the first text) next to ms= (total).
 - Confinement is enforced twice: a PreToolUse hook refuses any Read/Grep/Glob whose path or pattern
-  leaves the course folder, and the CLI's default permissions refuse reads outside its working
-  directory anyway. Only WebSearch/WebFetch are pre-approved (they can't read local files).
+  leaves the course folder or leads into the student's private files (me/private/, in any letter case), and
+  the CLI's default permissions refuse reads outside its working directory anyway. Only WebSearch/WebFetch are pre-approved (they can't read local files).
   Never pre-approve Read/Grep/Glob with allowed_tools.
 
 If the SDK isn't installed, `run` falls back to one `claude -p` process per request (no streaming).
@@ -99,8 +99,8 @@ def _clean_prompt_files():
 GLOB_CHARS = re.compile(r"[*?\[{]")
 
 
-def _inside(root, value):
-    """Does a path (or the fixed prefix of a glob pattern) stay inside root?"""
+def _resolve(root, value):
+    """The path (or the fixed prefix of a glob pattern) a tool call would read, resolved; None if it can't be."""
     m = GLOB_CHARS.search(value)
     fixed = value
     if m:       # "../x/**/*.md" -> "../x"; "*.md" -> "" (the working directory)
@@ -108,10 +108,27 @@ def _inside(root, value):
         fixed = head.rsplit("/", 1)[0] if "/" in head else ""
     try:
         p = Path(fixed)
-        p = (p if p.is_absolute() else root / p).resolve()
-        return os.path.commonpath([str(p), str(root)]) == str(root)
+        return (p if p.is_absolute() else root / p).resolve()
     except (ValueError, OSError):
+        return None
+
+
+def _within(p, folder):
+    """Is p folder or inside it? Compared in the filesystem's case rules (Windows: ME/Private is me/private)."""
+    try:
+        return p is not None and os.path.normcase(os.path.commonpath([str(p), str(folder)])) == os.path.normcase(str(folder))
+    except ValueError:
         return False
+
+
+def _inside(root, value):
+    """Does a path (or the fixed prefix of a glob pattern) stay inside root?"""
+    return _within(_resolve(root, value), root)
+
+
+def _private(root, value):
+    """Does a path (or the fixed prefix of a glob pattern) lead into the student's private files (me/private/)?"""
+    return _within(_resolve(root, value), root / "me" / "private")
 
 
 def _confine(root):
@@ -123,9 +140,13 @@ def _confine(root):
             v = args.get(key)
             if not v or (key == "pattern" and inp.get("tool_name") == "Grep"):   # a Grep pattern is a regex, not a path
                 continue
-            if not _inside(root, str(v).replace("\\", "/")):
+            v = str(v).replace("\\", "/")
+            if not _inside(root, v):
                 return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                "permissionDecisionReason": "Only this course's files can be read."}}
+            if _private(root, v):
+                return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                               "permissionDecisionReason": "The student's private files can't be read."}}
         return {}
     return hook
 
@@ -159,13 +180,13 @@ def describe(name, args, cdir):
         return "Looking through the course files"
     if name == "Read":
         p = str(args.get("file_path", "")).replace("\\", "/")
-        m = re.search(r"\.cache/(?:Week\d+|practice)/([^/]+)\.transcript\.md$", p)
+        m = re.search(r"(?:^|/)decks/([^/]+)/transcript\.md$", p)
         if m:
             return f"Reading the {m.group(1)} slides"
-        m = re.search(r"\.cache/textbooks/([^/.]+)", p)
+        m = re.search(r"(?:^|/)textbooks/([^/.]+)", p)
         if m:
             return f"Looking in {m.group(1)}"
-        if re.search(r"course/Week\d+/notes", p):
+        if re.search(r"(?:^|/)me/notes/Week\d+/", p):
             return "Reading your class notes"
         if "/uploads/" in p:
             return "Looking at your photo"

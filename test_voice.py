@@ -6,7 +6,7 @@
 Nothing here calls Claude (run_model is replaced) or touches a real course: chats, memory and state live in a
 temporary folder.
 """
-import asyncio, base64, io, re, sys, tempfile, threading, time, types, wave
+import asyncio, base64, io, json, re, sys, tempfile, threading, time, types, wave
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +40,14 @@ class Patch:
             setattr(obj, name, value)
 
 
+def make_course(tmp, name, **facts):
+    """A course folder in the test library (tmp): its course.json and an empty me/."""
+    cdir = tmp / name
+    (cdir / "me").mkdir(parents=True, exist_ok=True)
+    (cdir / "course.json").write_text(json.dumps(facts), encoding="utf-8")
+    return cdir
+
+
 class SyncThread:
     """Runs remember()'s background work at once, so the test can look at the result."""
     def __init__(self, target, daemon=None):
@@ -52,8 +60,7 @@ class SyncThread:
 # ---------------------------------------------------------------- voice_prompt()
 
 def test_voice_prompt(tmp):
-    cdir = tmp / "Course"
-    (cdir / "study").mkdir(parents=True)
+    cdir = make_course(tmp, "Course")
     f = tmp / "prompt.md"
     f.write_text("<!-- {question} in a comment is dropped -->\nQ: {question}\nW: {where}\nM: {memory}\n"
                  "X: {mistakes}\nBraces stay: {n} {} {{x}} {where_else}\n", encoding="utf-8")
@@ -76,8 +83,7 @@ def test_voice_prompt(tmp):
 # ---------------------------------------------------------------- memory_text()
 
 def test_memory_text(tmp):
-    cdir = tmp / "Mem"
-    (cdir / "study").mkdir(parents=True)
+    cdir = make_course(tmp, "Mem")
     f = T.memory_file(cdir)
     check("memory_text: no file -> empty", T.memory_text(cdir) == "")
     f.write_text(T.MEMORY_HEAD + "## About me\n- x\n### a sub-heading\n## Still shaky\n- y\n", encoding="utf-8")
@@ -93,8 +99,7 @@ def test_memory_text(tmp):
 
 
 def test_remember(tmp):
-    cdir = tmp / "Rem"
-    (cdir / "study").mkdir(parents=True)
+    cdir = make_course(tmp, "Rem")
     f = T.memory_file(cdir)
     four = "\n".join(f"## {s}\n- (nothing yet)" for s in T.MEMORY_SECTIONS)
     logs, prompts = [], []
@@ -141,8 +146,7 @@ def test_remember(tmp):
 # ---------------------------------------------------------------- chat_turn(): overlapping turns
 
 def test_chat_turn(tmp):
-    cdir = tmp / "Chat"
-    (cdir / "study").mkdir(parents=True)
+    cdir = make_course(tmp, "Chat")
     state = {}
     calls = []
 
@@ -152,7 +156,7 @@ def test_chat_turn(tmp):
         time.sleep(DELAYS[q])
         return {"text": f"answer to {q}", "json": None, "session": f"sess-{q}", "ms": 1, "cost": 0}
     DELAYS = {}
-    patches = Patch((T, "run_model", fake_run), (T, "CHATS", tmp / "chats"), (T, "log", lambda m: None),
+    patches = Patch((T, "run_model", fake_run), (T, "log", lambda m: None),
                     (T, "system_prompt", lambda *a: "SYSTEM"), (T, "deck_where", lambda c, t: f"[{t}]"),
                     (T, "where", lambda c, t, n: f"[{t} s{n}]"),
                     (L, "course_meta", lambda c: ("DEMO", "Test")),
@@ -173,10 +177,11 @@ def test_chat_turn(tmp):
 
     with patches:
         overlapped("Q1", "Q2")
-        files = list((tmp / "chats").glob("*.json"))
+        files = list((cdir / "me" / "chats").glob("*.json"))
         chat = T.load_chat(state.get("chat"))
         qs = [m["text"] for m in (chat or {}).get("messages", []) if m["role"] == "q"]
         check("chat_turn: two new overlapping turns -> one chat", len(files) == 1, [f.name for f in files])
+        check("chat_turn: the chat is saved in <course>/me/chats", T.chat_file(state.get("chat")) == cdir / "me" / "chats" / f"{state.get('chat')}.json")
         check("chat_turn: both Q/A pairs saved", sorted(qs) == ["Q1", "Q2"] and len(chat["messages"]) == 4, qs)
         check("chat_turn: both turns used the same chat client", calls[0][1] == calls[1][1], calls)
         check("chat_turn: the client is the course's chat (no deck in the key)", calls[0][1] == ("Chat", chat["id"]), calls)
@@ -219,7 +224,7 @@ def test_chat_turn(tmp):
             except T.TutorError as e:
                 status = e.status
         check("chat_turn: a chat deleted mid-answer isn't saved again", status == 410
-              and not T.chat_file(chat["id"]).exists(), status)
+              and T.chat_file(chat["id"]) is None, status)
 
 
 # ---------------------------------------------------------------- engine._chat: one course chat, several decks
@@ -372,8 +377,7 @@ def test_engine_turns():
 # ---------------------------------------------------------------- chat_turn(): a voice turn's This slide | Whole deck
 
 def test_chat_turn_scope(tmp):
-    cdir = tmp / "Scope"
-    (cdir / "study").mkdir(parents=True)
+    cdir = make_course(tmp, "Scope")
     state, prompts, remembered = {}, [], []
 
     def fake_run(cdir_, system, prompt, **kw):
@@ -381,7 +385,7 @@ def test_chat_turn_scope(tmp):
         return {"text": "an answer", "json": None, "session": "s", "ms": 1, "cost": 0}
     f = tmp / "scope-prompt.md"
     f.write_text("W: {where}\nQ: {question}\n", encoding="utf-8")
-    patches = Patch((T, "run_model", fake_run), (T, "CHATS", tmp / "scope-chats"), (T, "log", lambda m: None),
+    patches = Patch((T, "run_model", fake_run), (T, "log", lambda m: None),
                     (T, "VOICE_PROMPT", f), (T, "remember", lambda *a, **kw: remembered.append(a)),
                     (T, "system_prompt", lambda *a: "SYSTEM"),
                     (T, "deck_where", lambda c, t: f"[{t}] \"Deck title\" (slides 1–9)"),
@@ -421,14 +425,13 @@ def test_chat_turn_scope(tmp):
 # ---------------------------------------------------------------- slash commands: a mode with the student's words
 
 def test_slash_extra(tmp):
-    cdir = tmp / "Slash"
-    (cdir / "study").mkdir(parents=True)
+    cdir = make_course(tmp, "Slash")
     state, prompts = {}, []
 
     def fake_run(cdir_, system, prompt, **kw):
         prompts.append(prompt)
         return {"text": "an answer", "json": None, "session": "s", "ms": 1, "cost": 0}
-    patches = Patch((T, "run_model", fake_run), (T, "CHATS", tmp / "slash-chats"), (T, "log", lambda m: None),
+    patches = Patch((T, "run_model", fake_run), (T, "log", lambda m: None),
                     (T, "remember", lambda *a, **kw: None), (T, "system_prompt", lambda *a: "SYSTEM"),
                     (T, "weak_points", lambda c: "(none)"),
                     (T, "deck_where", lambda c, t: f"[{t}] \"Deck title\" (slides 1–9)"),
@@ -438,7 +441,7 @@ def test_slash_extra(tmp):
                     (S, "set_chat", lambda c, cid: state.__setitem__("chat", cid)))
     plain = lambda mode: T.CHAT_PROMPTS[mode].format(where="[S&D-1 s4] \"Slide title\"", question="", tag="S&D-1",
                                                      deck="[S&D-1] \"Deck title\" (slides 1–9)",
-                                                     style=T.STYLE.get("DEMO", "this course's quizzes and exams"),
+                                                     style="this course's quizzes and exams",
                                                      mistakes="(none)")
     last_q = lambda chat: chat["messages"][-2]["text"]
     with patches:
@@ -494,13 +497,12 @@ def test_drawing_first_prompts():
 
 
 def test_spoken_flag(tmp):
-    cdir = tmp / "Spoken"
-    (cdir / "study").mkdir(parents=True)
+    cdir = make_course(tmp, "Spoken")
     state, remembered = {}, []
 
     def fake_run(cdir_, system, prompt, **kw):
         return {"text": "an answer", "json": None, "session": "s", "ms": 1, "cost": 0}
-    patches = Patch((T, "run_model", fake_run), (T, "CHATS", tmp / "spoken-chats"), (T, "log", lambda m: None),
+    patches = Patch((T, "run_model", fake_run), (T, "log", lambda m: None),
                     (T, "remember", lambda *a, **kw: remembered.append((a, kw))), (T, "system_prompt", lambda *a: "SYSTEM"),
                     (T, "where", lambda c, t, n: f"[{t} s{n}]"),
                     (L, "course_meta", lambda c: ("DEMO", "Test")),
@@ -517,8 +519,7 @@ def test_spoken_flag(tmp):
 
 
 def test_practice_focus(tmp):
-    cdir = tmp / "Practice"
-    (cdir / "study").mkdir(parents=True)
+    cdir = make_course(tmp, "Practice")
     prompts = []
     problem = {"problem_md": "Find the equilibrium price for Qd = 100 - 2P and Qs = 3P.", "solution_md": "1. Set Qd = Qs", "final_answer": "P = 20",
                "hints": ["h1", "h2"], "concept": "equilibrium", "slides": "S&D-1 s4", "deck": "S&D-1"}
@@ -526,7 +527,7 @@ def test_practice_focus(tmp):
     def fake_run(cdir_, system, prompt, **kw):
         prompts.append(prompt)
         return {"text": "", "json": dict(problem), "session": None, "ms": 1, "cost": 0}
-    patches = Patch((T, "run_model", fake_run), (T, "PRACTICE_DIR", tmp / "practice"), (T, "log", lambda m: None),
+    patches = Patch((T, "run_model", fake_run), (T, "log", lambda m: None),
                     (T, "system_prompt", lambda *a: "SYSTEM"), (T, "where", lambda c, t, n: f"[{t} s{n}]"),
                     (L, "deck", lambda c, t: {"title": "D", "slides": 9} if t == "S&D-1" else None),
                     (L, "course_info", lambda c: {"code": "DEMO", "topics": []}))
@@ -537,6 +538,10 @@ def test_practice_focus(tmp):
               in prompts[-1], prompts[-1][-300:])
         check("practice focus: on the record", rec["focus"] == "harder, with {worked} numbers", rec.get("focus"))
         check("practice focus: public_problem works", T.public_problem(rec)["problem_md"] == problem["problem_md"])
+        check("practice: the record is saved in <course>/me/practice", (cdir / "me" / "practice" / f"{rec['id']}.json").is_file())
+        check("practice: no assessment_style -> the prompt's own fallback", "- Style: an exam-style question for this course." in prompts[-1])
+        T._PRACTICE.pop(rec["id"], None)
+        check("practice: found again by its id alone (from the course's folder)", (T.get_practice(rec["id"]) or {}).get("id") == rec["id"])
         rec = T._generate(cdir, {"kind": "try", "tag": "S&D-1", "n": 4}, "m", False)
         check("practice no focus: no focus line", "The student asked for this problem" not in prompts[-1]
               and rec["focus"] == "")
@@ -553,6 +558,69 @@ def test_practice_focus(tmp):
             check("new_problem no focus: prefetched problem taken", got is pre)
         finally:
             T._PREFETCH.pop(key, None)
+
+
+# ---------------------------------------------------------------- runtime data and course facts (library/<course>/me/)
+
+def test_runtime_data(tmp):
+    style = "a short scenario question about a market, answered in 2-3 sentences"
+    cdir = make_course(tmp, "Demo-Course", code="DEMO101", title="Demo Course", assessment_style=style)
+    bare = make_course(tmp, "Bare")
+    check("course facts: code and title from course.json", L.course_meta(cdir) == ("DEMO101", "Demo Course"))
+    check("course facts: no code or title -> the folder name for both", L.course_meta(bare) == ("Bare", "Bare"))
+    check("course facts: assessment_style from course.json", L.course_style(cdir) == style)
+    check("course facts: no assessment_style -> empty", L.course_style(bare) == "")
+    (bare / "course.json").write_text(json.dumps({"assessment_style": "  "}), encoding="utf-8")
+    check("course facts: a blank assessment_style counts as none", L.course_style(bare) == "")
+    check("style: _papers_text falls back to its own text", "question style: exam-style questions)" in
+          T._papers_text(bare, {"papers": []}))
+    check("style: _papers_text uses the course's style", f"question style: {style})" in T._papers_text(cdir, {"papers": []}))
+
+    prompts = []
+    def fake_run(cdir_, system, prompt, **kw):
+        prompts.append(prompt)
+        return {"text": "an answer", "json": {"problem_md": "p", "solution_md": "s", "final_answer": "f", "hints": ["a", "b"],
+                                              "concept": "c", "slides": "S&D-1 s1", "deck": "S&D-1"},
+                "session": "s", "ms": 1, "cost": 0}
+    state = {}
+    with Patch((T, "run_model", fake_run), (T, "log", lambda m: None), (T, "system_prompt", lambda *a: "SYSTEM"),
+               (T, "where", lambda c, t, n: f"[{t} s{n}]"), (T, "deck_where", lambda c, t: f"[{t}]"),
+               (T, "remember", lambda *a, **kw: None),
+               (L, "deck", lambda c, t: {"tag": t, "title": "D", "slides": 3} if t == "S&D-1" else None),
+               (T, "current_chat", lambda c: state.get("chat")),
+               (S, "set_chat", lambda c, cid: state.__setitem__("chat", cid))):
+        T.chat_turn(cdir, "S&D-1", 1, "quiz", "", "m", False)
+        check("style: a chat prompt uses the course's style", f"for this course's assessments ({style})" in prompts[-1], prompts[-1][:300])
+        state.clear()
+        T.chat_turn(bare, "S&D-1", 1, "quiz", "", "m", False)
+        check("style: a chat prompt falls back to its own text", "for this course's assessments (this course's quizzes and exams)"
+              in prompts[-1], prompts[-1][:300])
+        rec = T._generate(cdir, {"kind": "try", "tag": "S&D-1", "n": 1}, "m", False)
+        check("style: a practice prompt uses the course's style", f"- Style: {style}." in prompts[-1])
+        check("runtime: chats under each course's me/chats", any((cdir / "me" / "chats").glob("*.json"))
+              and any((bare / "me" / "chats").glob("*.json")))
+        check("runtime: the chat list spans every course", {c["course"] for c in T.list_chats()} >= {"Demo-Course", "Bare"})
+        png = "data:image/png;base64," + base64.b64encode(bytes.fromhex("89504e470d0a1a0a") + b"fake").decode()
+        T.add_photo(cdir, rec["id"], png)
+        photo = T.get_practice(rec["id"])["photos"][0]
+        check("runtime: a photo is saved in <course>/me/uploads", photo.startswith("me/uploads/") and (cdir / photo).is_file(), photo)
+        check("runtime: and counts as an upload", T.is_upload(cdir, photo) and not T.is_upload(cdir, "me/hub-state.json"))
+    stray_chat = {"id": "abcabcabcabc", "course": "Demo-Course", "deck": "S&D-1", "messages": []}
+    (bare / "me" / "chats" / "abcabcabcabc.json").write_text(json.dumps(stray_chat), encoding="utf-8")
+    T.update_chat("abcabcabcabc", title="Renamed")
+    check("runtime: a chat is saved back where it was found, never copied into another course",
+          json.loads((bare / "me" / "chats" / "abcabcabcabc.json").read_text(encoding="utf-8"))["title"] == "Renamed"
+          and not (cdir / "me" / "chats" / "abcabcabcabc.json").exists())
+    S.mark_solved(cdir, "S&D-1")
+    check("runtime: hub state in <course>/me/hub-state.json", (cdir / "me" / "hub-state.json").is_file())
+    (cdir / "me" / "progress.md").write_text("# Progress" + chr(10), encoding="utf-8")
+    S.mark_solved(cdir, "S&D-1")
+    text = (cdir / "me" / "progress.md").read_text(encoding="utf-8")
+    check("runtime: saved mistakes mirrored into me/progress.md", S.START in text and "`me/hub-state.json`" in text)
+    check("runtime: the tutor's notes live in <course>/me/", T.memory_file(cdir) == cdir / "me" / "tutor-memory.md")
+    stray = [p for p in tmp.rglob("*") if p.is_file() and len(p.relative_to(tmp).parts) > 1
+             and p.relative_to(tmp).parts[1] not in ("course.json", "me")]
+    check("runtime: nothing written outside the courses' me/ folders", not stray, stray)
 
 
 # ---------------------------------------------------------------- the voice models
@@ -911,22 +979,24 @@ def test_dictation_http():
         srv.shutdown()
         srv.server_close()
 
-    courses = L.course_dirs()
-    if not courses:
-        print("skip  voice hint: no course folders found")
-        return
-    c = courses[0]
-    tag = next(iter(L.course_info(c)["decks"]))
-    d = L.deck(c, tag)
-    s = next((x for x in L.slide_texts(c, tag) if x["title"] and x["title"] != d["title"]), None)
-    if s:
+    with tempfile.TemporaryDirectory() as lib, Patch((L, "ROOT", Path(lib))):     # a demo course with one deck
+        c = make_course(Path(lib), "Demo-Course", code="DEMO101", title="Demo Course")
+        tag = "S&D-1"
+        deck = c / "decks" / L.safe_tag(tag)
+        deck.mkdir(parents=True)
+        (deck / "deck.json").write_text(json.dumps({"tag": tag, "title": "Supply and Demand 1", "role": "lecture", "week": 1,
+                                                    "topic": "Supply and Demand", "order": 0, "pages": 60, "prepared": True}), encoding="utf-8")
+        (deck / "transcript.md").write_text("".join(f"## [{tag} s{n}] Price elasticity, part {n}\n\nText {n}.\n\n"
+                                                    for n in range(1, 61)), encoding="utf-8")
+        d = L.deck(c, tag)
+        s = next((x for x in L.slide_texts(c, tag) if x["title"] and x["title"] != d["title"]), None)
         got = server._voice_hint({"course": c.name, "tag": tag, "n": s["n"], "scope": "slide"})
         want = f"{d['title']}. {s['title']}"
         check("voice hint: slide scope is the deck title. the slide title", got == want, f"{got!r} vs {want!r}")
-    got = server._voice_hint({"course": c.name, "tag": tag, "n": 1, "scope": "deck"})
-    check("voice hint: deck scope fits ~600 chars and ends with the deck title",
-          got.endswith(d["title"]) and len(got) <= 600 + len(". " + d["title"]), f"{len(got)} {got[-80:]!r}")
-    check("voice hint: unknown course -> ''", server._voice_hint({"course": "nope", "tag": tag}) == "")
+        got = server._voice_hint({"course": c.name, "tag": tag, "n": 1, "scope": "deck"})
+        check("voice hint: deck scope fits ~600 chars and ends with the deck title",
+              got.endswith(d["title"]) and len(got) <= 600 + len(". " + d["title"]) and "part 60" in got, f"{len(got)} {got[-80:]!r}")
+        check("voice hint: unknown course -> ''", server._voice_hint({"course": "nope", "tag": tag}) == "")
 
 
 def test_stream_round_trip():
@@ -985,7 +1055,7 @@ def test_round_trip():
 
 
 def main():
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, Patch((L, "ROOT", Path(d))):     # the temp folder is the library
         tmp = Path(d)
         test_voice_prompt(tmp)
         test_memory_text(tmp)
@@ -997,6 +1067,7 @@ def main():
         test_drawing_first_prompts()
         test_spoken_flag(tmp)
         test_practice_focus(tmp)
+        test_runtime_data(tmp)
     test_voice_errors()
     test_dictation()
     test_dictation_http()

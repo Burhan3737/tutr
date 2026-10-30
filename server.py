@@ -6,9 +6,9 @@ practice problems, marks your work and brings your mistakes back for review.
     python server.py --lan      # also reachable from phones on the same network
     python server.py --tunnel   # also reachable from anywhere, via a Cloudflare quick tunnel
 
-Nothing is configured here. Any top-level folder with a `study/` subfolder is a course; its decks,
-topics and exam dates come from its CLAUDE.md and study/progress.md (see library.py). New slides
-show up on the next page load. The tutor's prompts are in tutor.py; its calls go to one of two engines,
+Nothing is configured here. Any folder in the library with a `course.json` is a course; its decks come from
+decks/<folder>/deck.json, its topics from course.json and its exam dates from me/progress.md (see library.py).
+New decks show up on the next page load. The tutor's prompts are in tutor.py; its calls go to one of two engines,
 chosen by the model: the Claude Agent SDK on the Claude Code login (engine.py) or a private OpenCode
 server (opencode_engine.py, models like "opencode/big-pickle"). Tutor, practice and marking requests
 sent with "stream": true are answered as Server-Sent Events: "status" lines, "text" deltas, then
@@ -31,7 +31,15 @@ import voice as V
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
-DRAFTS = D.Drafts(T.WORK / "drafts.json")
+
+
+def _drafts_file(course):
+    """Each course's Ask-box draft is kept in <course>/me/drafts.json."""
+    c = L.course_dir(course)
+    return L.me_dir(c) / "drafts.json" if c else None
+
+
+DRAFTS = D.Drafts(path_for=_drafts_file)
 PHONE_URL = None    # --lan: the address phones on the same network use; --tunnel: the public Cloudflare link
 
 
@@ -61,7 +69,7 @@ def _deck_row(info, s, tag):
 
 
 def _deck_public(d):
-    return {k: d[k] for k in ("tag", "title", "week", "slides", "topic", "order")} | {"prepared": bool(d["transcript"])}
+    return {k: d[k] for k in ("tag", "title", "week", "slides", "topic", "order")} | {"prepared": d["prepared"]}
 
 
 def home():

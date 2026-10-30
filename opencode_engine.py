@@ -10,8 +10,8 @@ OpenCode is a second engine next to Claude (engine.py), chosen per model: a mode
 - The hub's system prompt goes in through a session instruction entry (updated only when its hash changes).
   Alone it is ~100 kB, too long for a command line, and this keeps it out of every user message.
 - Tools are confined by the session's permission rules: everything denied, then Read/Grep/Glob allowed (and
-  WebSearch/WebFetch when web is on), with external_directory denied. The session's working directory is the
-  course folder.
+  WebSearch/WebFetch when web is on), with external_directory and the student's private files (me/private/)
+  denied. The session's working directory is the course folder.
 - Answers stream off the shared /api/event SSE feed (text deltas, tool calls, step costs, execution end), with
   polling the message list as a fallback. The final text is read back from the session's messages, so a missed
   delta never truncates a saved answer.
@@ -321,13 +321,17 @@ _SESSIONS_LOCK = threading.Lock()
 _CHATS = {}                     # chat key -> {"session", "lock"}
 _CHATS_LOCK = threading.Lock()
 
+# Never the student's private files (me/private/): denied after the allows (the last matching rule wins), with
+# either path separator (Windows paths come with backslashes) and the usual letter cases (the match may be exact).
+PRIVATE_PATTERNS = sorted({f"*{me}{sep}{pv}*" for sep in ("/", "\\") for me in ("me", "Me", "ME")
+                           for pv in ("private", "Private", "PRIVATE")})
 PERMISSIONS = [
     {"action": "*", "resource": "*", "effect": "deny"},
     {"action": "read", "resource": "*", "effect": "allow"},
     {"action": "glob", "resource": "*", "effect": "allow"},
     {"action": "grep", "resource": "*", "effect": "allow"},
     {"action": "external_directory", "resource": "*", "effect": "deny"},
-]
+] + [{"action": a, "resource": p, "effect": "deny"} for a in ("read", "glob", "grep") for p in PRIVATE_PATTERNS]
 WEB_PERMISSIONS = PERMISSIONS + [{"action": "websearch", "resource": "*", "effect": "allow"},
                                  {"action": "webfetch", "resource": "*", "effect": "allow"}]
 

@@ -1,4 +1,4 @@
-"""What the Study Hub remembers per course, in `<course>/study/hub-state.json`:
+"""What the Study Hub remembers per course, in `<course>/me/hub-state.json`:
 
 - decks:   which slides were seen, where the student stopped, read (reached the end) and solved
            (a problem from the deck answered correctly with no hint)
@@ -6,7 +6,7 @@
 - chat:    the course's current tutor chat, whichever deck is open (`chats`, the old pointer per deck, is
            kept but no longer used)
 
-The open review items are also mirrored into `study/progress.md` (between hub markers) so that
+The open review items are also mirrored into `me/progress.md` (between hub markers) so that
 mocks and cheat sheets made in Claude Code can see them.
 """
 import datetime as dt, json, re, threading, uuid
@@ -23,7 +23,7 @@ def today():
 
 
 def _path(cdir):
-    return cdir / "study" / "hub-state.json"
+    return L.me_dir(cdir) / "hub-state.json"
 
 
 def load(cdir):
@@ -43,6 +43,7 @@ def load(cdir):
 def save(cdir, s):
     with _LOCK:
         p = _path(cdir)
+        p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps(s, ensure_ascii=False, indent=1), encoding="utf-8")
         tmp.replace(p)
@@ -190,12 +191,12 @@ START, END = "<!-- study-hub:start -->", "<!-- study-hub:end -->"
 
 
 def _mirror_progress(cdir, s):
-    prog = cdir / "study" / "progress.md"
+    prog = L.me_dir(cdir) / "progress.md"
     if not prog.exists():
         return
     items = [r for r in s["reviews"] if _live(r)]
     lines = [START, "## Mistakes saved in the Study Hub", "",
-             "Written by the Study Hub from `study/hub-state.json`; don't edit by hand. Use it for mocks and cheat sheets.", ""]
+             "Written by the Study Hub from `me/hub-state.json`; don't edit by hand. Use it for mocks and cheat sheets.", ""]
     if items:
         lines += ["| Saved | Where | Concept | Mistake | Clue noted | Step | Next due |", "|---|---|---|---|---|---|---|"]
         for r in sorted(items, key=lambda r: r["created"]):

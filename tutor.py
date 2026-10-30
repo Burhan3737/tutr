@@ -11,7 +11,7 @@ Modes
   exam-style questions from a range of decks in the format of the practice papers picked, worked on paper; the
   range and a log of the questions live on the chat (chat["drill"])
 - voice: a spoken question (the retired Talk tab's mode, still accepted), answered in plain spoken sentences
-  (voice_prompt.md) in the same chat; afterwards the tutor's notes on the student (study/tutor-memory.md) are
+  (voice_prompt.md) in the same chat; afterwards the tutor's notes on the student (me/tutor-memory.md) are
   updated in the background. Dictated questions now go as asks with spoken: true.
 - practice: a problem written and solved by Claude (structured output); the solution and hints stay
   on the server until the student has tried
@@ -132,9 +132,8 @@ def shutdown():
 
 # ---------------------------------------------------------------- the system prompt
 
-STYLE = {
-    "DEMO": "a short closed-book quiz question",
-}
+# The course's question style (A2) comes from course.json's assessment_style (library.course_style); each prompt
+# that uses it keeps its own fallback for a course without one.
 
 SYSTEM = """You are the tutor inside a student's Study Hub for {code} {title}.
 Their goal: understand the concepts well enough to solve problems they have never seen, and get top marks.
@@ -203,7 +202,7 @@ Style:
 
 {course_map}"""
 
-SOURCES_WEB = """2. The course textbooks (.cache/textbooks: Grep the .txt, or read the .toc.md first) and the student's
+SOURCES_WEB = """2. The course textbooks (textbooks: Grep the .txt, or read the .toc.md first) and the student's
    own class notes.
 3. Official documentation and university course notes on the web (WebSearch/WebFetch).
 4. The general web, only when nothing above covers it.
@@ -632,12 +631,8 @@ def _papers_text(cdir, cfg):
         return ("the practice paper(s) " + ", ".join(f"[{t}] {info['decks'][t]['title']}" for t in cfg["papers"]) +
                 " (their pages are included below). Questions only; any solution you give is your own.")
     return ("no sample paper was picked: mirror the format of this course's next assessment (CLAUDE.md: its format, "
-            f"time and aids; question style: {STYLE.get(info_code(cdir), 'exam-style questions')}). Exercise and "
+            f"time and aids; question style: {L.course_style(cdir) or 'exam-style questions'}). Exercise and "
             "self-check slides in the range show the kind of question the course sets.")
-
-
-def info_code(cdir):
-    return L.course_meta(cdir)[0]
 
 
 def _ledger(cfg):
@@ -840,7 +835,7 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=Fa
     else:
         prompt = CHAT_PROMPTS[mode].format(where=where(cdir, tag, n), question=question.strip(), tag=tag,
                                            deck=deck_where(cdir, tag),
-                                           style=STYLE.get(L.course_meta(cdir)[0], "this course's quizzes and exams"),
+                                           style=L.course_style(cdir) or "this course's quizzes and exams",
                                            mistakes=weak_points(cdir) if mode in ("grill", "grill_deck") else "")
         if extra:
             prompt += EXTRA.format(extra=extra[:2000])
@@ -899,7 +894,7 @@ def warm_chat(cdir, tag, model, web):
 # ---------------------------------------------------------------- voice turns and the tutor's memory
 # A spoken question in mode "voice" (the retired Talk tab's; dictated questions now go as asks with spoken: true).
 # Its prompt is voice_prompt.md (read on every turn, so it can be tuned without a restart). The voice tutor keeps notes on the student in
-# <course>/study/tutor-memory.md: read into every voice turn, and rewritten after each one by a quick one-off
+# <course>/me/tutor-memory.md: read into every voice turn, and rewritten after each one by a quick one-off
 # call in the background, so the next answer knows what was asked again and which mistakes were corrected.
 # Answers typed during a Grill me feed the same notes (what the grill found wrong), and a grill steers by them.
 
@@ -913,7 +908,7 @@ _MEMORY_LOCKS_LOCK = threading.Lock()
 
 
 def memory_file(cdir):
-    return cdir / "study" / "tutor-memory.md"
+    return L.me_dir(cdir) / "tutor-memory.md"
 
 
 def _read_memory(cdir):
@@ -934,7 +929,7 @@ def memory_text(cdir, text=None):
 
 def known_mistakes(cdir, limit=3000):
     """Weak topics and the error log from progress.md (marked mocks), for the voice tutor to steer by."""
-    f = cdir / "study" / "progress.md"
+    f = L.me_dir(cdir) / "progress.md"
     if not f.is_file():
         return ""
     text = f.read_text(encoding="utf-8")
@@ -1035,6 +1030,7 @@ def remember(cdir, tag, n, question, answer, grill=False, model=None):
             f = memory_file(cdir)
             tmp = f.with_suffix(".md.tmp")
             try:
+                f.parent.mkdir(parents=True, exist_ok=True)
                 text, mtime = _read_memory(cdir)
                 hint = MEMORY_HINT if CORRECTION.match(answer.replace("’", "'")) else ""
                 prompt = MEMORY_PROMPT.format(today=time.strftime("%Y-%m-%d"), tag=tag, hint=hint,
@@ -1132,14 +1128,23 @@ def side_close(side_id):
 
 
 # ---------------------------------------------------------------- saved chats
+# Each course keeps its own chats in <course>/me/chats/<id>.json; a chat is found by its id in whichever course has it.
 
-CHATS = WORK / "chats"
 CHAT_ID = re.compile(r"^[a-f0-9]{12}$")
 _CHAT_LOCK = threading.Lock()
 
 
-def chat_file(chat_id):
-    return CHATS / f"{chat_id}.json" if chat_id and CHAT_ID.match(chat_id) else None
+def chats_dir(cdir):
+    return L.me_dir(cdir) / "chats"
+
+
+def chat_file(chat_id, cdir=None):
+    """Where a chat is saved: in cdir's chats when given, else the course that has it (None if none does)."""
+    if not (isinstance(chat_id, str) and CHAT_ID.match(chat_id)):
+        return None
+    if cdir is not None:
+        return chats_dir(cdir) / f"{chat_id}.json"
+    return next((f for c in L.course_dirs() if (f := chats_dir(c) / f"{chat_id}.json").is_file()), None)
 
 
 def load_chat(chat_id):
@@ -1151,14 +1156,23 @@ def load_chat(chat_id):
 
 
 def save_chat(chat):
-    CHATS.mkdir(parents=True, exist_ok=True)
+    """Write a chat back to the file it was loaded from; a new chat goes into its course's me/chats. So a chat is never
+    copied into another course, whatever its "course" field says."""
     with _CHAT_LOCK:
-        chat_file(chat["id"]).write_text(json.dumps(chat, ensure_ascii=False, indent=1), encoding="utf-8")
+        f = chat_file(chat["id"])
+        if f is None:
+            cdir = L.course_dir(chat.get("course") or "")
+            if not cdir:
+                raise TutorError("That chat's course no longer exists.", 404)
+            f = chat_file(chat["id"], cdir)
+            f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(chat, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 def list_chats():
+    """Every course's saved chats."""
     out = []
-    for f in CHATS.glob("*.json") if CHATS.exists() else []:
+    for f in sorted((f for c in L.course_dirs() for f in chats_dir(c).glob("*.json")), key=lambda f: f.name):
         try:
             c = json.loads(f.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -1252,16 +1266,23 @@ TASKS = {
               "and change the numbers, so the same rule or check is needed.",
 }
 
-_PRACTICE = {}          # id -> record (also saved to .cache/practice)
+_PRACTICE = {}          # id -> record (also saved to <course>/me/practice)
 _PREFETCH = {}          # key -> {"event", "rec", "err"}
 _P_LOCK = threading.Lock()
-PRACTICE_DIR = WORK / "practice"
 PID = re.compile(r"^[a-f0-9]{12}$")
 
 
+def practice_dir(cdir):
+    return L.me_dir(cdir) / "practice"
+
+
 def _save_practice(rec):
-    PRACTICE_DIR.mkdir(parents=True, exist_ok=True)
-    (PRACTICE_DIR / f"{rec['id']}.json").write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
+    cdir = L.course_dir(rec.get("course") or "")
+    if not cdir:
+        raise TutorError("That problem's course no longer exists.", 404)
+    d = practice_dir(cdir)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{rec['id']}.json").write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 def get_practice(pid):
@@ -1270,8 +1291,8 @@ def get_practice(pid):
     with _P_LOCK:
         if pid in _PRACTICE:
             return _PRACTICE[pid]
-    f = PRACTICE_DIR / f"{pid}.json"
-    if f.exists():
+    f = next((f for c in L.course_dirs() if (f := practice_dir(c) / f"{pid}.json").is_file()), None)
+    if f:
         rec = json.loads(f.read_text(encoding="utf-8"))
         with _P_LOCK:
             _PRACTICE[pid] = rec
@@ -1311,7 +1332,7 @@ def _generate(cdir, req, model, web, emit=None):
     if focus:       # /try with the student's own words
         task += (f'\n\nThe student asked for this problem: "{focus}". Follow it (topic, difficulty, kind of '
                  f'question) as long as it fits the slides.')
-    prompt = PRACTICE_BASE.format(style=STYLE.get(info["code"], "an exam-style question for this course"),
+    prompt = PRACTICE_BASE.format(style=L.course_style(cdir) or "an exam-style question for this course",
                                   surface=SURFACE_NEW if kind != "yourturn" else "same structure as the example.",
                                   task=task)
     r = run_model(cdir, system_prompt(cdir, scope_tag, web), prompt, model=model, schema=PROBLEM_SCHEMA, web=web,
@@ -1487,7 +1508,7 @@ def _save_image(cdir, stem, data):
     if len(raw) > 12_000_000:
         raise TutorError("That photo is too large (over 12 MB).", 400)
     ext = "jpg" if m.group(1) in ("jpeg", "jpg") else m.group(1)
-    rel = f".cache/uploads/{stem}.{ext}"
+    rel = f"me/uploads/{stem}.{ext}"
     (cdir / rel).parent.mkdir(parents=True, exist_ok=True)
     (cdir / rel).write_bytes(raw)
     return rel
@@ -1502,7 +1523,7 @@ def add_photo(cdir, pid, data):
     return {"photos": len(rec["photos"])}
 
 
-UPLOAD = re.compile(r"^\.cache/uploads/[A-Za-z0-9_-]{1,80}\.(jpg|png|webp)$")
+UPLOAD = re.compile(r"^me/uploads/[A-Za-z0-9_-]{1,80}\.(jpg|png|webp)$")
 
 
 def is_upload(cdir, rel):

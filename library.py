@@ -1,20 +1,21 @@
 """Course material as the Study Hub sees it: Course → Topic → Deck → Slide.
 
-Everything comes from files the course folders already have:
-- `<course>/CLAUDE.md` — the deck table (Week | Deck | Tag | Topic) and the Topics table (Topic | Read more)
-- `<course>/course/WeekN/<deck>.pdf` — the lecture decks, as downloaded
-- `<course>/course/practice/<deck>.pdf` — homework and practice exams: decks too, but listed apart from the
-  topics (`practice`), whatever their Topic cell says; their week is the Week cell of their deck-table row
-  (else the last lecture week)
-- `<course>/.cache/WeekN/<deck>.transcript.md` — slide-by-slide transcripts (`## [tag sN] title`);
-  `.cache/practice/` for the practice decks
-- `<course>/study/slides/<tag>-sNNN.jpg` — slide images
-- `<course>/study/progress.md` — the Deadlines table (with a Covers column for exam scope)
-- `<course>/course/WeekN/notes*.md` — the student's own class notes
-- `<course>/.cache/textbooks/*.toc.md` — textbook contents (full text alongside, for search)
+Everything comes from the library (see _library_root), one folder per course:
+- `<course>/course.json` — the course's fixed facts: {"code", "title", "assessment_style", "topics": [{"name",
+  "read_more"}]}. A folder with a course.json is a course; its folder name is its id.
+- `<course>/decks/<folder>/deck.json` — one deck: {"tag", "title", "role": "lecture" | "practice", "week", "topic",
+  "order", "pages", "prepared", "source"}. Practice decks (homework, practice exams) are listed apart from the
+  topics; a lecture deck with no topic (or "Unsorted") goes under "Not sorted yet".
+- `<course>/decks/<folder>/transcript.md` — slide-by-slide transcript (`## [tag sN] title`)
+- `<course>/decks/<folder>/sNNN.jpg` — slide images
+- `<course>/textbooks/*.toc.md` — textbook contents (full text alongside, for search)
+- `<course>/me/progress.md` — the Deadlines table (with a Covers column for exam scope)
+- `<course>/me/notes/**` — the student's own writing: `WeekN/` holds class notes; any other folder (exams/, labs/,
+  assignments/, …) is a group of documents. `me/private/` is never listed or served.
+- `<course>/me/tutor-memory.md` — the voice tutor's notes on the student
 
-A deck that isn't in the CLAUDE.md table yet (new slides, not prepared) still shows up, under
-"Not sorted yet", with its images rendered from the PDF and its PDF text layer as the transcript.
+`CLAUDE.md` is prose for Claude; nothing here parses it. No PDF is ever opened here: the preparing-slides skill
+writes each deck's images, transcript and deck.json.
 """
 import datetime as dt, json, os, re, threading
 from pathlib import Path
@@ -38,9 +39,12 @@ def _library_root():
 
 ROOT = _library_root()
 WEEK_RE = re.compile(r"^Week(\d+)$", re.I)
-PRACTICE = "practice"   # course/practice/: homework and practice exams, no week folder
+COURSE_FILE = "course.json"
+DECK_FILE = "deck.json"
+PRACTICE = "practice"   # deck.json role of homework and practice exams
 PRACTICE_NAME = "Practice"   # what the hub calls them; never a topic
 UNSORTED = "Not sorted yet"
+DOC_GROUPS = ("exams", "labs", "assignments")     # me/notes/ folders listed first, in this order
 _LOCK = threading.Lock()
 _CACHE = {}     # key -> (signature, value); rebuilt only when the underlying files change
 
@@ -48,18 +52,46 @@ _CACHE = {}     # key -> (signature, value); rebuilt only when the underlying fi
 def course_dirs():
     if not ROOT.is_dir():       # no library yet: no courses
         return []
-    return sorted(p for p in ROOT.iterdir() if p.is_dir() and (p / "study").is_dir())
+    return sorted(p for p in ROOT.iterdir() if p.is_dir() and (p / COURSE_FILE).is_file())
 
 
 def course_dir(course_id):
     return next((c for c in course_dirs() if c.name == course_id), None)
 
 
+def me_dir(cdir):
+    """The student's own data in a course: progress, hub state, chats, practice, drafts, uploads, notes."""
+    return cdir / "me"
+
+
+def notes_dir(cdir):
+    return me_dir(cdir) / "notes"
+
+
+def _read_json(path):
+    try:
+        v = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return v if isinstance(v, dict) else {}
+
+
+def course_json(cdir):
+    f = cdir / COURSE_FILE
+    return _cached(("course", cdir), [f], lambda: _read_json(f))
+
+
 def course_meta(cdir):
-    m = re.match(r"^([A-Za-z]+)-?(\d+)_?(.*)$", cdir.name)
-    code = f"{m.group(1).upper()}{m.group(2)}" if m else cdir.name
-    title = m.group(3).replace("_", " ") if m else cdir.name
+    """(code, title) from course.json; the folder name for either when it's missing."""
+    j = course_json(cdir)
+    code = str(j.get("code") or "").strip() or cdir.name
+    title = str(j.get("title") or "").strip() or cdir.name
     return code, title
+
+
+def course_style(cdir):
+    """The course's assessment style for the tutor's prompts (course.json); "" when it has none."""
+    return str(course_json(cdir).get("assessment_style") or "").strip()
 
 
 def safe_tag(tag):
@@ -116,63 +148,43 @@ def section(text, heading):
 
 # ---------------------------------------------------------------- decks and topics
 
-def _pdfs(cdir):
-    out = []
-    base = cdir / "course"
-    if base.is_dir():
-        for w in base.iterdir():
-            m = WEEK_RE.match(w.name)
-            if w.is_dir() and m:
-                out += [(int(m.group(1)), p) for p in sorted(w.glob("*.pdf"))]
-    last = max((w for w, _ in out), default=0)
-    out += [(last, p) for p in sorted((base / PRACTICE).glob("*.pdf"))]    # week set from the deck table later
-    return sorted(out, key=lambda x: (x[0], x[1].name))
+def _deck_files(cdir):
+    return sorted((cdir / "decks").glob(f"*/{DECK_FILE}"))
 
 
 def course_info(cdir):
     """{'code','title','topics':[{name, read_more, decks:[...]}], 'practice': [tag], 'decks': {tag: deck}} — cached."""
-    cm = cdir / "CLAUDE.md"
-    pdfs = _pdfs(cdir)
-    watch = [cm] + [p for _, p in pdfs] + sorted((cdir / ".cache").glob("Week*/*.transcript.md")) + \
-        sorted((cdir / ".cache" / PRACTICE).glob("*.transcript.md"))
-    return _cached(("info", cdir), watch, lambda: _build_info(cdir, pdfs))
+    files = _deck_files(cdir)
+    watch = [cdir / COURSE_FILE] + files + sorted((cdir / "decks").glob("*/transcript.md"))
+    return _cached(("info", cdir), watch, lambda: _build_info(cdir, files))
 
 
-def _build_info(cdir, pdfs):
+def _num(v, default=0):
+    """A whole number from deck.json (a number or a numeric string); anything else -> default."""
+    if isinstance(v, bool):
+        return default
+    if isinstance(v, (int, float)):
+        return int(v)
+    m = re.match(r"\s*(\d+)", str(v or ""))
+    return int(m.group(1)) if m else default
+
+
+def _build_info(cdir, files):
     code, title = course_meta(cdir)
-    text = cdir.joinpath("CLAUDE.md").read_text(encoding="utf-8") if (cdir / "CLAUDE.md").exists() else ""
-    rows, read_more = [], {}
-    for head, body in md_tables(text):
-        h = [c.lower() for c in head]
-        if h[:3] == ["week", "deck", "tag"]:
-            for r in body:
-                tag = re.findall(r"`([^`]+)`", r[2])
-                if tag:
-                    rows.append((r[0], r[1], tag[0], r[3] if len(r) > 3 and r[3] else UNSORTED))
-        elif h[:2] == ["topic", "read more"]:
-            for r in body:
-                if len(r) > 1:
-                    read_more[r[0]] = r[1]
-    by_stem = {p.stem: (w, p) for w, p in pdfs}
-    decks, order = {}, 0
-    for wk, stem, tag, topic in rows:
-        if stem not in by_stem:
-            continue
-        w, pdf = by_stem.pop(stem)
-        if pdf.parent.name == PRACTICE:                 # listed apart from the topics; week from its table row
-            topic = PRACTICE_NAME
-            if re.match(r"\d+", wk):
-                w = int(re.match(r"\d+", wk).group())
-        decks[tag] = _deck(cdir, tag, w, pdf, topic, order)
-        order += 1
-    for stem, (w, pdf) in sorted(by_stem.items(), key=lambda x: (x[1][0], x[0])):   # not in the table yet
-        if stem.lower().startswith("notes"):
-            continue
-        tag = stem.replace("_", "-")
-        decks[tag] = _deck(cdir, tag, w, pdf, PRACTICE_NAME if pdf.parent.name == PRACTICE else UNSORTED, order)
-        order += 1
+    read_more = {}
+    for t in course_json(cdir).get("topics") or []:
+        if isinstance(t, dict) and str(t.get("name") or "").strip():
+            read_more[str(t["name"]).strip()] = str(t.get("read_more") or "")
+    found = []
+    for f in files:
+        d = _deck(cdir, f.parent, _read_json(f))
+        if d:
+            found.append(d)
+    decks = {}
+    for d in sorted(found, key=lambda d: (d["week"], d["order"], d["folder"])):    # lecture order
+        decks.setdefault(d["tag"], d)           # a tag claimed twice: the first folder keeps it
     topics, practice = {}, []
-    for d in sorted(decks.values(), key=lambda d: (d["week"], d["order"])):
+    for d in decks.values():
         if d["topic"] == PRACTICE_NAME:
             practice.append(d["tag"])
         else:
@@ -183,22 +195,20 @@ def _build_info(cdir, pdfs):
     return {"code": code, "title": title, "topics": tlist, "practice": practice, "decks": decks}
 
 
-def _deck(cdir, tag, week, pdf, topic, order):
-    tr = cdir / ".cache" / pdf.parent.name / f"{pdf.stem}.transcript.md"     # WeekN/ or practice/
-    try:
-        import fitz
-        with fitz.open(pdf) as d:
-            n = d.page_count
-    except Exception:
-        n = 0
-    title = ""
-    if tr.exists():
-        m = re.search(r"^## \[[^\]]+ s1\]\s*(.*)$", tr.read_text(encoding="utf-8"), re.M)
-        title = m.group(1).strip() if m else ""
-    return {"tag": tag, "stem": pdf.stem, "week": week, "topic": topic, "order": order, "slides": n,
-            "title": title or pdf.stem.replace("_", " ").replace("-", " "),
-            "pdf": pdf.relative_to(cdir).as_posix(),
-            "transcript": tr.relative_to(cdir).as_posix() if tr.exists() else None}
+def _deck(cdir, folder, j):
+    if not j:
+        return None
+    tag = str(j.get("tag") or "").strip() or folder.name
+    if str(j.get("role") or "").strip().lower() == PRACTICE:      # listed apart from the topics
+        topic = PRACTICE_NAME
+    else:
+        topic = str(j.get("topic") or "").strip()
+        topic = UNSORTED if not topic or topic.lower() == "unsorted" else topic
+    tr = folder / "transcript.md"
+    return {"tag": tag, "folder": folder.name, "week": _num(j.get("week")), "topic": topic, "order": _num(j.get("order")),
+            "slides": _num(j.get("pages")), "title": str(j.get("title") or "").strip() or tag,
+            "prepared": j.get("prepared") is True,
+            "transcript": tr.relative_to(cdir).as_posix() if tr.is_file() else None}
 
 
 def deck(cdir, tag):
@@ -206,8 +216,12 @@ def deck(cdir, tag):
 
 
 def deck_order(cdir):
-    """All decks in lecture order (week, then table order)."""
+    """All decks in lecture order (week, then deck.json's order)."""
     return sorted(course_info(cdir)["decks"].values(), key=lambda d: (d["week"], d["order"]))
+
+
+def deck_dir(cdir, d):
+    return cdir / "decks" / d["folder"]
 
 
 # ---------------------------------------------------------------- slide text and images
@@ -216,78 +230,82 @@ TYPE_LINE = re.compile(r"^Type: \w+\s*$", re.M)
 
 
 def slide_texts(cdir, tag):
-    """[{n, title, md}] for every slide of a deck — from the transcript, else the PDF text layer."""
+    """[{n, title, md}] for every slide of a deck, from its transcript (empty when it has none). A deck not fully
+    prepared yet (`prepared: false`) has a rough transcript from the PDF's text layer: its slides carry raw: True."""
     d = deck(cdir, tag)
     if not d:
         return []
-    src = cdir / (d["transcript"] or d["pdf"])
-    return _cached(("text", cdir, tag), [src], lambda: _build_texts(cdir, d))
+    base = deck_dir(cdir, d)
+    return _cached(("text", cdir, tag), [base / "transcript.md", base / DECK_FILE], lambda: _build_texts(cdir, d))
 
 
 def _build_texts(cdir, d):
     out = {}
-    if d["transcript"]:
-        text = (cdir / d["transcript"]).read_text(encoding="utf-8")
+    tr = deck_dir(cdir, d) / "transcript.md"
+    try:
+        text = tr.read_text(encoding="utf-8")
+    except OSError:
+        text = None
+    if text is not None:
         parts = re.split(r"^## \[([^\]]+?) s(\d+)\]\s*(.*)$", text, flags=re.M)
         for i in range(1, len(parts), 4):
             n = int(parts[i + 1])
             body = TYPE_LINE.sub("", parts[i + 3]).strip()
             out[n] = {"n": n, "title": parts[i + 2].strip(), "md": body}
-    else:
-        try:
-            import fitz
-            with fitz.open(cdir / d["pdf"]) as doc:
-                for i, page in enumerate(doc, 1):
-                    t = page.get_text().strip()
-                    out[i] = {"n": i, "title": (t.splitlines() or [""])[0][:80], "md": t, "raw": True}
-        except Exception:
-            pass
+            if not d["prepared"]:
+                out[n]["raw"] = True
     return [out.get(n, {"n": n, "title": "", "md": ""}) for n in range(1, d["slides"] + 1)]
 
 
 def slide_image(cdir, tag, n):
-    """Path of the slide image; renders it from the PDF (once) when the prepared image is missing."""
+    """Path of the slide image (decks/<folder>/sNNN.jpg), or None."""
     d = deck(cdir, tag)
     if not d or not (1 <= n <= d["slides"]):
         return None
-    img = cdir / "study" / "slides" / f"{safe_tag(tag)}-s{n:03d}.jpg"
-    if img.exists():
-        return img
-    out = cdir / ".cache" / "render" / f"{safe_tag(tag)}-s{n:03d}.jpg"
-    if not out.exists():
-        import fitz
-        out.parent.mkdir(parents=True, exist_ok=True)
-        with fitz.open(cdir / d["pdf"]) as doc:
-            doc[n - 1].get_pixmap(dpi=110).save(str(out), jpg_quality=85)
-    return out
+    img = deck_dir(cdir, d) / f"s{n:03d}.jpg"
+    return img if img.is_file() else None
 
 
-# ---------------------------------------------------------------- class notes
+# ---------------------------------------------------------------- the student's notes (me/notes/)
 
 def class_notes(cdir):
+    """me/notes/WeekN/*.md and *.txt: the student's class notes for week N."""
     out = []
-    base = cdir / "course"
-    for w in sorted(base.glob("Week*"), key=lambda p: int(WEEK_RE.match(p.name).group(1)) if WEEK_RE.match(p.name) else 0):
-        m = WEEK_RE.match(w.name)
-        if m:
-            for f in sorted(w.glob("notes*.md")) + sorted(w.glob("notes*.txt")):
-                if f.stat().st_size > 0:
-                    out.append({"week": int(m.group(1)), "name": f.name, "path": f.relative_to(cdir).as_posix()})
+    base = notes_dir(cdir)
+    weeks = [w for w in base.iterdir() if w.is_dir() and WEEK_RE.match(w.name)] if base.is_dir() else []
+    for w in sorted(weeks, key=lambda p: int(WEEK_RE.match(p.name).group(1))):
+        n = int(WEEK_RE.match(w.name).group(1))
+        for f in sorted(w.glob("*.md")) + sorted(w.glob("*.txt")):
+            if f.is_file() and f.stat().st_size > 0:
+                out.append({"week": n, "name": f.name, "path": f.relative_to(cdir).as_posix()})
     return out
+
+
+def _doc_folders(cdir):
+    """me/notes/'s folders other than WeekN: exams, labs, assignments first, then any other by name."""
+    base = notes_dir(cdir)
+    if not base.is_dir():
+        return []
+    tops = sorted(d for d in base.iterdir() if d.is_dir() and not WEEK_RE.match(d.name) and not d.name.startswith("."))
+    return sorted(tops, key=lambda d: (DOC_GROUPS.index(d.name) if d.name in DOC_GROUPS else len(DOC_GROUPS), d.name))
 
 
 def other_docs(cdir):
-    """Mocks and cheat sheets (study/exams/<assessment>/), lab/assignment guides (labs/, assignments/), and the
-    voice tutor's notes on the student (study/tutor-memory.md)."""
+    """The student's documents in me/notes/ outside the WeekN folders: each top-level folder is a kind (exams = mocks
+    and cheat sheets, labs, assignments, or any other folder's name), each folder inside it a group of its .md files
+    (.md files right in the kind's folder make a group with no name); and the voice tutor's notes on the student
+    (me/tutor-memory.md)."""
     groups = []
-    for kind, base in (("exams", cdir / "study" / "exams"), ("labs", cdir / "labs"), ("assignments", cdir / "assignments")):
-        if base.is_dir():
-            for d in sorted(x for x in base.iterdir() if x.is_dir()):
-                files = sorted(d.glob("*.md"))
-                if files:
-                    groups.append({"kind": kind, "name": d.name,
-                                   "files": [{"name": f.stem, "path": f.relative_to(cdir).as_posix()} for f in files]})
-    memory = cdir / "study" / "tutor-memory.md"      # the voice tutor's notes on the student (tutor.py)
+    for top in _doc_folders(cdir):
+        loose = sorted(f for f in top.glob("*.md") if f.is_file())
+        dirs = [("", loose)] if loose else []
+        dirs += [(d.name, sorted(f for f in d.glob("*.md") if f.is_file()))
+                 for d in sorted(x for x in top.iterdir() if x.is_dir())]
+        for name, files in dirs:
+            if files:
+                groups.append({"kind": top.name, "name": name,
+                               "files": [{"name": f.stem, "path": f.relative_to(cdir).as_posix()} for f in files]})
+    memory = me_dir(cdir) / "tutor-memory.md"      # the voice tutor's notes on the student (tutor.py)
     if memory.is_file():
         groups.append({"kind": "tutor", "name": "", "files": [{"name": "What your tutor remembers",
                                                                "path": memory.relative_to(cdir).as_posix()}]})
@@ -295,7 +313,7 @@ def other_docs(cdir):
 
 
 def readable_doc(cdir, path):
-    """True only for the class notes, mocks/cheat sheets and lab/assignment guides listed above."""
+    """True only for the class notes, documents and tutor notes listed above (never anything in me/private/)."""
     return any(n["path"] == path for n in class_notes(cdir)) or \
         any(f["path"] == path for g in other_docs(cdir) for f in g["files"])
 
@@ -317,7 +335,7 @@ def parse_date(s, year):
 
 def assessments(cdir):
     """Graded tests of lecture content from progress.md → Deadlines rows with a Covers value."""
-    prog = cdir / "study" / "progress.md"
+    prog = me_dir(cdir) / "progress.md"
     if not prog.exists():
         return []
     text = prog.read_text(encoding="utf-8")
@@ -386,44 +404,46 @@ def search(q, limit=60):
 
 def course_map(cdir):
     info = course_info(cdir)
-    books = sorted((cdir / ".cache" / "textbooks").glob("*.toc.md"))
+    books = sorted((cdir / "textbooks").glob("*.toc.md"))
     notes = class_notes(cdir)
-    watch = [cdir / "CLAUDE.md"] + books + [cdir / n["path"] for n in notes] + \
+    watch = [cdir / COURSE_FILE] + _deck_files(cdir) + books + [cdir / n["path"] for n in notes] + \
             [cdir / d["transcript"] for d in info["decks"].values() if d["transcript"]]
     return _cached(("map", cdir), watch, lambda: _build_map(cdir, info, books, notes))
+
+
+def _source(d):
+    return d["transcript"] or f"decks/{d['folder']}/ (no transcript yet: slide images only)"
 
 
 def _build_map(cdir, info, books, notes):
     out = [f"# {info['code']} {info['title']}: map of the course material",
            "Paths are relative to the course folder (your working directory).", "",
            "- `CLAUDE.md`: course facts: assessments, format, dates, AI policy",
-           "- `study/progress.md`: deadlines (with the weeks each test covers), weak topics, error log", ""]
+           "- `me/progress.md`: deadlines (with the weeks each test covers), weak topics, error log", ""]
     for t in info["topics"]:
         out.append(f"## Topic: {t['name']}" + (f" (read more: {t['read_more']})" if t["read_more"] else ""))
         for tag in t["decks"]:
             d = info["decks"][tag]
-            src = d["transcript"] or f"{d['pdf']} (no transcript yet: PDF only)"
             titles = " · ".join(f"s{s['n']} {s['title'][:50]}" for s in slide_texts(cdir, tag) if s["title"])
-            out.append(f"- [{tag}] W{d['week']} {d['title']}: `{src}`, {d['slides']} slides")
+            out.append(f"- [{tag}] W{d['week']} {d['title']}: `{_source(d)}`, {d['slides']} slides")
             out.append(f"    {titles}")
         out.append("")
     if info["practice"]:
         out.append("## Practice: homework and practice exams (questions only, no solutions)")
         for tag in info["practice"]:
             d = info["decks"][tag]
-            src = d["transcript"] or f"{d['pdf']} (no transcript yet: PDF only)"
-            out.append(f"- [{tag}] W{d['week']} {d['title']}: `{src}`, {d['slides']} pages")
+            out.append(f"- [{tag}] W{d['week']} {d['title']}: `{_source(d)}`, {d['slides']} pages")
         out.append("")
     if notes:
         out.append("## The student's own class notes")
         out += [f"- W{n['week']}: `{n['path']}`" for n in notes]
         out.append("")
     if books:
-        out.append("## Textbooks (full text in `.cache/textbooks/<name>.txt`, page markers `===== <name> PAGE n =====`; "
+        out.append("## Textbooks (full text in `textbooks/<name>.txt`, page markers `===== <name> PAGE n =====`; "
                    "contents in `<name>.toc.md`: Grep the .txt for a term, or Read the toc first)")
         out += [f"- `{b.relative_to(cdir).as_posix()}`" for b in books]
-    extra = [p for g in ("labs", "assignments") if (cdir / g).is_dir()
-             for p in sorted((cdir / g).rglob("*")) if p.is_file() and p.suffix.lower() in (".md", ".txt")]
+    extra = [p for g in ("labs", "assignments") if (notes_dir(cdir) / g).is_dir()
+             for p in sorted((notes_dir(cdir) / g).rglob("*")) if p.is_file() and p.suffix.lower() in (".md", ".txt")]
     if extra:
         out += ["", "## Labs and assignments"] + [f"- `{p.relative_to(cdir).as_posix()}`" for p in extra]
     return "\n".join(out)

@@ -4,8 +4,8 @@ restart needed. These comments are removed before it's sent. Fill-ins:
   {where}     what the student is studying: slide [S&D-2 s14] "Price elasticity", or, with Talk set to Whole deck,
               the whole deck [S&D-2] "Supply and demand 2" (slides 1–24)
   {question}  what speech recognition heard
-  {memory}    study/tutor-memory.md: the tutor's own notes about the student (updated after every voice turn)
-  {mistakes}  the Weak topics and Error log sections of study/progress.md
+  {memory}    me/tutor-memory.md: the tutor's own notes about the student (updated after every voice turn)
+  {mistakes}  the Weak topics and Error log sections of me/progress.md
 The system prompt (tutor.py, SYSTEM) still applies; the rules below override its written-answer style.
 Keep it short. Measured with Haiku 4.5: every extra rule here adds thinking before the first spoken word. A
 longer version of these same rules thought for 2,000-10,000 tokens (20-70 s of silence) against 400-800

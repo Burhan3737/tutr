@@ -20,7 +20,9 @@ asks from too far back (the log has moved past it, or the hub restarted: `epoch`
 draft and the turns being answered now. Nothing here knows about HTTP, so the hub can move to another server
 without touching this.
 
-Drafts are written to disk about a second after the last change, so a half-typed question survives a restart.
+Drafts are written to disk about a second after the last change, so a half-typed question survives a restart:
+either all in one file (`path`), or each course's in its own (`path_for(course)`, the hub's: <course>/me/drafts.json,
+read the first time the course is asked about). Either way a file holds {course: draft}.
 """
 import collections, json, re, threading, time, uuid
 from pathlib import Path
@@ -46,8 +48,10 @@ def _id(v):
 
 
 class Drafts:
-    def __init__(self, path=None):
+    def __init__(self, path=None, path_for=None):
         self._path = Path(path) if path else None
+        self._path_for = path_for   # course -> its own file (or None: not saved), instead of the one `path`
+        self._loaded = set()        # courses whose own file has been read (path_for)
         self._lock = threading.Lock()
         self._drafts = {}           # course -> draft
         self.epoch = uuid.uuid4().hex[:8]       # this run of the hub: a device's numbers from another run mean nothing
@@ -64,6 +68,7 @@ class Drafts:
 
     def get(self, course):
         with self._lock:
+            self._ensure(course)
             return self._public(course)
 
     def save(self, course, client, text, base, spoken=False):
@@ -79,6 +84,7 @@ class Drafts:
         except (TypeError, ValueError):
             raise DraftError("A draft needs the version it was built on.")
         with self._lock:
+            self._ensure(course)
             d = self._drafts.setdefault(course, _blank())
             if base != d["rev"]:
                 return False, self._public(course)
@@ -101,6 +107,7 @@ class Drafts:
         """Attach a photo (its path in the course folder). Every device is told, the one that added it too: its
         reply and the event carry the same draft. Raises DraftError when the question already has MAX_PHOTOS."""
         with self._lock:
+            self._ensure(course)
             d = self._drafts.setdefault(course, _blank())
             if len(d["photos"]) >= MAX_PHOTOS:
                 raise DraftError(f"A question can have {MAX_PHOTOS} photos at most.")
@@ -111,6 +118,7 @@ class Drafts:
     def remove_photo(self, course, client, photo):
         """Take a photo off. Returns (whether it was attached, the draft)."""
         with self._lock:
+            self._ensure(course)
             d = self._drafts.setdefault(course, _blank())
             if photo not in d["photos"]:
                 return False, self._public(course)
@@ -121,6 +129,7 @@ class Drafts:
         """A question is being sent with these photos: the ones still attached come off the draft (every device's
         box empties) and are returned, in the order they were attached."""
         with self._lock:
+            self._ensure(course)
             d = self._drafts.get(course)
             want = set(photos) if isinstance(photos, (list, tuple)) else set()
             took = [p for p in (d["photos"] if d else []) if p in want]
@@ -195,6 +204,7 @@ class Drafts:
         with self._lock:
             self._seen.setdefault(course, {})[client] = time.monotonic()
             if not (epoch == self.epoch and isinstance(since, int) and self._dropped.get(course, 0) <= since <= self._seq):
+                self._ensure(course)
                 return {"epoch": self.epoch, "seq": self._seq, "events": [], "snapshot": {
                     "draft": self._public(course), "turns": [dict(t) for t in self._turns.get(course, {}).values()]}}
             wake = self._wake.setdefault(course, threading.Condition(self._lock))
@@ -231,21 +241,35 @@ class Drafts:
 
     # ------------------------------------------------------------ on disk
 
-    def _load(self):
-        if not self._path:
+    def _load(self, path=None, only=None):
+        """Read drafts from `path` (default: the one file); `only`: just that course's."""
+        path = path or self._path
+        if not path:
             return
         try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return
         for course, d in (data.items() if isinstance(data, dict) else []):
+            if only is not None and course != only:
+                continue
             if isinstance(d, dict) and isinstance(d.get("text"), str) and isinstance(d.get("rev"), int):
                 self._drafts[course] = _blank() | {k: d[k] for k in _blank() if k in d}
                 ph = self._drafts[course]["photos"]
                 self._drafts[course]["photos"] = [p for p in ph if isinstance(p, str)][:MAX_PHOTOS] if isinstance(ph, list) else []
 
+    def _ensure(self, course):
+        """(With the lock held.) A course's own file is read the first time it's asked about (path_for)."""
+        if not self._path_for or course in self._loaded:
+            return
+        self._loaded.add(course)
+        if course not in self._drafts:
+            path = self._path_for(course)
+            if path:
+                self._load(path, only=course)
+
     def _save_soon(self, locked=False):
-        if not self._path:
+        if not (self._path or self._path_for):
             return
         if not locked:
             with self._lock:
@@ -258,20 +282,27 @@ class Drafts:
 
     def flush(self):
         """Write the drafts now (also called when the hub stops)."""
-        if not self._path:
+        if not (self._path or self._path_for):
             return
         with self._lock:
             if self._timer:
                 self._timer.cancel()
                 self._timer = None
-            body = json.dumps(self._drafts, ensure_ascii=False, indent=1)
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._path.with_suffix(".tmp")
-            tmp.write_text(body, encoding="utf-8")
-            tmp.replace(self._path)
-        except OSError:
-            pass        # a draft not written to disk is still live in memory
+            if self._path:
+                files = [(self._path, json.dumps(self._drafts, ensure_ascii=False, indent=1))]
+            else:
+                files = [(self._path_for(c), json.dumps({c: d}, ensure_ascii=False, indent=1)) for c, d in self._drafts.items()]
+        for path, body in files:
+            if not path:
+                continue
+            try:
+                path = Path(path)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(body, encoding="utf-8")
+                tmp.replace(path)
+            except OSError:
+                pass        # a draft not written to disk is still live in memory
 
 
 def fold(items):
