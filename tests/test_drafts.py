@@ -1,18 +1,20 @@
 """Checks for the live course channel: Ask-box drafts and chat turns (drafts.py, /api/draft*, static/drafts.js). A plain script:
 
-    python test_drafts.py           # everything, including ~100 devices listening at once
-    python test_drafts.py --quick   # without the load check
+    python tests/test_drafts.py           # everything, including ~100 devices listening at once
+    python tests/test_drafts.py --quick   # without the load check
 
 Everything runs on a demo library in a temporary folder; no real course is touched. The browser-side merge and cursor checks run in Node.
 """
 import base64, http.client, json, queue, shutil, subprocess, sys, tempfile, threading, time, urllib.request
 from pathlib import Path
 
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))     # the modules under test live in the repo root
+
 import drafts as D
 import library as L
 import server
 
-HERE = Path(__file__).resolve().parent
 FAILED = []
 
 
@@ -390,7 +392,7 @@ def test_js():
     if not node:
         print("skip  js: Node isn't installed")
         return
-    r = subprocess.run([node, "-e", JS_TESTS, str(HERE / "static" / "drafts.js")], capture_output=True, text=True, timeout=30)
+    r = subprocess.run([node, "-e", JS_TESTS, str(REPO / "static" / "drafts.js")], capture_output=True, text=True, timeout=30)
     if r.returncode:
         check("js: the checks ran", False, r.stderr.strip()[:300])
         return

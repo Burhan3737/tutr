@@ -1,13 +1,16 @@
 """Checks for the voice features (reading aloud, dictation, voice turns). A plain script, no test framework:
 
-    python test_voice.py              # everything (loads the speech models: ~10 s warm, longer the first time)
-    python test_voice.py --no-models  # only the checks that need no models and no Claude
+    python tests/test_voice.py              # everything (loads the speech models: ~10 s warm, longer the first time)
+    python tests/test_voice.py --no-models  # only the checks that need no models and no Claude
 
 Nothing here calls Claude (run_model is replaced) or touches a real course: chats, memory and state live in a
 temporary folder.
 """
 import asyncio, base64, io, json, re, sys, tempfile, threading, time, types, wave
 from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))     # the modules under test live in the repo root
 
 import numpy as np
 
