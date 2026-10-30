@@ -1,5 +1,26 @@
-library/
+/library*/
 config.json
 .cache/
 __pycache__/
 agentTempWork/
+**/.claude/settings.local.json
+.env
+.env.*
+*.log
+.venv/
+venv/
+.pytest_cache/
+CLAUDE.local.md
+.mcp.json
+.opencode/
+.agentTempWork/
+.work/
+/*-work/
+migration-report.md
+# the example library stays a template: anything the hub writes into it is ignored
+example-library/*/me/*
+!example-library/*/me/progress.md
+!example-library/*/me/notes/
+example-library/*/me/notes/**
+!example-library/*/me/notes/Week1/
+!example-library/*/me/notes/Week1/notes.md
