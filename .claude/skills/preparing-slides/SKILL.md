@@ -48,8 +48,8 @@ create it with `## Deadlines` (`| Date | Item | Weight | Status | Covers |`), `#
 
 ### Add
 
-1. `python S/scripts/add.py C --list` shows each PDF in `sources/` that isn't a deck yet, with a default tag
-   (the file name), its role and week.
+1. `python S/scripts/add.py C --list` lists every PDF in `sources/` with its state (NEW, added,
+   prepared; "PDF changed" if it was replaced), a default tag, its role and week.
 2. Ask the student for a tag for each new deck — short and citable, e.g. `S&D-5`, `Ch3`, `U3-2`, `HW2` —
    offering the default. One line per deck: `sources/Week5/SupplyDemand5.pdf → S&D-5?`
 3. Per PDF: `python S/scripts/add.py C <pdf> --tag <tag>` (optional `--title`, `--week N`, `--order N`).

@@ -1,4 +1,4 @@
-// Study Hub — slide-first study with a tutor. Course → Topic → Deck → Slide.
+// Tutr — slide-first study with a tutor. Course → Topic → Deck → Slide.
 // Routes (hash): "" home · c=ID course · c=ID&d=TAG&s=N slide · c=ID&notes=PATH class notes ·
 //                review=ID reviews · upload=PID phone photo page
 "use strict";

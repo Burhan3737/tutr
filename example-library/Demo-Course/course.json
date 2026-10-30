@@ -1,0 +1,8 @@
+{
+  "code": "Demo-Course",
+  "title": "Introductory Economics (demo)",
+  "assessment_style": "a short closed-book quiz question: read a supply and demand situation, then calculate or explain the effect of a change, showing each step",
+  "topics": [
+    { "name": "Supply and Demand", "read_more": "Any introductory economics textbook, chapter on markets" }
+  ]
+}

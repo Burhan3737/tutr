@@ -1,4 +1,4 @@
-"""Study Hub: study your lecture slides, with a tutor that explains, gives worked examples, sets
+"""Tutr: study your lecture slides, with a tutor that explains, gives worked examples, sets
 practice problems, marks your work and brings your mistakes back for review.
 
     python server.py            # http://127.0.0.1:8765, this machine only
@@ -574,11 +574,12 @@ def start_tunnel(port, found):
 
 
 def _is_hub(port):
-    """True when a Study Hub answers on this port of this computer."""
+    """True when a Tutr answers on this port of this computer."""
     import urllib.request
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=1) as r:
-            return b"<title>Study Hub</title>" in r.read(4096)
+            head = r.read(4096)
+            return b"<title>Tutr</title>" in head or b"<title>Study Hub</title>" in head   # (also its earlier title)
     except OSError:
         return False
 
@@ -616,7 +617,7 @@ def _hub_window(pid):
 
 
 def stop_other_hubs(first, count=20):
-    """Close every Study Hub already running on this computer (its window, and its Cloudflare tunnel with it), so there
+    """Close every Tutr already running on this computer (its window, and its Cloudflare tunnel with it), so there
     is only ever one. Two hubs each keep their own live channel (drafts.py): devices on different ones never see each
     other's typing or answers. Returns the ports they were on."""
     stopped = []
@@ -655,7 +656,7 @@ def main():
     srv, wanted = None, args.port
     old = stop_other_hubs(wanted)
     if old:
-        print(f"Closed the Study Hub that was already running (port {', '.join(map(str, old))}): only one runs at a time,\n"
+        print(f"Closed the Tutr that was already running (port {', '.join(map(str, old))}): only one runs at a time,\n"
               "so every device sees the same live chat. Open the link below on your devices.\n")
     for args.port in range(wanted, wanted + 20):     # port taken (another app): try the next one
         try:
@@ -664,17 +665,17 @@ def main():
         except OSError:
             continue
     if not srv:
-        print(f"Ports {wanted}-{wanted + 19} are all in use. Close some other Study Hub windows and try again.")
+        print(f"Ports {wanted}-{wanted + 19} are all in use. Close some other Tutr windows and try again.")
         sys.exit(1)
     url = f"http://127.0.0.1:{args.port}/"
     if args.lan:
         PHONE_URL = f"http://{lan_ip()}:{args.port}/"
     if args.port != wanted:
-        print(f"Port {wanted} is already in use (another Study Hub window?), so this one uses port {args.port}.")
-    print(f"Study Hub is running on this computer: {url}")
+        print(f"Port {wanted} is already in use (another Tutr window?), so this one uses port {args.port}.")
+    print(f"Tutr is running on this computer: {url}")
     if args.lan:
         print(f"\nOn your phone or tablet (same Wi-Fi), open:\n\n    {PHONE_URL}\n\n"
-              "or scan the QR code in the Study Hub's ⋯ menu → Open on your phone.\n"
+              "or scan the QR code in Tutr's ⋯ menu → Open on your phone.\n"
               "Anyone on this network can open it. If Windows Firewall asks, allow Python on private networks.")
     tunnel, ready = None, threading.Event()
     if args.tunnel:
@@ -684,7 +685,7 @@ def main():
             ready.set()
             if link:
                 print(f"\nFrom anywhere (any Wi-Fi or mobile data), open:\n\n    {link}\n\n"
-                      "or scan the QR code in the Study Hub's ⋯ menu → Open on your phone.\n"
+                      "or scan the QR code in Tutr's ⋯ menu → Open on your phone.\n"
                       "Anyone with this link can open the hub, so don't share it. It changes every time the hub starts.")
             else:
                 print("\nThe Cloudflare tunnel didn't start (no internet?), so the hub works on this computer only.")

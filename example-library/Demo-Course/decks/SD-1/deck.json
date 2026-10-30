@@ -1,0 +1,11 @@
+{
+  "tag": "S&D-1",
+  "title": "Supply and demand 1",
+  "role": "lecture",
+  "week": 1,
+  "topic": "Supply and Demand",
+  "order": 1,
+  "pages": 3,
+  "prepared": true,
+  "source": "sources/Week1/SD1.pdf"
+}
