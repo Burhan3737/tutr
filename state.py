@@ -169,7 +169,8 @@ def set_note(cdir, rid, note):
 
 
 def get_review(cdir, rid):
-    return next((x for x in load(cdir)["reviews"] if x["id"] == rid), None)
+    """A saved mistake by id (an old warm-up item is ignored, as everywhere: practising it would bring warm-ups back)."""
+    return next((x for x in load(cdir)["reviews"] if x["id"] == rid and not x.get("warmup")), None)
 
 
 # ---------------------------------------------------------------- the course's chat
