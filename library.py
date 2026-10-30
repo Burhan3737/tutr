@@ -16,11 +16,27 @@ Everything comes from files the course folders already have:
 A deck that isn't in the CLAUDE.md table yet (new slides, not prepared) still shows up, under
 "Not sorted yet", with its images rendered from the PDF and its PDF text layer as the transcript.
 """
-import datetime as dt, os, re, threading
+import datetime as dt, json, os, re, threading
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-ROOT = Path(os.environ.get("STUDY_HUB_ROOT") or HERE.parent.parent).resolve()
+
+
+def _library_root():
+    """Where the courses live: STUDY_HUB_ROOT, else `library` in config.json at the repo root (a relative path is
+    relative to the repo root), else <repo>/library."""
+    env = os.environ.get("STUDY_HUB_ROOT")
+    if env:
+        return Path(env).resolve()
+    try:
+        cfg = json.loads((HERE / "config.json").read_text(encoding="utf-8"))
+        path = cfg.get("library") if isinstance(cfg, dict) else None
+    except (OSError, ValueError):
+        path = None
+    return (HERE / path).resolve() if path else (HERE / "library").resolve()
+
+
+ROOT = _library_root()
 WEEK_RE = re.compile(r"^Week(\d+)$", re.I)
 PRACTICE = "practice"   # course/practice/: homework and practice exams, no week folder
 PRACTICE_NAME = "Practice"   # what the hub calls them; never a topic
@@ -30,6 +46,8 @@ _CACHE = {}     # key -> (signature, value); rebuilt only when the underlying fi
 
 
 def course_dirs():
+    if not ROOT.is_dir():       # no library yet: no courses
+        return []
     return sorted(p for p in ROOT.iterdir() if p.is_dir() and (p / "study").is_dir())
 
 

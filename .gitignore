@@ -1,0 +1,5 @@
+library/
+config.json
+.cache/
+__pycache__/
+agentTempWork/
