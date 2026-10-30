@@ -54,7 +54,7 @@ Textbook PDFs are turned into searchable text the same way. The skill is describ
 ## Your files
 
 Everything in `library\<Course>\me\` is yours: `progress.md` (deadlines and the exam scope each test covers),
-`notes\` (your own writing, shown in the hub), `private\` (never shown), and the hub's own data (saved mistakes,
+`notes\` (your own writing, shown in the hub), `private\` (never shown in the hub; the tutor's direct reads are refused, but keep answer keys there, not secrets), and the hub's own data (saved mistakes,
 chats, practice records, the tutor's memory of you). The complete format is in
 [docs/library-format.md](docs/library-format.md).
 
@@ -77,7 +77,13 @@ From the repo root:
 python tests/test_drafts.py
 python tests/test_voice.py              # loads the speech models; add --no-models to skip them
 python .claude/skills/preparing-slides/tests/test_scripts.py
+python tests/test_layout.py             # the library layout, me/private, the migration, .gitignore
 ```
 
-The first two build a demo library in a temporary folder and never touch your courses. The skill's own test lives
+These build demo libraries in a temporary folder and never touch your courses. The skill's own test lives
 beside the skill because the skill is copied into each library.
+
+`tests/verify/` holds the tools used to check the hub against an older version on copies of the same data
+(`verify_hubs.py`: everything each hub shows, sends to the model and writes, compared), plus a short run with a real
+model (`live_smoke.py`) and a browser run (`browser_smoke.py`, needs Playwright). Each takes its paths as arguments
+and works on copies.
