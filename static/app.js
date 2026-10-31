@@ -3807,6 +3807,7 @@ function openMenu() {
   $("#slides-only-row").hidden = !c;
   if (c) { $("#slides-only").checked = slidesOnly(cid); $("#slides-only-course").textContent = c.code; }
   $("#dict-preview").checked = dictPreview();
+  api("/api/usage").then((u) => { $("#usage-sum").textContent = usageSum(u.this); }).catch(() => {});
   m.hidden = false;
   $("#menu-btn").setAttribute("aria-expanded", "true");
 }
@@ -3820,33 +3821,65 @@ $("#menu").addEventListener("click", (e) => {
   const act = e.target.closest("[data-act]")?.dataset.act;
   if (act === "history") { closeMenu(); showHistory(); }
   if (act === "phone") { closeMenu(); showPhoneQr(); }
+  if (act === "usage") { closeMenu(); showUsage(); }
 });
 
-async function showHistory() {
-  const list = $("#history-list");
-  list.replaceChildren(h("p", { class: "waiting" }, "Loading…"));
-  const cid = routeCourseId();
-  const course = cid && APP.courses[cid];
-  $("#history-title").textContent = course ? `History · ${course.code}` : "History";
-  $("#history-dlg").showModal();
-  const chats = (await api("/api/chats").catch(() => [])).filter((c) => !cid || c.course === cid);
-  list.replaceChildren();
-  if (!chats.length) list.append(h("p", { class: "muted" }, course ? `No tutor chats in ${course.code} yet.` : "No tutor chats yet."));
-  for (const c of chats) {
-    const open = () => { $("#history-dlg").close(); if (!c.deck) return go({ chat: c.id }); openChat(c.id); };
-    const title = renamable(c, "hist-title", () => { if (APP.deck && APP.deck.chat && APP.deck.chat.id === c.id) { APP.deck.chat.title = c.title; drawThread(); } });
-    const row = h("div", { class: "hist-row" },
-      starButton(c, () => { if (APP.deck && APP.deck.chat && APP.deck.chat.id === c.id) { APP.deck.chat.starred = c.starred; drawThread(); } }),
-      h("div", { class: "open" }, title,
-        h("button", { class: "hist-meta", type: "button", onclick: open },
-          `${c.code}${c.deck ? " · " + c.deck : ""} · ${c.count} question${c.count === 1 ? "" : "s"} · ${c.updated || c.created} · Open ›`)),
-      h("button", { class: "link quiet", type: "button", onclick: async () => {
-        if (!confirm(`Delete this chat?\n\n${c.title}`)) return;
-        await api("/api/chat/delete", { id: c.id, client: DRAFT.client }).catch(() => {});
-        row.remove();
-        if (APP.deck && APP.deck.chat && APP.deck.chat.id === c.id) { APP.deck.chat = null; drawThread(); }
-      } }, "Delete"));
-    list.append(row);
+// Tokens and cost of every model call, kept by the server across runs (a run: from the hub starting to it stopping).
+const kTok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : `${n}`);
+const tokTotal = (t) => t.in + t.cache_read + t.cache_write + t.out;
+const usd = (c) => `$${(+c || 0).toFixed(c && c < 0.01 ? 4 : 2)}`;
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+function usageSum(t) { return t.calls || t.failed ? `${kTok(tokTotal(t))} · ${usd(t.cost)}` : ""; }
+const tokParts = (t) => `${kTok(t.in)} new · ${kTok(t.cache_read)} cache read · ${kTok(t.cache_write)} cache write · ${kTok(t.out)} out`;
+const runWhen = (run) => run.slice(0, 16);
+
+function usageTotal(title, t) {
+  const counts = [plural(t.calls, "answer"), t.failed ? `${t.failed} failed` : "", t.unknown ? `${t.unknown} not fully known` : ""];
+  return h("div", { class: "usage-total" },
+    h("span", { class: "usage-label" }, title),
+    h("b", {}, `${kTok(tokTotal(t))} tokens · ${usd(t.cost)}`),
+    h("span", {}, counts.filter(Boolean).join(" · ")),
+    h("span", {}, tokParts(t)));
+}
+
+function usageRow(c) {
+  const who = APP.models.find((x) => x.id === c.model);
+  const head = c.tokens ? `${kTok(tokTotal(c.tokens))} tokens` : "Tokens unknown";
+  const cost = c.cost == null ? "cost unknown" : usd(c.cost);
+  return h("div", { class: "usage-row" + (c.error ? " failed" : "") },
+    h("b", {}, `${c.error ? "Failed · " : ""}${head} · ${cost}`),
+    h("span", {}, [c.at.slice(11), c.kind, c.course, who ? who.label : c.model, c.ms ? `${Math.round(c.ms / 1000)} s` : ""].filter(Boolean).join(" · ")),
+    c.tokens ? h("span", {}, tokParts(c.tokens)) : null,
+    c.error ? h("span", {}, c.error) : null);
+}
+
+async function showUsage() {
+  const body = $("#usage-body");
+  body.replaceChildren(h("p", { class: "waiting" }, "Loading…"));
+  $("#usage-dlg").showModal();
+  const u = await api("/api/usage").catch(() => null);
+  if (!u) return body.replaceChildren(h("p", { class: "muted" }, "Couldn't load usage."));
+  body.replaceChildren(
+    usageTotal(`This run · since ${runWhen(u.run)}`, u.this),
+    u.runs.length > 1 ? usageTotal(`All runs · ${plural(u.runs.length, "run")}`, u.all) : null);
+  body.append(...(u.calls.length ? u.calls.map(usageRow) : [h("p", { class: "muted" }, "No answers yet this run.")]));
+  const earlier = u.runs.filter((r) => r.run !== u.run);
+  if (!earlier.length) return;
+  body.append(h("p", { class: "usage-label usage-head" }, "Earlier runs"));
+  for (const r of earlier) {
+    const list = h("div", { class: "usage-calls", hidden: true });
+    const btn = h("button", { class: "usage-run", type: "button", "aria-expanded": "false", onclick: async () => {
+      const open = list.hidden;
+      list.hidden = !open;
+      btn.setAttribute("aria-expanded", String(open));
+      if (!open || list.childElementCount) return;
+      list.append(h("p", { class: "waiting" }, "Loading…"));
+      const got = await api(`/api/usage?run=${encodeURIComponent(r.run)}`).catch(() => null);
+      list.replaceChildren(...(got ? got.calls.map(usageRow) : [h("p", { class: "muted" }, "Couldn't load that run.")]));
+    } },
+      h("b", {}, `${runWhen(r.run)} · ${kTok(tokTotal(r))} tokens · ${usd(r.cost)}`),
+      h("span", {}, [plural(r.calls, "answer"), r.failed ? `${r.failed} failed` : ""].filter(Boolean).join(" · ") + " ›"));
+    body.append(btn, list);
   }
 }
 

@@ -41,6 +41,13 @@ CLAUDE_MODELS = {
 }
 DEFAULT_MODEL = "claude-opus-5-5"
 _LOG_LOCK = threading.Lock()
+# Every model call (an answer, or an attempt that failed) is one line in USAGE_FILE, tagged with the run (this hub's
+# start time), so the Usage panel shows this run, earlier ones and all of them; _USAGE is this run's totals, for the log.
+USAGE_FILE = WORK / "usage.jsonl"
+USAGE_KEEP = 500        # answers listed per run in the Usage panel (the totals count them all)
+_RUN = time.strftime("%Y-%m-%d %H:%M:%S")
+_USAGE = {"calls": 0, "failed": 0, "cost": 0.0, "in": 0, "cache_read": 0, "cache_write": 0, "out": 0}
+_USAGE_LOCK = threading.Lock()
 
 
 def log(msg):
@@ -93,8 +100,96 @@ def _opencode_session(session):
 
 def run_model(cdir, system, prompt, *, model, session=None, fork=False, schema=None, web=True, label="", chat_key=None,
               emit=None):
-    """Ask whichever engine the model belongs to. Returns {"text", "json", "session", "ms", "cost"}."""
+    """Ask whichever engine the model belongs to. Returns {"text", "json", "session", "ms", "cost", "tokens"}."""
     model = model if valid_model(model) else DEFAULT_MODEL
+    course = L.course_meta(cdir)[0]
+    t0 = time.time()
+    try:
+        r = _run_engine(cdir, system, prompt, model=model, session=session, fork=fork, schema=schema, web=web,
+                        label=label, chat_key=chat_key, emit=emit)
+    except TutorError as e:
+        ms = int((time.time() - t0) * 1000)
+        for u in getattr(e, "usage", None) or [{"cost": None, "tokens": None}]:
+            _count(u, label, model, course, ms, error=str(e))
+        raise
+    for u in r.get("failed") or []:     # an attempt that failed before the one that answered
+        _count(u, label, model, course, None, error="Failed, then retried")
+    _count(r, label, model, course, r.get("ms"))
+    return r
+
+
+def _count(u, label, model, course, ms, error=None):
+    """Record one call (an answer, or a failed attempt: error set) in the usage file and this run's totals.
+    A failed attempt known to have used nothing (e.g. it never got its turn) isn't recorded."""
+    t = u.get("tokens")
+    t = None if t is None else {k: int(t.get(k) or 0) for k in engine.TOKEN_KEYS}
+    cost = u.get("cost")
+    if error and cost is None and t is not None and not any(t.values()):
+        return
+    rec = {"run": _RUN, "at": time.strftime("%Y-%m-%d %H:%M:%S"), "kind": label or "call", "course": course,
+           "model": model, "ms": ms, "cost": cost, "tokens": t}
+    if error:
+        rec["error"] = error[:200]
+    with _USAGE_LOCK:
+        _USAGE["failed" if error else "calls"] += 1
+        _USAGE["cost"] += cost or 0
+        for k, v in (t or {}).items():
+            _USAGE[k] += v
+        line = usage_text()
+        try:
+            WORK.mkdir(exist_ok=True)
+            with open(USAGE_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec) + "\n")
+        except OSError as e:
+            line += f" (not saved: {e})"
+    log(f"usage since start: {line}")
+
+
+def _sum(rows):
+    """Totals for some usage records: answers, failed attempts, cost (known costs only), tokens (known only)."""
+    tot = {"calls": 0, "failed": 0, "unknown": 0, "cost": 0.0, **dict.fromkeys(engine.TOKEN_KEYS, 0)}
+    for r in rows:
+        tot["failed" if r.get("error") else "calls"] += 1
+        tot["cost"] += r.get("cost") or 0
+        if r.get("cost") is None or r.get("tokens") is None:
+            tot["unknown"] += 1
+        for k in engine.TOKEN_KEYS:
+            tot[k] += int((r.get("tokens") or {}).get(k) or 0)
+    return tot
+
+
+def usage(run=None):
+    """For the Usage panel: this run's totals, all runs' totals, each run's totals (newest first) and the answers of
+    one run (this one unless `run` is given), newest first."""
+    rows = []
+    with _USAGE_LOCK:
+        try:
+            with open(USAGE_FILE, encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        r = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(r, dict) and r.get("run"):
+                        rows.append(r)
+        except OSError:
+            pass
+    runs = {}
+    for r in rows:
+        runs.setdefault(r["run"], []).append(r)
+    run = run if run in runs else _RUN
+    return {"run": _RUN, "this": _sum(runs.get(_RUN, [])), "all": _sum(rows),
+            "runs": [{"run": k, **_sum(v)} for k, v in sorted(runs.items(), reverse=True)],
+            "shown": run, "calls": runs.get(run, [])[::-1][:USAGE_KEEP]}
+
+
+def usage_text():
+    u = _USAGE
+    return (f"calls={u['calls']} failed={u['failed']} {engine.tokens_text(u)} "
+            f"total={sum(u[k] for k in engine.TOKEN_KEYS)} cost={u['cost']:.4f}")
+
+
+def _run_engine(cdir, system, prompt, *, model, session, fork, schema, web, label, chat_key, emit):
     if model_engine(model) == "opencode":
         return opencode_engine.run(cdir, system, prompt, model=model, web=web, schema=schema, chat_key=chat_key,
                                    session=_opencode_session(session), fork=fork, emit=emit, log=log,
@@ -123,6 +218,8 @@ def close_chat(chat_key):
 
 def shutdown():
     """Stop both engines when the hub stops."""
+    with _USAGE_LOCK:
+        log(f"stop usage: {usage_text()}")
     for stop in (engine.shutdown, opencode_engine.shutdown):
         try:
             stop()

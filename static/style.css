@@ -167,7 +167,7 @@ main:has(> .viewer) { overflow: hidden; }
 .menu > button:hover, .menu-row:hover { background: var(--sunken); }
 .menu-row select { margin-left: auto; max-width: 175px; border: 1px solid var(--line-strong); border-radius: 6px;
   background: var(--surface); padding: 4px 6px; font-size: 13px; }
-.menu-row .muted { margin-left: auto; font-size: 13px; }
+.menu-row .muted, .menu > button .muted { margin-left: auto; font-size: 13px; }
 .menu-row input { width: 18px; height: 18px; accent-color: var(--accent); }
 .overlay { position: fixed; inset: 0; z-index: 60; background: rgba(20,18,26,.35); display: grid; justify-items: center;
   align-items: start; padding-top: 12vh; }
@@ -192,6 +192,20 @@ main:has(> .viewer) { overflow: hidden; }
 .hist-row .open { flex: 1; }
 .hist-row b { display: block; font-weight: 600; }
 .hist-row span { font-size: 13px; color: var(--text-2); }
+#usage-body { overflow: auto; max-height: calc(80vh - 72px); }
+.usage-total, .usage-row { display: flex; flex-direction: column; gap: 2px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.usage-total { padding-top: 12px; }
+.usage-total b, .usage-row b { font-weight: 600; }
+.usage-total + .usage-total { padding-top: 10px; }
+.usage-total span, .usage-row span, .usage-run span { font-size: 13px; color: var(--text-2); }
+.usage-row.failed b { color: var(--chip-mistake); }
+.usage-label { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-2); }
+.usage-head { margin: 16px 0 0; }
+.usage-run { display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 10px 0; border: 0;
+  border-bottom: 1px solid var(--line); background: none; text-align: left; cursor: pointer; color: var(--text); }
+.usage-run:hover { background: var(--sunken); }
+.usage-run b { font-weight: 600; }
+.usage-calls { padding-left: 12px; border-left: 2px solid var(--line); }
 
 /* ---------- home and course pages */
 .page { max-width: 600px; margin: 0 auto; padding: 72px 20px 96px; }

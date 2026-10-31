@@ -196,12 +196,116 @@ def describe(name, args, cdir):
     return name
 
 
+# ---------------------------------------------------------------- usage: each answer's tokens and cost
+# A result's `usage` is that turn's, but the main model's only. `model_usage` (every model, Claude Code's own small
+# calls too) and `total_cost_usd` are the process's running totals, and a process that resumes a session starts
+# from that session's saved totals (the last cost-state line in its transcript). So an answer's tokens and cost
+# are the totals after it minus the totals before it: for a chat just (re)opened, the resumed session's saved ones.
+
+TOKEN_KEYS = ("in", "cache_read", "cache_write", "out")
+ZERO_TOTALS = {"cost": 0.0, "models": {}}
+
+
+def tokens(usage):
+    """Token counts from a usage report: fresh input, cache reads, cache writes, output (thinking included)."""
+    u = usage or {}
+    n = lambda k: int(u.get(k) or 0)
+    return {"in": n("input_tokens"), "cache_read": n("cache_read_input_tokens"),
+            "cache_write": n("cache_creation_input_tokens"), "out": n("output_tokens")}
+
+
+def tokens_text(t):
+    if not t:
+        return "tokens=unknown"
+    return f"in={t['in']} cache_read={t['cache_read']} cache_write={t['cache_write']} out={t['out']}"
+
+
+def _totals(model_usage, cost):
+    """Running totals from a result's (or a cost-state line's) per-model usage and total cost."""
+    models = {}
+    for name, m in (model_usage or {}).items():
+        n = lambda k: int((m.get(k) if isinstance(m, dict) else getattr(m, k, 0)) or 0)
+        models[name] = {"in": n("inputTokens"), "cache_read": n("cacheReadInputTokens"),
+                        "cache_write": n("cacheCreationInputTokens"), "out": n("outputTokens")}
+    return {"cost": float(cost or 0), "models": models}
+
+
+def _saved_totals(cdir, session):
+    """The totals a process resuming `session` starts from: the last cost-state line in its transcript."""
+    if not session:
+        return ZERO_TOTALS
+    root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
+    path = root / re.sub(r"[^A-Za-z0-9]", "-", str(cdir)) / f"{session}.jsonl"
+    if not path.exists():       # (a long folder name is shortened differently)
+        path = next(root.glob(f"*/{session}.jsonl"), None)
+    found = ZERO_TOTALS
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if '"cost-state"' in line:
+                    o = json.loads(line)
+                    if o.get("type") == "cost-state":
+                        found = _totals(o.get("modelUsage"), o.get("totalCostUSD"))
+    except (OSError, TypeError, ValueError, AttributeError):
+        pass
+    return found
+
+
+def _turn_usage(now, before, usage):
+    """An answer's {"cost", "tokens"}: the totals `now` minus those `before` it. The turn's own `usage` (main model)
+    checks the start: if the process didn't start from `before` after all (a fork may not), it started from zero."""
+    main = tokens(usage)
+
+    def delta(b):
+        d = dict.fromkeys(TOKEN_KEYS, 0)
+        for name, t in now["models"].items():
+            for k in TOKEN_KEYS:
+                d[k] += t[k] - b["models"].get(name, {}).get(k, 0)
+        return d
+    fits = [(sum(d.values()), d, b) for b in (before, ZERO_TOTALS) for d in [delta(b)]
+            if all(d[k] >= main[k] for k in TOKEN_KEYS)]
+    if not fits:                # no per-model totals to go on: the main model's own count
+        cost = now["cost"] - before["cost"]
+        return {"cost": cost if cost >= 0 else now["cost"], "tokens": main}
+    _, d, b = min(fits, key=lambda f: f[0])
+    return {"cost": max(0.0, now["cost"] - b["cost"]), "tokens": d}
+
+
+def _seen(stats, mid, usage):
+    """Note a reply's usage as it streams (the same reply is reported more than once, its output growing)."""
+    if not mid or not usage:
+        return
+    t, cur = tokens(usage), stats.setdefault("msgs", {}).setdefault(mid, dict.fromkeys(TOKEN_KEYS, 0))
+    for k in TOKEN_KEYS:
+        cur[k] = max(cur[k], t[k])
+
+
+def _partial(stats):
+    """What an answer that failed had used so far: the replies that came back (cost unknown)."""
+    t = dict.fromkeys(TOKEN_KEYS, 0)
+    for m in stats.pop("msgs", {}).values():
+        for k in TOKEN_KEYS:
+            t[k] += m[k]
+    return {"cost": None, "tokens": t}
+
+
+def _failed(err, stats, last=None):
+    """Attach to an EngineError what each failed attempt used, for the usage counts."""
+    err.usage = stats.get("failed", []) + [last or _partial(stats)]
+    return err
+
+
 async def _consume(stream, emit, cdir, text_out=True, stats=None):
     result, thinking = None, False
     stats = stats if stats is not None else {}
     async for msg in stream:
         if isinstance(msg, StreamEvent):
             ev = msg.event or {}
+            if ev.get("type") == "message_start":
+                stats["cur"] = (ev.get("message") or {}).get("id")
+                _seen(stats, stats["cur"], (ev.get("message") or {}).get("usage"))
+            elif ev.get("type") == "message_delta":
+                _seen(stats, stats.get("cur"), ev.get("usage"))
             if ev.get("type") == "content_block_start" and (ev.get("content_block") or {}).get("type") == "thinking":
                 if not thinking and "first" not in stats:
                     emit("status", "Thinking it through")
@@ -210,6 +314,7 @@ async def _consume(stream, emit, cdir, text_out=True, stats=None):
                 stats.setdefault("first", time.time())
                 emit("text", ev["delta"]["text"])
         elif isinstance(msg, AssistantMessage):
+            _seen(stats, msg.message_id, msg.usage)
             for b in msg.content:
                 if isinstance(b, ToolUseBlock):
                     emit("status", describe(b.name, b.input, cdir))
@@ -223,10 +328,10 @@ async def _consume(stream, emit, cdir, text_out=True, stats=None):
 # ---------------------------------------------------------------- chats (one open client per course chat)
 
 class _Chat:
-    def __init__(self, client, sig):
+    def __init__(self, client, sig, totals):
         self.client, self.sig = client, sig
         self.last = time.time()
-        self.seen_cost = 0.0
+        self.totals = totals        # the process's running totals so far (a resumed one starts from its session's)
 
 
 _CHATS = {}
@@ -253,9 +358,10 @@ async def _open(key, cdir, system, model, web, session, fork=False, emit=None):
         if emit:
             emit("status", "Opening the conversation")
         resume = session if fork else _SESSIONS.get(key) or session
+        totals = await asyncio.to_thread(_saved_totals, cdir, resume)
         client = ClaudeSDKClient(_options(cdir, system, model, web, resume=resume, fork=fork))
         await client.connect()
-        c = _CHATS[key] = _Chat(client, sig)
+        c = _CHATS[key] = _Chat(client, sig, totals)
     c.last = time.time()
     return c
 
@@ -313,21 +419,23 @@ async def _chat(key, cdir, system, prompt, model, web, session, emit, fork=False
                     await _close(key)           # (the next turn starts again from the saved conversation)
                     if attempt == 2 or not isinstance(e, Exception) or isinstance(e, EngineError):
                         raise
+                    if stats is not None:
+                        stats.setdefault("failed", []).append(_partial(stats))
                     continue
                 c.last = time.time()
-                total = res.total_cost_usd or 0.0
-                cost, c.seen_cost = max(0.0, total - c.seen_cost), total      # the client reports a running total
+                now = _totals(res.model_usage, res.total_cost_usd)
+                used, c.totals = _turn_usage(now, c.totals, res.usage), now
                 if res.session_id:
                     _SESSIONS[key] = res.session_id
-                return res, cost
+                return res, used
     finally:
         lock.release()
 
 
-async def _one_shot(cdir, system, prompt, model, web, schema, emit):
+async def _one_shot(cdir, system, prompt, model, web, schema, emit, stats):
     res = await _consume(query(prompt=prompt, options=_options(cdir, system, model, web, schema=schema, partial=False)),
-                         emit, cdir, text_out=False)       # (no partial messages: no thinking status either)
-    return res, res.total_cost_usd or 0.0
+                         emit, cdir, text_out=False, stats=stats)  # (no partial messages: no thinking status either)
+    return res, _turn_usage(_totals(res.model_usage, res.total_cost_usd), ZERO_TOTALS, res.usage)
 
 
 # ---------------------------------------------------------------- the one entry point
@@ -336,7 +444,8 @@ def run(cdir, system, prompt, *, model, web=True, schema=None, chat_key=None, se
         log=None, label=""):
     """Ask Claude. chat_key set → a turn in that chat's open client; otherwise a one-off query.
     fork → start from a copy of `session` (a side question): the original conversation is left untouched.
-    Returns {"text", "json", "session", "ms", "cost"}; raises EngineError."""
+    Returns {"text", "json", "session", "ms", "cost", "tokens", "failed"} ("failed": what earlier attempts that
+    failed had used); raises EngineError, with .usage: what each failed attempt used."""
     emit = emit or (lambda kind, data: None)
     t0 = time.time()
     if not SDK:
@@ -344,35 +453,37 @@ def run(cdir, system, prompt, *, model, web=True, schema=None, chat_key=None, se
                         label=label)
     stats = {}
     coro = (_chat(chat_key, cdir, system, prompt, model, web, session, emit, fork, stats) if chat_key     # (times itself)
-            else asyncio.wait_for(_one_shot(cdir, system, prompt, model, web, schema, emit), TIMEOUT))
+            else asyncio.wait_for(_one_shot(cdir, system, prompt, model, web, schema, emit, stats), TIMEOUT))
     fut = asyncio.run_coroutine_threadsafe(coro, _loop())
     try:
-        res, cost = fut.result(QUEUE_TIMEOUT + TIMEOUT + 30)
-    except EngineError:
-        raise
+        res, used = fut.result(QUEUE_TIMEOUT + TIMEOUT + 30)
+    except EngineError as e:
+        raise _failed(e, stats)
     except (asyncio.TimeoutError, TimeoutError):
         fut.cancel()
-        raise EngineError("That took too long. Try again.", 504)
+        raise _failed(EngineError("That took too long. Try again.", 504), stats)
     except Exception as e:
         if log:
             log(f"{label} failed: {type(e).__name__}: {str(e)[:300]}")
         if "CLINotFound" in type(e).__name__:
             raise EngineError("Claude Code isn't installed or isn't on PATH. Install it, then restart the hub.", 500)
-        raise EngineError("Claude didn't answer. Check that Claude Code is signed in, then try again.")
+        raise _failed(EngineError("Claude didn't answer. Check that Claude Code is signed in, then try again."), stats)
     ms = int((time.time() - t0) * 1000)
     if res.is_error or res.subtype not in ("success", None):
         if log:
-            log(f"{label} error: subtype={res.subtype} {str(res.result)[:200]!r}")
+            log(f"{label} error: subtype={res.subtype} {str(res.result)[:200]!r} cost={used['cost']:.4f} "
+                f"{tokens_text(used['tokens'])}")
         if res.subtype == "error_max_turns":
-            raise EngineError("Claude ran out of look-up steps. Try a narrower question.")
-        raise EngineError("Claude reported an error. Try again in a moment.")
+            raise _failed(EngineError("Claude ran out of look-up steps. Try a narrower question."), stats, used)
+        raise _failed(EngineError("Claude reported an error. Try again in a moment."), stats, used)
     if schema and not isinstance(res.structured_output, dict):
-        raise EngineError("Claude's answer came back in the wrong shape. Try again.")
+        raise _failed(EngineError("Claude's answer came back in the wrong shape. Try again."), stats, used)
     if log:
         first = f" first={int((stats['first'] - t0) * 1000)}" if "first" in stats else ""
         log(f"{label} engine=sdk model={model} turns={res.num_turns} denied={len(res.permission_denials or [])} "
-            f"ms={ms}{first} cost={cost:.4f}")
-    return {"text": res.result or "", "json": res.structured_output, "session": res.session_id, "ms": ms, "cost": cost}
+            f"ms={ms}{first} cost={used['cost']:.4f} {tokens_text(used['tokens'])}")
+    return {"text": res.result or "", "json": res.structured_output, "session": res.session_id, "ms": ms,
+            "cost": used["cost"], "tokens": used["tokens"], "failed": stats.get("failed", [])}
 
 
 def shutdown():
@@ -429,6 +540,8 @@ def _run_cli(cdir, system, prompt, *, model, web, schema, session, log, label, f
         cmd += ["--resume", session] + (["--fork-session"] if fork else [])
     if schema:
         cmd += ["--json-schema", json.dumps(schema)]
+    unknown = {"cost": None, "tokens": None}
+    before = _saved_totals(cdir, session)
     t0 = time.time()
     try:
         proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, encoding="utf-8",
@@ -436,23 +549,25 @@ def _run_cli(cdir, system, prompt, *, model, web, schema, session, log, label, f
     except FileNotFoundError:
         raise EngineError("The claude command isn't on PATH. Install Claude Code, then restart the hub.", 500)
     except subprocess.TimeoutExpired:
-        raise EngineError("That took too long. Try again.", 504)
+        raise _failed(EngineError("That took too long. Try again.", 504), {}, unknown)
     ms = int((time.time() - t0) * 1000)
     try:
         data = json.loads(proc.stdout)
     except json.JSONDecodeError:
         if log:
             log(f"{label} failed: {(proc.stderr or proc.stdout)[-300:]!r}")
-        raise EngineError("Claude didn't answer. Check that Claude Code is signed in, then try again.")
+        raise _failed(EngineError("Claude didn't answer. Check that Claude Code is signed in, then try again."), {},
+                      unknown)
+    used = _turn_usage(_totals(data.get("modelUsage"), data.get("total_cost_usd")), before, data.get("usage"))
     if data.get("subtype") == "error_max_turns":
-        raise EngineError("Claude ran out of look-up steps. Try a narrower question.")
+        raise _failed(EngineError("Claude ran out of look-up steps. Try a narrower question."), {}, used)
     if data.get("is_error"):
-        raise EngineError("Claude reported an error. Try again in a moment.")
+        raise _failed(EngineError("Claude reported an error. Try again in a moment."), {}, used)
     if schema and not isinstance(data.get("structured_output"), dict):
-        raise EngineError("Claude's answer came back in the wrong shape. Try again.")
-    cost = data.get("total_cost_usd") or 0
+        raise _failed(EngineError("Claude's answer came back in the wrong shape. Try again."), {}, used)
     if log:
         log(f"{label} engine=cli model={model} turns={data.get('num_turns')} "
-            f"denied={len(data.get('permission_denials') or [])} ms={ms} cost={cost:.4f}")
+            f"denied={len(data.get('permission_denials') or [])} ms={ms} cost={used['cost']:.4f} "
+            f"{tokens_text(used['tokens'])}")
     return {"text": data.get("result", ""), "json": data.get("structured_output"), "session": data.get("session_id"),
-            "ms": ms, "cost": cost}
+            "ms": ms, "cost": used["cost"], "tokens": used["tokens"], "failed": []}

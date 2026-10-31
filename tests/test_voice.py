@@ -257,7 +257,7 @@ def test_engine_turns():
             if self.dead:
                 raise RuntimeError("process killed mid-answer")
             events.append(("end", self.prompt))
-            yield types.SimpleNamespace(total_cost_usd=0.0, session_id=f"s-{self.prompt}")
+            yield types.SimpleNamespace(total_cost_usd=0.0, usage=None, model_usage=None, session_id=f"s-{self.prompt}")
 
         async def disconnect(self):
             self.dead = True

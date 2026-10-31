@@ -274,6 +274,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             rec = T.get_practice(qs.get("id"))
             return self._json(T.public_problem(rec) | {"photos": len(rec.get("photos", []))}) if rec else \
                 self._json({"error": "That problem has expired."}, 404)
+        if path == "/api/usage":        # tokens and cost: this run, all runs, and one run's calls (this one, or ?run=)
+            return self._json(T.usage(qs.get("run")))
         if path == "/api/models":       # Claude Code's models, then OpenCode's, each with an intelligence score
             return self._json(T.model_catalog())
         if path == "/api/phone":

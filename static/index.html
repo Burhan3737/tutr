@@ -35,6 +35,7 @@
   <label class="menu-row" id="slides-only-row"><input type="checkbox" id="slides-only"> Stick to slides <span class="muted" id="slides-only-course"></span></label>
   <label class="menu-row" id="dict-preview-row"><input type="checkbox" id="dict-preview"> Show words while dictating</label>
   <button role="menuitem" type="button" data-act="phone" id="phone-item" hidden>Open on your phone</button>
+  <button role="menuitem" type="button" data-act="usage">Usage <span class="muted" id="usage-sum"></span></button>
 </div>
 
 <div class="overlay" id="search" hidden>
@@ -47,6 +48,11 @@
 <dialog class="dlg" id="history-dlg">
   <div class="dlg-head"><h2 id="history-title">History</h2><form method="dialog"><button class="icon-btn" aria-label="Close">×</button></form></div>
   <div id="history-list"></div>
+</dialog>
+
+<dialog class="dlg" id="usage-dlg">
+  <div class="dlg-head"><h2>Usage</h2><form method="dialog"><button class="icon-btn" aria-label="Close">×</button></form></div>
+  <div id="usage-body"></div>
 </dialog>
 
 <dialog class="dlg" id="qr-dlg">

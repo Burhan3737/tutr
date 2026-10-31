@@ -451,7 +451,7 @@ def _poll_idle(turn):
 
 
 def _answer(sid, prompt, cdir, emit):
-    """Send one prompt and wait for the answer. Returns (text, cost)."""
+    """Send one prompt and wait for the answer. Returns (text, cost, tokens)."""
     turn = _Turn(sid, cdir, emit)
     with _TURNS_LOCK:
         _TURNS[sid] = turn
@@ -473,10 +473,10 @@ def _answer(sid, prompt, cdir, emit):
         if not turn.ok:
             raise EngineError(turn.error or "OpenCode stopped before answering. Try again.", 502)
         streamed, cost = "".join(turn.parts), turn.cost
-        final, read_cost = _read_back(sid, since)      # the deltas are only a live view; this is the answer
+        final, read_cost, tokens = _read_back(sid, since)      # the deltas are only a live view; this is the answer
         if read_cost:
             cost = read_cost
-        return (final or streamed), cost
+        return (final or streamed), cost, tokens
     finally:
         with _TURNS_LOCK:
             if _TURNS.get(sid) is turn:
@@ -484,11 +484,12 @@ def _answer(sid, prompt, cdir, emit):
 
 
 def _read_back(sid, since):
-    """The turn's final text and cost from the session's messages (newest-first from the server)."""
+    """The turn's final text, cost and token counts from the session's messages (newest-first from the server)."""
+    tokens = {"in": 0, "cache_read": 0, "cache_write": 0, "out": 0}
     try:
         msgs = _messages(sid)
     except EngineError:
-        return "", 0.0
+        return "", 0.0, tokens
     got = [m for m in msgs if m.get("type") == "assistant"
            and float((m.get("time") or {}).get("created") or 0) >= since - 500]
     got.sort(key=lambda m: float((m.get("time") or {}).get("created") or 0))
@@ -498,9 +499,15 @@ def _read_back(sid, since):
     for m in got:
         try:
             cost += float(m.get("cost") or 0)
-        except (TypeError, ValueError):
+            t = m.get("tokens") or {}
+            cache = t.get("cache") or {}
+            tokens["in"] += int(t.get("input") or 0)
+            tokens["cache_read"] += int(cache.get("read") or 0)
+            tokens["cache_write"] += int(cache.get("write") or 0)
+            tokens["out"] += int(t.get("output") or 0) + int(t.get("reasoning") or 0)
+        except (TypeError, ValueError, AttributeError):
             pass
-    return text.strip(), cost
+    return text.strip(), cost, tokens
 
 
 # ---------------------------------------------------------------- the public calls (the same shape as engine.py)
@@ -509,7 +516,8 @@ def run(cdir, system, prompt, *, model, web=True, schema=None, chat_key=None, se
         log=None, label=""):
     """Ask an OpenCode model. chat_key set -> that chat's session; otherwise a one-off query.
     fork -> start from a copy of `session` (a side question): the original conversation is left untouched.
-    Returns {"text", "json", "session", "ms", "cost"}; raises EngineError."""
+    Returns {"text", "json", "session", "ms", "cost", "tokens", "failed"}; raises EngineError, with .usage: what the
+    failed answer used."""
     emit = emit or _NOOP
     log = log or _log
     t0 = time.time()
@@ -535,36 +543,44 @@ def run(cdir, system, prompt, *, model, web=True, schema=None, chat_key=None, se
         if rec is not None:
             rec["session"] = sid
         if schema:
-            text, cost = _answer(sid, prompt + SCHEMA_SUFFIX + json.dumps(schema, ensure_ascii=False), cdir, emit)
+            text, cost, tokens = _answer(sid, prompt + SCHEMA_SUFFIX + json.dumps(schema, ensure_ascii=False), cdir, emit)
             try:
                 obj = _json_from(text)
             except (ValueError, TypeError):
                 retry = ("Your last reply could not be read as JSON. Answer the same request again, returning only "
                          "one JSON object matching the schema, with no Markdown fences and no other text.")
-                text, cost2 = _answer(sid, retry, cdir, emit)
+                text, cost2, tokens2 = _answer(sid, retry, cdir, emit)
                 cost += cost2
+                tokens = {k: tokens[k] + tokens2[k] for k in tokens}
                 try:
                     obj = _json_from(text)
                 except (ValueError, TypeError):
                     raise EngineError("OpenCode didn't return the required JSON. Try again.", 502)
         else:
-            text, cost = _answer(sid, prompt, cdir, emit)
+            text, cost, tokens = _answer(sid, prompt, cdir, emit)
             obj = None
         if not (text or "").strip():
             raise EngineError("OpenCode stopped before answering. Try again.", 502)
         ms = int((time.time() - t0) * 1000)
-        log(f"{label} {model} ms={ms} cost={cost:.4f}")
-        return {"text": text, "json": obj, "session": sid, "ms": ms, "cost": cost}
-    except EngineError:
-        raise
+        log(f"{label} {model} ms={ms} cost={cost:.4f} {engine.tokens_text(tokens)}")
+        return {"text": text, "json": obj, "session": sid, "ms": ms, "cost": cost, "tokens": tokens, "failed": []}
+    except EngineError as e:
+        raise _failed(e, sid, t0)
     except Exception as e:
         log(f"{label} failed: {type(e).__name__}: {str(e)[:300]}")
-        raise EngineError("OpenCode couldn't answer. Try again.", 502)
+        raise _failed(EngineError("OpenCode couldn't answer. Try again.", 502), sid, t0)
     finally:
         if ephemeral and sid:
             _http("DELETE", f"/api/session/{sid}", timeout=20)
         if held and rec is not None:
             rec["lock"].release()
+
+
+def _failed(err, sid, t0):
+    """Attach to an EngineError what the failed answer used (its replies so far), for the usage counts."""
+    _, cost, tokens = _read_back(sid, t0 * 1000) if sid else ("", 0.0, dict.fromkeys(engine.TOKEN_KEYS, 0))
+    err.usage = [{"cost": cost, "tokens": tokens}]
+    return err
 
 
 def open_chat(chat_key, cdir, system, *, model, web=True, session=None, log=None):
