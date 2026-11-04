@@ -1395,6 +1395,7 @@ function liveTurn(kind, t) {
   else if (kind === "turn_text") liveFeed(r, t.text);
   else {
     clearTimeout(r.timer);
+    if (r.pending) { r.ans.feed(r.pending); r.pending = ""; }       // (the last piece, still waiting to be painted)
     REMOTE.delete(t.turn);
     TURNS.delete(r);
     if (kind === "turn_done") liveRefresh(t.chat, r);
@@ -1430,7 +1431,8 @@ async function liveRefresh(chatId, r) {
     chat.messages = chat.messages.map((m, i) => (old.messages[i] && old.messages[i].role === m.role && old.messages[i].text === m.text ? old.messages[i] : m));
   else if (old) deck.chats = [{ id: old.id, title: old.title, updated: old.updated }, ...(deck.chats || []).filter((c) => c.id !== chat.id)].slice(0, 5);
   deck.chat = chat;
-  if ($("#thread")) drawThread();
+  // (Its answer, written here as it streamed, keeps its drawings as drawn.)
+  if ($("#thread")) drawThread(r && r.ans.root.isConnected ? { root: r.ans.root, text: r.ans.text() } : null);
   else updateComposeHint();
 }
 
@@ -1583,7 +1585,9 @@ function updateComposeHint() {
   if (DICT.state !== "idle") dictShow();          // still dictating: keep "Listening…" in the box
 }
 
-function drawThread() {
+// carry: { root, text }, an answer written on the page (answerView) that the chat now has saved: the finished one takes
+// its drawings as drawn (keepDrawings), so nothing moves.
+function drawThread(carry = null) {
   const th = $("#thread");
   if (!th) return;
   th.replaceChildren();
@@ -1600,11 +1604,17 @@ function drawThread() {
       ...earlier.map((c) => h("button", { class: "link", type: "button", onclick: () => openChat(c.id) }, c.starred ? `★ ${c.title}` : c.title))));
   }
   const spoken = VOICE.view && VOICE.view.msg;
+  let carryAt = -1;        // (the newest answer with its text: an older one may say the same)
+  if (carry) msgs.forEach((m, i) => { if (m.role !== "q" && m.text === carry.text) carryAt = i; });
   msgs.forEach((m, i) => {
     if (m.role === "q") th.append(qMeta(h("p", { class: "msg-q" }, m.spoken || m.mode === "voice" ? `🎙 ${m.text}` : m.text, h("span", { class: "where" }, msgWhere(m, APP.deck.chat, APP.deck.tag)),
       m.photos && m.photos.length ? photoThumbs(APP.deck.course, m.photos) : null), m));
     else if (m === spoken) th.append(VOICE.view.root);
-    else th.append(answerEl(m, i === msgs.length - 1 && !TURNS.size));
+    else {
+      const el = answerEl(m, i === msgs.length - 1 && !TURNS.size);
+      if (i === carryAt) keepDrawings(carry.root, el);
+      th.append(el);
+    }
   });
   for (const t of TURNS) t.place(th);
   if (VOICE.view && !VOICE.view.root.isConnected) stopSpeaking();      // (its answer went with another deck)
@@ -1692,11 +1702,11 @@ function viewSwitch() {
 }
 
 // An answer as it is written. answerView(course, { paced }) returns { root, feed(chunk), end(text?), revealTo(i)
-// (resolves once the drawings shown are drawn), glow(start, end), showAll(), settle, msg }. While it is written its
-// drawings go up in .ans-draw, above its text, one figure each in order: an ```svg drawing element
-// by element as it streams (svgStream), Mermaid and plots whole once their block closes. The text goes in the
-// .msg-a under it, finished blocks rendered once. Once it is all shown and the stream has ended, settle() (set by
-// the caller) swaps in the finished answer (answerEl), its drawings in their place in the text.
+// (resolves once the drawings shown are drawn), glow(start, end), showAll(), settle, msg, text() (the raw text so
+// far) }. The text goes in its .msg-a, finished blocks rendered once, and each drawing in its place in the text, at
+// the size the finished answer gives it: an ```svg drawing element by element as it streams (svgStream), Mermaid and
+// plots whole once their block closes. Once it is all shown and the stream has ended, settle() (set by the caller)
+// swaps in the finished answer (answerEl), laid out the same.
 // Unpaced (Text), the answer shows as it streams. Paced (Voice), only up to revealTo(i), an offset in the raw text
 // (cues included): the text up to there, and a drawing once i reaches its fence; showAll() shows the rest.
 // glow(start, end): the sentences of raw text [start, end) are being spoken (.spoken); glow(start, end, true): the
@@ -1705,8 +1715,8 @@ function viewSwitch() {
 // revealed; a part drawn before any cue names it stays shown. The latest revealed cued sentence lights its parts.
 const DRAWING = /^ {0,3}(```|~~~)\s*(mermaid|svg|plot)\b/;
 function answerView(course, { paced = false } = {}) {
-  const draw = h("div", { class: "ans-draw" }), done = h("div"), tail = h("div");
-  const root = h("div", { class: "ans live" }, draw, h("div", { class: "msg-a", onclick: (e) => tapCues(e, root) }, done, tail));
+  const done = h("div"), tail = h("div");      // (done: the text and drawings written; tail: the text after, still coming)
+  const root = h("div", { class: "ans live" }, h("div", { class: "msg-a", onclick: (e) => tapCues(e, root) }, done, tail));
   const st = root.cue = { build: true, shown: new Set(), on: [], named: new Set() };
   // taken: the raw text already written or drawn; open: the svg drawing streaming in at `taken`; figs: drawings done;
   // live: drawn on as it goes up (streamed in, or paced: even an answer that arrived whole before its first paint);
@@ -1716,15 +1726,14 @@ function answerView(course, { paced = false } = {}) {
   let drawn = Promise.resolve();      // the drawings put up so far are drawn (Mermaid renders later)
   const got = (n) => { if (live) fresh.push(n); };
   const pens = () => {
-    if (!draw.isConnected) return;
+    if (!root.isConnected) return;
     let k = 0;
     fresh = fresh.filter((n) => { const r = penOn(n, k); if (r.did) k++; return r.left; });
   };
   const shownTo = () => (all || !paced ? acc.length : Math.min(upto, acc.length));
   const write = (md, at = taken) => { if (md.trim()) done.append(...fromMd(cueMd(md, course, at), md, at)); };
   const paint = () => {
-    const was = said && $(".spoken", root);
-    if (was) track = inThread(was);       // (scrolled away from it: stay there; back on it: follow again)
+    if (said) track = inThread(last) ?? track;       // (scrolled away from it: stay there; back on it: follow again)
     for (const m of acc.matchAll(CUE)) st.named.add(m[1]);      // first: a part drawn now must know it is named
     const lim = shownTo(), final = ended && lim >= acc.length;
     tail.replaceChildren();
@@ -1756,8 +1765,8 @@ function answerView(course, { paced = false } = {}) {
         else if (/^\s*(```|~~~)\s*svg/.test(block) && (all || !paced)) {
           if (!open) open = svgStream();
           if (nl > 0 && open.feed(block.slice(nl + 1), got)) {
-            open.el = draw.appendChild(h("div", { class: "ans-fig" }, open.fig));
-            drawn = fitDrawings(draw).then(cues);
+            open.el = done.appendChild(h("div", { class: "ans-fig" }, open.fig));
+            drawn = liveDrawings(done).then(cues);
           }
         } else if (/mermaid/.test(block.slice(0, nl < 0 ? 20 : nl))) loadMermaid().catch(() => {});   // it loads meanwhile
         if (final) {           // never closed: what was drawn of it stays, otherwise its source is text
@@ -1776,9 +1785,9 @@ function answerView(course, { paced = false } = {}) {
       // Nothing streamed (no viewBox, or it arrived whole), or a piece it couldn't read: drawn whole.
       if (!el || !open.count || !open.sound()) {
         const fig = h("div", { class: "ans-fig" }, ...renderMd(src, course).childNodes);
-        if (el) { fresh = fresh.filter((n) => !el.contains(n)); el.replaceWith(fig); } else draw.append(fig);
+        if (el) { fresh = fresh.filter((n) => !el.contains(n)); el.replaceWith(fig); } else done.append(fig);
         el = fig;
-        drawn = fitDrawings(draw).then(cues);       // (inlines the svg at once; Mermaid draws later)
+        drawn = liveDrawings(done).then(cues);       // (inlines the svg at once; Mermaid draws later)
         $$(".cue-svg", fig).forEach((s) => [...s.children].forEach((n) => { if (n.localName !== "defs") got(n); }));
       }
       open = null;
@@ -1789,12 +1798,16 @@ function answerView(course, { paced = false } = {}) {
     glowText(root, said);      // (the text was written again: the sentence being said glows again)
     keep();
   };
-  // The sentence being said stays in view while the student follows it.
-  let track = true;     // (declared here, used by paint, revealTo and glow)
-  const keep = () => { const sp = said && track && $(".spoken", root); if (sp && root.isConnected) keepInView(sp); };
+  // What is being said (the sentence, or the drawing it describes) stays in view while the student follows it.
+  // last: what that was, last time, so a student who scrolled away from it isn't taken back.
+  let track = true, last = [];     // (declared here, used by paint, revealTo and glow)
+  const keep = () => {
+    last = said && root.isConnected ? followed(root, acc.slice(said[0], said[1])) : [];
+    if (track && last.length) keepInView(last);
+  };
   // Which parts show and which are lit, from the text revealed so far (while this answer is building its drawing).
   const cues = () => {
-    if (root.cue !== st || !draw.isConnected) return;
+    if (root.cue !== st || !root.isConnected) return;
     const lim = shownTo(), shown = acc.slice(0, lim);
     st.on = [];
     for (const p of cueSplit(shown)) if (p.cues.length) { p.cues.forEach((id) => st.shown.add(id)); st.on = p.cues; }
@@ -1812,23 +1825,22 @@ function answerView(course, { paced = false } = {}) {
     applyCues(root);
   };
   const view = {
-    root, msg: null, settle: null,
+    root, msg: null, settle: null, text: () => acc,
     following: () => paced && upto > 0 && track,       // (the student follows the voice: the end follows too)
     feed: (chunk) => { acc += chunk; live = true; paint(); },
     // The answer is complete (final: the saved text, in case it isn't what streamed).
     end: (final) => {
       if (final != null && final !== acc) {
-        if (!final.startsWith(acc)) { draw.replaceChildren(); done.replaceChildren(); taken = 0; open = null; figs = []; }
+        if (!final.startsWith(acc)) { done.replaceChildren(); taken = 0; open = null; figs = []; }      // (its drawings too)
         acc = final;
       }
       ended = true;
       if (paced && !all) paint(); else view.showAll();
     },
-    // (Following the newest words down, unless the student scrolled up; the sentence being said stays in view while
-    // the student follows it: decided before this scrolls.)
+    // (Following the newest words down, unless the student scrolled up; what is being said stays in view while the
+    // student follows it: decided before this scrolls.)
     revealTo: (i) => {
-      const was = $(".spoken", root);
-      track = !was || inThread(was);       // (the student is following it, or it's the first)
+      track = inThread(last) ?? true;       // (the student is following it, or it's the first)
       if (i > upto) {
         const th = root.closest(".thread"), follow = th && th.scrollHeight - th.scrollTop - th.clientHeight < 80;
         upto = i;
@@ -1862,6 +1874,7 @@ function playView(root, m) {
   inlineDrawings(root);
   litOnly(root);
   const st = root.cue = { build: false, shown: new Set(), on: [] };
+  let last = [];        // what was being said (a sentence, or the drawing it describes), as answerView keeps it
   return {
     root, msg: m,
     revealTo: (i) => {
@@ -1870,12 +1883,13 @@ function playView(root, m) {
       if (root.cue === st) applyCues(root);
       return Promise.resolve();
     },
-    // The glow stays in view while the student follows it (it was in view, or it's the first).
+    // What is being said stays in view while the student follows it (it was in view, or it's the first). (revealTo
+    // has lit the parts this sentence names.)
     glow: (s, e, whole = false) => {
-      const was = $(".spoken", root), follow = !was || inThread(was);
+      const follow = inThread(last) ?? true;
       glowText(root, s == null ? null : [s, e, whole]);
-      const now = $(".spoken", root);
-      if (now && follow) keepInView(now);
+      last = s == null ? [] : followed(root, m.text.slice(s, e));
+      if (last.length && follow) keepInView(last);
     },
     showAll: () => { glowText(root, null); if (root.cue === st) endCues(root); },
   };
@@ -1939,17 +1953,40 @@ function threadView(th) {
   }
   return { top, bottom: t.bottom };
 }
-function inThread(el) {
-  const th = el.closest(".thread");
-  if (!th) return false;
-  const r = el.getBoundingClientRect(), v = threadView(th);
+// The box around els (those on the page with a box: a part not drawn has none), or null.
+function rectOf(els) {
+  const rs = els.filter((el) => el.isConnected).map((el) => el.getBoundingClientRect()).filter((r) => r.width || r.height);
+  if (!rs.length) return null;
+  return { top: Math.min(...rs.map((r) => r.top)), bottom: Math.max(...rs.map((r) => r.bottom)) };
+}
+// What a voice reading keeps in view, as a list of elements: the drawing the sentence being said (its raw text, said)
+// describes, if one of its cues lit parts of it (the whole figure if it fits the thread, otherwise just the lit
+// parts); otherwise that sentence.
+function followed(root, said) {
+  const lit = /\[#[A-Za-z]/.test(said) ? $$(".cue-on", root) : [];
+  const figs = [...new Set(lit.map((el) => el.closest(".diagram")))], th = root.closest(".thread");
+  if (th && rectOf(lit)) {       // (lit parts with no box: the sentence)
+    const v = threadView(th);
+    return figs.length === 1 && figs[0] && figs[0].getBoundingClientRect().height <= v.bottom - v.top - 16 ? figs : lit;
+  }
+  const sp = $(".spoken", root);
+  return sp ? [sp] : [];
+}
+// Whether els (an element, or a list: see followed) are in the thread's view; null if none is on the page (with a box).
+function inThread(els) {
+  els = [els].flat();
+  const r = rectOf(els), th = r && els.find((el) => el.isConnected).closest(".thread");
+  if (!th) return r ? false : null;
+  const v = threadView(th);
   return r.bottom > v.top && r.top < v.bottom;
 }
-function keepInView(el) {       // (scrolls only the thread, never the page; a tall sentence shows from its start)
-  const th = el.closest(".thread");
+function keepInView(els) {       // (scrolls only the thread, never the page; something tall shows from its start)
+  els = [els].flat();
+  const th = els.find((el) => el.isConnected)?.closest(".thread");
   if (!th) return;
-  for (let k = 0; k < 2; k++) {      // (scrolling can pin or unpin a drawing: look again once)
-    const r = el.getBoundingClientRect(), v = threadView(th), pad = 8;
+  for (let k = 0; k < 2; k++) {      // (scrolling can stick or unstick the chat bar over the top: look again once)
+    const r = rectOf(els), v = threadView(th), pad = 8;
+    if (!r) return;
     if (r.top < v.top + pad) th.scrollTop -= v.top + pad - r.top;
     else if (r.bottom > v.bottom - pad) th.scrollTop += Math.min(r.bottom - v.bottom + pad, r.top - v.top - pad);
     else return;
@@ -1966,14 +2003,15 @@ function svgStream() {
   let pos = 0, depth = 0, start = -1, over = false, bad = false, hub = null, last = "";
   // Sound: the root closed with nothing after it (a lost count would end it early, or never), every piece read.
   const s = { fig: null, root: null, count: 0, off: false, sound: () => over && !bad && !last.slice(pos).includes("<") };
-  const piece = (src) => inlineSvg(svgFix(`<svg xmlns="${SVG_NS}" xmlns:xlink="${XLINK_NS}">${src}</svg>`));
+  const pre = svgPrefix();      // (the whole drawing's: its pieces' ids and references match)
+  const piece = (src) => inlineSvg(svgFix(`<svg xmlns="${SVG_NS}" xmlns:xlink="${XLINK_NS}">${src}</svg>`), pre);
   s.feed = (src, got) => {
     let up = false;
     last = src;
     const add = (part) => {
       const w = piece(part);
       if (!w) { bad = true; return; }
-      if (hub && w.querySelector("#tsvg-arrow")) { hub.remove(); hub = null; }
+      if (hub && w.querySelector(`[id="${pre}arrow"]`)) { hub.remove(); hub = null; }
       for (const n of [...w.children]) { s.root.append(n); s.count++; got(n); }
     };
     while (!s.off && !over) {
@@ -1993,7 +2031,7 @@ function svgStream() {
       const tag = src.slice(lt, pos), closing = tag[1] === "/", empty = /\/\s*>$/.test(tag);
       if (!s.root) {
         if (closing || !/^<svg[\s/>]/i.test(tag)) continue;
-        const r = inlineSvg(svgFix(`${tag.replace(/\/\s*>$/, ">")}</svg>`));
+        const r = inlineSvg(svgFix(`${tag.replace(/\/\s*>$/, ">")}</svg>`), pre);
         if (!r || !r.hasAttribute("viewBox")) { s.off = true; break; }
         hub = piece(SVG_ARROW).firstElementChild;
         r.prepend(hub);
@@ -2193,32 +2231,30 @@ function tapCues(e, root) {
   else if (root.cue && !root.cue.build) endCues(root);
 }
 
-// SVG drawings go in as live (cleaned) SVG, so cues can reach their parts (a finished answer's at the size its image had).
+// SVG drawings go in as live (cleaned) SVG, so cues can reach their parts (at the size their image had: inlineSvg).
 function inlineDrawings(c) {
   $$(".svg-box[data-src]", c).forEach((fig) => {
     const img = $("img", fig), svg = img && inlineSvg(fig.dataset.src);
-    if (!svg) return;
-    if (img.clientWidth && !fig.closest(".ans-draw")) { svg.style.width = "100%"; svg.style.maxWidth = `${img.clientWidth}px`; }
-    img.replaceWith(svg);
+    if (svg) img.replaceWith(svg);
   });
 }
-// An answer's drawings, while it is written: live SVG, scaled to the thread rather than to their text (Mermaid
-// sets a max-width in px). Resolves once any Mermaid diagram is drawn.
-function fitDrawings(c) {
+// The finished answer (to) takes the drawings of the one written (from) as they are, drawn and sized, so nothing
+// moves while an image loads or Mermaid draws again; only if they are the same drawings in the same order. Returns to.
+function keepDrawings(from, to) {
+  const was = $$(".diagram", from), now = $$(".diagram", to);
+  if (was.length !== now.length || was.some((d, i) => d.className !== now[i].className)) return to;
+  endCues(from);         // (an answer from another device never ended its cues: none hidden or lit stays so)
+  for (const el of $$(".pen, .pen-fade", from)) el.classList.remove("pen", "pen-fade");    // (moved, they'd start again)
+  now.forEach((d, i) => d.replaceWith(was[i]));
+  return to;
+}
+// An answer's drawings, while it is written: live SVG, with the cues so far. Resolves once any Mermaid diagram is
+// drawn (and cued).
+function liveDrawings(c) {
   const root = c.closest(".ans") || c;
   inlineDrawings(c);
   applyCues(root);
-  return drawMermaid().then(() => {
-    // The drawings together (with their frames, ~24px each) take at most 40% of the thread: the text gets the rest.
-    const svgs = $$(".mermaid-box svg, .svg-box svg", c);
-    const max = `${Math.max(56, ((c.closest(".thread")?.clientHeight || 400) * 0.4) / svgs.length - 24)}px`;
-    svgs.forEach((s) => {
-      s.style.removeProperty("max-width");
-      s.removeAttribute("height");
-      s.style.maxHeight = max;
-    });
-    applyCues(root);
-  });
+  return drawMermaid().then(() => applyCues(root));
 }
 
 function inlineMd(t, courseId) {
@@ -2409,10 +2445,10 @@ async function tutorAsk(mode, question = "", { spoken = false, drill = null } = 
     if (!$(".chat-bar", th)) th.prepend(chatBar(chat));      // the chat's first answer
     else if (chat.drill) $(".chat-bar", th).replaceWith(chatBar(chat));     // the drill's tally moved on
     wait.remove();
-    // Once all of it shows (now, or when the voice is done), the finished answer takes its place, drawings in the text.
+    // Once all of it shows (now, or when the voice is done), the finished answer takes its place, keeping its drawings.
     ans.settle = () => {
       const t = ans.root.closest(".thread"), f = t && (t.scrollHeight - t.scrollTop - t.clientHeight < 80 || ans.following());
-      if (ans.root.isConnected) ans.root.replaceWith(answerEl(r.message, seq === askSeq));
+      if (ans.root.isConnected) ans.root.replaceWith(keepDrawings(ans.root, answerEl(r.message, seq === askSeq)));
       if (f) bottom(t);
     };
     if (speaking()) {        // still being read: only ■ Stop under it meanwhile (the rest comes when it settles)
@@ -2511,8 +2547,9 @@ function playAnswer(m, btn) {
 
 // The tutor's SVG as live markup, rebuilt from an allowlist: SVG shapes and text with drawing attributes only, so
 // nothing in it can run, fetch or navigate (a blocklist missed html:meta refresh, html:img, image-set() in style).
-// Ids get a tsvg- prefix (and references with them) so a part called "thread" can't take over the page's #thread;
-// class is dropped so page CSS (.on, .empty…) can't reach in. null if it isn't clean SVG.
+// Ids get their drawing's own prefix, tsvgN- (and references with them), so a part called "thread" can't take over
+// the page's #thread and one drawing's gradient or marker "g" can't paint another's; class is dropped so page CSS
+// (.on, .empty…) can't reach in. null if it isn't clean SVG.
 const SVG_NS = "http://www.w3.org/2000/svg", XLINK_NS = "http://www.w3.org/1999/xlink";
 const SVG_TAGS = new Set(("svg g defs title desc rect circle ellipse line polyline polygon path text tspan marker linearGradient "
   + "radialGradient stop clipPath mask pattern symbol use").split(" "));
@@ -2525,13 +2562,15 @@ const SVG_ATTRS = new Set([...SVG_PAINT, ...("x y x1 y1 x2 y2 cx cy r rx ry fx f
   + "orient markerUnits offset gradientUnits gradientTransform spreadMethod clip-path clip-rule clipPathUnits mask maskUnits "
   + "maskContentUnits patternUnits patternContentUnits patternTransform").split(" ")]);
 const SVG_ID = /^[A-Za-z][\w.-]*$/;
+let svgSeq = 0;
+const svgPrefix = () => `tsvg${++svgSeq}-`;      // one per drawing (a streamed one's pieces share it)
 // An attribute value with its url(#id) references re-pointed at prefixed ids; null if it could fetch or escape.
-function svgValue(v) {
+function svgValue(v, pre) {
   if (/\\|image-set|javascript:|expression\(|@import/i.test(v)) return null;
-  v = v.replace(/url\(\s*(['"]?)#([A-Za-z][\w.-]*)\1\s*\)/g, "url(#tsvg-$2)");
-  return /url\(/i.test(v.replace(/url\(#tsvg-[\w.-]+\)/g, "")) ? null : v;
+  v = v.replace(/url\(\s*(['"]?)#([A-Za-z][\w.-]*)\1\s*\)/g, `url(#${pre}$2)`);
+  return /url\(/i.test(v.replace(/url\(#tsvg\d+-[\w.-]+\)/g, "")) ? null : v;
 }
-function inlineSvg(src) {
+function inlineSvg(src, pre = svgPrefix()) {
   const doc = new DOMParser().parseFromString(src, "image/svg+xml");
   const root = doc.documentElement;
   if (!root || root.localName !== "svg" || root.namespaceURI !== SVG_NS || doc.getElementsByTagName("parsererror").length) return null;
@@ -2541,30 +2580,36 @@ function inlineSvg(src) {
       if (n.nodeType !== 1 || n.namespaceURI !== SVG_NS) continue;            // html:*, comments, …: gone with their subtree
       if (n.localName === "a") { copy(n, to); continue; }                       // a link: keep what it wraps, not the link
       if (!SVG_TAGS.has(n.localName)) continue;
-      to.append(copy(n, cleanSvgEl(n)));
+      to.append(copy(n, cleanSvgEl(n, pre)));
     }
     return to;
   };
-  const svg = copy(root, cleanSvgEl(root));
+  const svg = copy(root, cleanSvgEl(root, pre));
   // Without a viewBox, dropping width/height would leave it drawn at 300×150 user units, cropped.
   const num = (v) => /^\d+(\.\d+)?(px)?$/.test((v || "").trim()) ? parseFloat(v) : 0;
   const w = num(root.getAttribute("width")), ht = num(root.getAttribute("height"));
   if (!svg.hasAttribute("viewBox") && w && ht) svg.setAttribute("viewBox", `0 0 ${w} ${ht}`);
   svg.removeAttribute("width");
   svg.removeAttribute("height");
+  // Sized as its image is: the column's width, no wider than its own (its width, or its height at the viewBox's
+  // shape; neither: the column's).
+  const vb = (svg.getAttribute("viewBox") || "").trim().split(/[\s,]+/).map(Number);
+  const own = w || (ht && vb[2] > 0 && vb[3] > 0 ? (ht * vb[2]) / vb[3] : 0);
+  svg.style.width = "100%";
+  if (own) svg.style.maxWidth = `${own}px`;
   svg.setAttribute("class", "cue-svg");
   return svg;
 }
 // A fresh SVG element with only the allowed attributes of el (simple style declarations become attributes).
-function cleanSvgEl(el) {
+function cleanSvgEl(el, pre) {
   const out = document.createElementNS(SVG_NS, el.localName);
   for (const a of el.attributes) {
     if (a.namespaceURI && a.namespaceURI !== XLINK_NS) continue;
     const n = a.localName, v = a.value.trim();
-    if (n === "id") { if (SVG_ID.test(v)) out.setAttribute("id", `tsvg-${v}`); continue; }
-    if (n === "href") { if (/^#[A-Za-z][\w.-]*$/.test(v)) out.setAttribute("href", `#tsvg-${v.slice(1)}`); continue; }
+    if (n === "id") { if (SVG_ID.test(v)) out.setAttribute("id", `${pre}${v}`); continue; }
+    if (n === "href") { if (/^#[A-Za-z][\w.-]*$/.test(v)) out.setAttribute("href", `#${pre}${v.slice(1)}`); continue; }
     if (a.namespaceURI || !SVG_ATTRS.has(n)) continue;
-    const ok = svgValue(v);
+    const ok = svgValue(v, pre);
     if (ok != null) out.setAttribute(n, ok);
   }
   for (const decl of (el.getAttribute("style") || "").split(";")) {      // style beats attributes, so it goes last
@@ -2588,7 +2633,7 @@ function cueParts(c) {
     parts.get(id).push(el);
   };
   $$(".cue-svg", c).forEach((svg) => svg.querySelectorAll(":is(g, rect, circle, ellipse, line, polyline, polygon, path, text, use)[id]").forEach((el) => {
-    if (!el.closest("defs, marker, symbol, clipPath, mask, pattern")) add(el.id.replace(/^tsvg-/, ""), el);
+    if (!el.closest("defs, marker, symbol, clipPath, mask, pattern")) add(el.id.replace(/^tsvg\d+-/, ""), el);
   }));
   const edges = [];
   $$(".mermaid-box svg", c).forEach((mm) => {

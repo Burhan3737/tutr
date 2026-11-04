@@ -427,15 +427,9 @@ button.term:focus-visible { outline: 2px solid var(--accent); outline-offset: 1p
   font: inherit; padding: 4px 6px; }
 .voice-row .link { font-size: 13px; min-height: 30px; }
 .view-switch { margin: 10px 16px 0; }
-/* An answer being written: its drawings go above its text and scroll with it (capped by fitDrawings at 40% of the
-   thread). Once it is finished the drawings settle into their place in the text. */
+/* An answer being written is always laid out (it grows as it is read); its drawings are in their place in the text,
+   as in the finished answer. */
 .thread > .ans.live { content-visibility: visible; }
-.ans-draw:empty { display: none; }
-.ans.live .ans-draw { margin: 0 0 10px; }
-.ans-draw .diagram { margin: 0 0 8px; padding: 4px 8px; width: 100%; }
-.ans-draw .mermaid-box svg { display: block; width: 100%; height: auto; max-width: 100% !important; margin: 0 auto; }
-.ans-draw .svg-box img { width: 100%; height: auto; }
-.ans-draw .svg-box svg { display: block; width: 100%; height: auto; margin: 0 auto; }
 .ans.live .copy-one { opacity: 1; }
 /* The sentence being read aloud glows (Voice, ▶ Play); never on paper. */
 .snt { border-radius: 3px; transition: background-color .25s var(--ease), box-shadow .25s var(--ease); }
