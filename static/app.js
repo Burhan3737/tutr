@@ -893,7 +893,8 @@ function renamable(chat, cls, after) {
 }
 
 function chatBar(chat) {
-  return h("div", { class: "chat-bar" }, starButton(chat), renamable(chat), chat.drill ? drillStatus(chat.drill) : null);
+  return h("div", { class: "chat-bar" }, starButton(chat), renamable(chat), chat.drill ? drillStatus(chat.drill) : null,
+    chat.practice ? topicPracticeStatus(chat.practice) : null);
 }
 
 async function newChat() {
@@ -954,6 +955,7 @@ function renderTutor() {
         h("button", { class: "link", type: "button", onclick: () => tutorAsk("explain") }, "Explain simply"),
         h("button", { class: "link", type: "button", title: "An oral exam: one question at a time, follow-ups on weak answers, a summary at the end", onclick: () => tutorAsk("grill") }, "Grill me"),
         h("button", { class: "link", type: "button", title: "Exam-style questions from a range of decks, in the format of a practice paper, solved on paper: hints, marks, then the written solution", onclick: () => openDrillSetup() }, "Exam drill"),
+        h("button", { class: "link", type: "button", title: "Topic by topic through the whole deck: the concepts, then every problem solved with one for you to try (/practice)", onclick: () => tutorAsk("practice") }, "Practice by topic"),
         h("button", { class: "link", type: "button", onclick: () => tutorAsk("quiz") }, "Quiz prep"),
         h("button", { class: "link", type: "button", title: "What to know first: prerequisites, rules and symbols", onclick: () => tutorAsk("before") }, "Before you start"),
         h("button", { class: "link", type: "button", title: "Methods, formulas and shortcuts to copy onto your sheet (always the whole deck)", onclick: () => tutorAsk("cheatsheet_deck") }, "Cheat sheet"))),
@@ -1528,6 +1530,7 @@ const SLASH = [
   { cmd: "answer", mode: "drill_reveal", hint: "Show the drill question's answer", when: () => drilling() },
   { cmd: "skip", mode: "drill_skip", hint: "Skip the drill's question", when: () => drilling() },
   { cmd: "enddrill", mode: "drill_end", hint: "End the drill: summary", when: () => drilling() },
+  { cmd: "practice", mode: "practice", hint: "Practice by topic · whole deck" },
   { cmd: "before", mode: "before", hint: "Before you start: what to know first" },
   { cmd: "deeper", mode: "deeper", hint: "Go deeper on the last answer", when: () => !!(APP.deck && APP.deck.chat && APP.deck.chat.messages.length) },
   { cmd: "bigpicture", mode: "map_deck", hint: "Big picture · whole deck" },
@@ -1552,10 +1555,11 @@ const MODE_LABEL = { explain: "Explain simply", example: "Worked example", deepe
   explain_deck: "Explain simply · whole deck", example_deck: "Worked example · whole deck", quiz_deck: "Quiz prep · whole deck",
   map_deck: "Big picture · whole deck", before: "Before you start", before_deck: "Before you start · whole deck",
   cheatsheet_deck: "Cheat sheet · whole deck", grill: "Grill me", grill_deck: "Grill me · whole deck", grill_end: "End the grill",
-  drill: "Exam drill", drill_hint: "Hint", drill_reveal: "Show the answer", drill_skip: "Skip this question", drill_end: "End the drill" };
+  drill: "Exam drill", drill_hint: "Hint", drill_reveal: "Show the answer", drill_skip: "Skip this question", drill_end: "End the drill",
+  practice: "Practice by topic" };
 const DECK_MODES = ["explain", "example", "quiz", "before", "grill"];
 // The question line for a request: what the student typed, or the mode's label.
-const askText = (mode, question) => (mode === "ask" || mode === "grill_reply" || mode === "drill_reply" ? question
+const askText = (mode, question) => (mode === "ask" || mode === "grill_reply" || mode === "drill_reply" || mode === "practice_reply" ? question
   : mode === "drill" ? question || MODE_LABEL.drill : mode === "brush" ? `Brush up: ${question}`
   : question ? `${MODE_LABEL[mode]}: ${question}` : MODE_LABEL[mode]);     // a slash command's own words follow the mode
 
@@ -1574,8 +1578,16 @@ function drilling() {
   const last = msgs[msgs.length - 1];
   return !!chat && !!chat.drill && !!last && last.role === "a" && DRILL_MODES.includes(last.mode);
 }
-const replyMode = () => (drilling() ? "drill_reply" : grilling() ? "grill_reply" : "ask");
+// Practice by topic runs the same way while the chat's last answer is one of its own and the deck isn't finished.
+const TOPIC_PRACTICE_MODES = ["practice", "practice_reply"];
+function topicPracticing() {
+  const chat = APP.deck && APP.deck.chat, msgs = chat ? chat.messages : [];
+  const last = msgs[msgs.length - 1];
+  return !!chat && !!chat.practice && !chat.practice.finished && !!last && last.role === "a" && TOPIC_PRACTICE_MODES.includes(last.mode);
+}
+const replyMode = () => (drilling() ? "drill_reply" : grilling() ? "grill_reply" : topicPracticing() ? "practice_reply" : "ask");
 const composeHint = () => (drilling() ? "Your answer or what you got on paper, a question, or \"give me the answer\""
+  : topicPracticing() ? "done, or ask about this topic"
   : grilling() ? "Your answer, or \"stuck\" / \"stop\""
   : APP.tutor === "open" ? "Ask anything about this slide, or / for a mode"
   : `Ask about slide ${Math.min(APP.n, APP.deck ? APP.deck.slides : APP.n)}… or / for a mode`);
@@ -1669,6 +1681,11 @@ function answerTools(m, isLast) {
   out.push(play);
   if (isLast && DRILL_MODES.includes(m.mode) && APP.deck.chat && APP.deck.chat.drill) {
     out.push(drillFoot());
+  } else if (isLast && TOPIC_PRACTICE_MODES.includes(m.mode) && APP.deck.chat && APP.deck.chat.practice) {
+    const pr = APP.deck.chat.practice, lastTopic = (pr.topics || []).length && (pr.at || 0) + 1 >= pr.topics.length;
+    if (!pr.finished)
+      out.push(h("div", { class: "msg-foot" },
+        h("button", { class: "link", type: "button", title: "Move on (or type done)", onclick: () => tutorAsk("practice_reply", "done") }, lastTopic ? "Done › finish the deck" : "Done › next topic")));
   } else if (isLast && GRILL_MODES.includes(m.mode)) {
     out.push(h("div", { class: "msg-foot" },
       h("button", { class: "link", type: "button", title: "Stop here: what held up and what's shaky", onclick: () => tutorAsk("grill_end") }, "End the grill: summary ›")));
@@ -2341,7 +2358,7 @@ const bottom = (th) => { th.scrollTop = th.scrollHeight; requestAnimationFrame((
 let askSeq = 0;     // the newest question: only its answer gets the "what next" links
 async function tutorAsk(mode, question = "", { spoken = false, drill = null } = {}) {
   if (APP.scope === "deck" && DECK_MODES.includes(mode)) mode += "_deck";
-  if (mode === "drill") {          // a drill always starts its own chat
+  if (mode === "drill" || mode === "practice") {          // a drill and Practice by topic always start their own chat
     const d0 = APP.deck;
     if (d0.chat) d0.chats = [{ id: d0.chat.id, title: d0.chat.title, updated: d0.chat.updated }, ...(d0.chats || [])].slice(0, 5);
     d0.chat = null;
@@ -2429,8 +2446,9 @@ async function tutorAsk(mode, question = "", { spoken = false, drill = null } = 
     ans.msg = r.message;
     // The voice goes on to the end of the saved text; if that isn't what streamed, the pacing is off: all shows.
     if (sp) { if (r.message.text.startsWith(acc.slice(0, fed))) sp.feed(r.message.text.slice(fed)); else ans.showAll(); sp.end(); }
-    const chat = d.chat || { id: r.chat, title: askText(mode, question), updated: "", messages: [] };
+    const chat = d.chat || { id: r.chat, title: mode === "practice" ? `${MODE_LABEL.practice} · ${d.tag}` : askText(mode, question), updated: "", messages: [] };
     if (r.drill) chat.drill = r.drill;
+    if (r.practice) chat.practice = r.practice;
     // (Unless the chat was fetched again meanwhile, after another device's turn, with this answer already in it.)
     if (!chat.messages.some((m) => m.role === "a" && m.text === r.message.text && m.ms === r.message.ms))
       chat.messages.push({ role: "q", mode, deck: d.tag, slide: n, text: askText(mode, question), ...(spoken ? { spoken } : {}), ...(photos.length ? { photos } : {}) }, r.message);
@@ -2443,7 +2461,7 @@ async function tutorAsk(mode, question = "", { spoken = false, drill = null } = 
     if (!wait.isConnected) { if (seq === askSeq) drawThread(); return; }
     // Swap in just the finished answer; the rest of the thread stays as it is.
     if (!$(".chat-bar", th)) th.prepend(chatBar(chat));      // the chat's first answer
-    else if (chat.drill) $(".chat-bar", th).replaceWith(chatBar(chat));     // the drill's tally moved on
+    else if (chat.drill || chat.practice) $(".chat-bar", th).replaceWith(chatBar(chat));     // the drill's tally or the topic moved on
     wait.remove();
     // Once all of it shows (now, or when the voice is done), the finished answer takes its place, keeping its drawings.
     ans.settle = () => {
@@ -3217,6 +3235,8 @@ function visualFallback(md) {
 }
 function speakable(md) {
   return visualFallback(unsay(md))
+    .replace(/<!--[\s\S]*?(?:-->|$)/g, " ")                        // hidden lines for the hub (drill, practice plan)
+    .replace(/<details>[\s\S]*?(?:<\/details>|$)/g, " ")            // a hidden answer stays hidden when read aloud
     .replace(CUE, " ")
     .replace(/<\/?[a-zA-Z][^>]*>/g, " ")
     .replace(/\|\|[\s\S]*?\|\|/g, " ")
@@ -3443,6 +3463,13 @@ function drillStatus(dr) {
   return h("span", { class: "drill-status", title: `Range: ${dr.decks.join(", ")}${dr.papers.length ? ` · format of ${dr.papers.join(", ")}` : ""}` },
     `Drill · ${range} · ${log.length} done` + (set ? ` · ${got}/${set} marks` : "") +
     ` · ${dr.decks.filter((t) => asked.has(t)).length}/${dr.decks.length} decks` + (redo ? ` · ${redo} to revisit` : ""));
+}
+
+// On the chat bar of Practice by topic: the deck and which topic it's on.
+function topicPracticeStatus(pr) {
+  const n = (pr.topics || []).length;
+  return h("span", { class: "drill-status", title: (pr.topics || []).map((t, i) => `${i + 1}. ${t.name} (${t.slides})`).join("\n") },
+    `Practice · ${pr.deck}` + (n ? (pr.finished ? ` · all ${n} topics done` : ` · ${pr.topics[pr.at || 0].name} (${(pr.at || 0) + 1}/${n})`) : ""));
 }
 
 // Under the drill's last answer: what the student can do besides typing an answer.

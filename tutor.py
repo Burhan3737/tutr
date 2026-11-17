@@ -774,6 +774,8 @@ def drill_system_prompt(cdir, cfg, web):
 
 
 def chat_system(cdir, chat, tag, web):
+    if chat and chat.get("practice"):       # pinned to its deck, slides only, whichever deck is open
+        return system_prompt(cdir, chat["practice"]["deck"], False)
     return drill_system_prompt(cdir, chat["drill"], web) if chat and chat.get("drill") else system_prompt(cdir, tag, web)
 
 
@@ -834,6 +836,223 @@ def _drill_record(cdir, chat, text):
     return DRILL_TAG.sub("", text).rstrip()
 
 
+# ---------------------------------------------------------------- practice by topic
+# Practice by topic walks the whole open deck topic by topic, in one fixed format: first every concept question the
+# slides answer (a table), then every numerical problem the slides work, solved step by step, each followed by a similar
+# one for the student with a hidden worked answer. It starts its own chat (chat["practice"]) and stays inside the
+# slides (web off). The opening turn ("practice") plans the deck and ends with a hidden <!--practice {...}--> line
+# listing the topics; the hub keeps that plan on the chat, so every "done" (mode "practice_reply") is told exactly
+# which topic, slides and problems come next instead of trusting the model's memory of a long chat. Anything else
+# the student types is answered inside the current topic. The format is the one reached by hand in a CP-610 chat.
+PRACTICE_FORMAT = """The format. Follow it exactly, every turn; never change a heading, a column or the problem layout.
+
+Each topic, in this order:
+
+#### Topic <k> · <Topic name>: concepts
+
+[say: <what these concept questions cover>]
+
+| # | Question | Answer | Slide |
+|---|---|---|---|
+| <k>.1 | <a question the slides answer: a definition, a fact, a comparison, a "why", an MCQ stem> | <the answer, as the slide gives it> | [<TAG> s<N>] |
+| <k>.2 | … | … | [<TAG> s<N>] |
+
+(Cover every concept, fact and comparison the topic's slides state. A topic with no numerical problems stops
+after its table. Otherwise:)
+
+---
+
+#### Topic <k> · problems
+
+then each problem of the topic, in slide order, separated by a line with only ---:
+
+**Problem (<id>): <short name>** [<TAG> s<N>]
+
+**Q:** <the full question with every value it needs, so it can be solved without the slide>
+1. <part>
+2. <part>
+
+1. **<Step name>.** <one line on the idea behind the step, shown on this example>
+   <the formula as the slides write it, then the same formula with the numbers put in, then the result>
+2. **<Step name>:** <working>
+…
+<n>. **<Last step>:** <working> = **<the result, bold>**
+
+**Your turn:** <a similar problem: the same structure, method and number of parts, new values or a new short
+example, using only formulas and methods on the slides>
+1. <part>
+2. <part>
+<details><summary>Answer</summary>
+
+1. **<Step name>:** <every step, the same shape as the worked solution: formula first, then the numbers>
+…
+<n>. **<Last step>:** <result>
+
+</details>
+
+Every topic turn ends (after its last problem, or after its table if it has no problems) with the closing line the
+request gives: "Say **done** when you've finished, and we'll move on to Topic <next number>: <its name>." with the
+next topic's number and name, or, for the last topic, the wrap-up line the request gives instead.
+
+A problem done in this format (from a data-analysis deck, tag Ch4; copy its shape, not its content):
+
+**Problem (f2): Sentence embedding by mean pooling** [Ch4 s22]
+
+**Q:** You are given $v(\\text{good}) = [0.8, 0.2]$, $v(\\text{battery}) = [0.1, 0.6]$, $v(\\text{life}) = [0.3, 0.4]$.
+1. Find $v$("good battery life").
+2. Would "life battery good" give a different vector?
+
+1. **Formula.** A sentence vector is the average of its word vectors, taken coordinate by coordinate.
+   $v(\\text{sentence}) = \\text{mean}\\big(v(w_1), \\dots, v(w_n)\\big) = \\tfrac{1}{n}\\sum_i v(w_i)$, here with $n = 3$
+2. **Sum the first coordinates:** $0.8 + 0.1 + 0.3 = 1.2$
+3. **Sum the second coordinates:** $0.2 + 0.6 + 0.4 = 1.2$
+4. **Divide by $n$:** $[1.2/3,\\ 1.2/3] = \\mathbf{[0.4,\\ 0.4]}$
+5. **Reordered sentence:** addition doesn't care about order, so you get the **same vector**. Mean pooling ignores word order.
+
+**Your turn:** You are given $v(\\text{screen}) = [0.5, -0.2, 0.1]$, $v(\\text{overheats}) = [-0.6, 0.4, 0.3]$, $v(\\text{constantly}) = [0.4, 0.1, -0.1]$.
+1. Find $v$("screen overheats constantly").
+2. Would "constantly overheats screen" give a different vector?
+<details><summary>Answer</summary>
+
+1. **Formula:** $v = \\tfrac{1}{3}\\sum_i v(w_i)$, with $n = 3$
+2. **Coordinate 1:** $0.5 + (-0.6) + 0.4 = 0.3$
+3. **Coordinate 2:** $-0.2 + 0.4 + 0.1 = 0.3$
+4. **Coordinate 3:** $0.1 + 0.3 + (-0.1) = 0.3$
+5. **Divide by 3:** $[0.1,\\ 0.1,\\ 0.1]$
+6. **Reordered:** the same vector $[0.1, 0.1, 0.1]$, because mean pooling ignores word order [Ch4 s22].
+
+</details>"""
+PRACTICE_RULES = """Rules, all of them, every turn:
+- Scope is the slides of this deck and nothing else: no formula, fact, method or example from outside them, not
+  even a standard one. If a step needs something the slides don't give, say so in one line instead of supplying it.
+- Every concept row and every problem carries its slide tag, so the student can go back to it.
+- Every worked example or calculation on the slides is a problem, none skipped. Two examples on one slide are two
+  separate problems with their own ids ((a), (a2)). A slide that gives only a formula with no worked example gets a
+  problem built from that formula, marked *formula only* in the plan.
+- Problem ids run through the deck as in the plan: (a), (a2), (b), (c), …
+- Steps as on paper: numbered, short, the formula first and then the numbers; a one-line note on the idea, never a
+  paragraph of explanation.
+- "Your turn" is similar to the problem above it: the same method, structure and parts, new values or a new short
+  example, nothing beyond the slides. It has one correct answer (no ties the slides don't settle).
+- The hidden answer shows every step, never just the result."""
+PRACTICE_PLAN_TAG = """<!--practice {"topics": [{"k": <its number in the table>, "name": "<topic name>", "slides": "s<first>–s<last>", "problems": ["(a) <short name>, s<N>", …]}, …]}-->"""
+PRACTICE_PROMPTS = {
+    "practice": """Practice by topic for the whole deck {deck}: walk the deck topic by topic so the student can practise every
+numerical problem and every concept on its slides, for this course's assessments ({style}).
+
+The topics are the deck's own sections (its outline or roadmap slide, if it has one), in slide order, numbered from
+1; an overview or introduction before the first section is Topic 0. Skip title and admin slides.
+
+This turn:
+1. One line saying what the plan covers, then the plan as a table:
+   [say: <what the plan shows>]
+
+   | # | Topic | Slides | Numerical problems | Concept / MCQ areas |
+   |---|---|---|---|---|
+   | <k> | <name> | s<first>–s<last> | <(a) short name, s<N> · (b) …, or none> | <the ideas its concept questions cover> |
+
+2. Then the first topic in the format below, ending with the "Say **done**" line.
+3. Last, on its own line, the hidden plan line (read by the hub, never shown: exactly one, valid JSON, the same
+   topics and problems as the table, in order, the first topic first):
+""" + PRACTICE_PLAN_TAG + """
+
+""" + PRACTICE_FORMAT + "\n\n" + PRACTICE_RULES,
+    "practice_next": """The student said done. Now Topic {k}: {name} (slides {slides}). Its problems from the plan: {problems}.
+Give this topic in the practice format: its concepts table, then each of these problems with its "Your turn"
+and hidden answer, then the last line: {last_line}
+No plan line, no recap of earlier topics, nothing before the #### heading.""",
+    "practice_next_unknown": """The student said done. Give the next topic of your plan in the practice format: its
+concepts table, then each of its problems with its "Your turn" and hidden answer, then the "Say **done**" line naming
+the topic after it (or, if it is the last topic, a one-line close instead). No recap of earlier topics.""",
+    "practice_close": """The student said done, and that was the last topic: every topic in {deck} has been covered. Say so in
+one line, then one line suggesting what to do next (for example, redo the problems they found hardest without
+looking, or the "Your turn" ones again). No new topic, no new problems.""",
+    "practice_question": """The student, practising Topic {k}: {name} (slides {slides}), writes:
+
+{question}
+
+Answer it inside this topic and inside the slides, briefly; don't move on to the next topic and don't repeat the
+whole topic. If they ask for something in the format (a problem again, another "Your turn", a missing problem),
+give it in the practice format. End with: Say **done** when you're ready, and we'll move on to {after}.""",
+}
+PRACTICE_REMIND = """
+
+Practice reminder: this is Practice by topic for the whole deck {deck}. Keep to its format and rules exactly:
+
+""" + PRACTICE_FORMAT.split("\n\nA problem done in this format")[0] + "\n\n" + PRACTICE_RULES
+PRACTICE_MODES = {"practice", "practice_reply"}
+PRACTICE_TAG = re.compile(r"[ \t]*<!--\s*practice\s*(\{.*?\})\s*-->[ \t]*\n?", re.S)
+_DONE = re.compile(r"((ok(ay)?|alright|right|yes),? )?(i'?m |i am )?(done|finished|next( topic| one)?|continue|go on|move on)"
+                   r"(,? (next|thanks|thank you|please))?", re.I)
+
+
+def is_done(text):
+    """Whether the student's reply is a plain "done" (move on), not a question that happens to start with it."""
+    t = str(text or "").replace("’", "'").replace("‘", "'").strip()
+    return bool(_DONE.fullmatch(re.sub(r"\s+", " ", re.sub(r"[\s.!,?]+$", "", t))))
+
+
+def _practice_record(chat, text):
+    """Strip the hidden plan line from an answer; the first readable one becomes the chat's plan. Returns the text."""
+    cfg = chat["practice"]
+    for raw in PRACTICE_TAG.findall(text):
+        if cfg.get("topics"):
+            break
+        raw = re.sub(r'\\\\|\\"|\\', lambda m: m.group(0) if len(m.group(0)) == 2 else "\\\\", raw)
+        try:
+            plan = json.loads(raw, strict=False)
+        except json.JSONDecodeError:
+            log(f"practice plan unreadable chat={chat['id']}: {raw[:200]}")
+            continue
+        topics = plan.get("topics") if isinstance(plan, dict) else None
+        if isinstance(topics, list):
+            cfg["topics"] = [{"name": str(t.get("name", "")).strip()[:200], "slides": str(t.get("slides", "")).strip()[:40],
+                              "problems": [str(p).strip()[:200] for p in t.get("problems") or [] if str(p).strip()][:40]}
+                             | ({"k": t["k"]} if isinstance(t.get("k"), int) and not isinstance(t.get("k"), bool) else {})
+                             for t in topics if isinstance(t, dict) and str(t.get("name", "")).strip()][:40]
+    return PRACTICE_TAG.sub("", text).rstrip()
+
+
+def _topic_no(cfg, i):
+    """The topic's number as the plan shows it: the number the plan line gave, else Topic 0 when the plan starts with
+    an overview, else from 1."""
+    if isinstance(cfg["topics"][i].get("k"), int):
+        return cfg["topics"][i]["k"]
+    first = cfg["topics"][0]["name"].lower() if cfg.get("topics") else ""
+    return i if re.search(r"overview|introduction|intro\b", first) else i + 1
+
+
+def _practice_prompt(cdir, chat, mode, question):
+    """The prompt for a practice turn. A "done" names the next topic from the stored plan (the hub moves "at" on
+    once the answer is saved); anything else is answered inside the current topic."""
+    cfg = chat["practice"]
+    deck = deck_where(cdir, cfg["deck"])
+    if mode == "practice":
+        return PRACTICE_PROMPTS["practice"].replace("{deck}", deck).replace(
+            "{style}", L.course_style(cdir) or "this course's quizzes and exams")
+    topics, at = cfg.get("topics") or [], cfg.get("at", 0)
+    remind = PRACTICE_REMIND.replace("{deck}", deck)
+    if is_done(question):
+        if not topics:
+            return PRACTICE_PROMPTS["practice_next_unknown"] + remind
+        if at + 1 >= len(topics):
+            return PRACTICE_PROMPTS["practice_close"].replace("{deck}", deck)
+        t, k = topics[at + 1], _topic_no(cfg, at + 1)
+        last = (f"Say **done** when you've finished, and we'll move on to Topic {k + 1}: {topics[at + 2]['name']}."
+                if at + 2 < len(topics) else "Say **done** when you've finished, and we'll wrap up the deck.")
+        return PRACTICE_PROMPTS["practice_next"].format(
+            k=k, name=t["name"], slides=t["slides"] or "see the plan",
+            problems=", ".join(t["problems"]) or "none (concepts only)", last_line=last) + remind
+    if topics:
+        t, k = topics[min(at, len(topics) - 1)], _topic_no(cfg, min(at, len(topics) - 1))
+        after = (f"Topic {_topic_no(cfg, at + 1)}: {topics[at + 1]['name']}" if at + 1 < len(topics) else "the wrap-up")
+        name, slides = t["name"], t["slides"] or "see the plan"
+    else:
+        k, name, slides, after = "?", "the current topic", "see the plan", "the next topic"
+    return PRACTICE_PROMPTS["practice_question"].format(k=k, name=name, slides=slides, after=after,
+                                                        question=question.strip() or "(see the photos)") + remind
+
+
 DECK_MODES = {"explain_deck","example_deck", "quiz_deck", "map_deck", "before_deck", "cheatsheet_deck", "grill_deck"}
 MODE_LABELS = {"explain": "Explain simply", "example": "Worked example", "deeper": "Go deeper", "quiz": "Quiz prep",
                "map_deck": "Big picture · whole deck", "before": "Before you start",
@@ -841,11 +1060,12 @@ MODE_LABELS = {"explain": "Explain simply", "example": "Worked example", "deeper
                "explain_deck": "Explain simply · whole deck", "example_deck": "Worked example · whole deck",
                "quiz_deck": "Quiz prep · whole deck", "grill": "Grill me", "grill_deck": "Grill me · whole deck",
                "grill_end": "End the grill", "drill": "Exam drill", "drill_hint": "Hint", "drill_reveal": "Show the answer",
-               "drill_skip": "Skip this question", "drill_end": "End the drill"}    # grill_reply / drill_reply: the student's words
+               "drill_skip": "Skip this question", "drill_end": "End the drill",
+               "practice": "Practice by topic"}    # grill_reply / drill_reply / practice_reply: the student's words
 
 
 # A mode asked by slash command (/explain …) can carry the student's own words: added to the mode's prompt.
-QUESTION_MODES = {"ask", "brush", "grill_reply", "drill_reply"}       # their prompts already are the student's words
+QUESTION_MODES = {"ask", "brush", "grill_reply", "drill_reply", "practice_reply"}       # their prompts already are the student's words
 EXTRA = """
 
 The student added this to the request: "{extra}". Let it shape the answer (what to focus on, an example to use,
@@ -891,7 +1111,7 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=Fa
     box (paths in the course folder), in any mode."""
     photos = [p for p in photos if is_upload(cdir, p)]
     whole_deck = whole_deck and mode == "voice"
-    if mode not in CHAT_PROMPTS and mode not in DRILL_MODES and mode != "voice":
+    if mode not in CHAT_PROMPTS and mode not in DRILL_MODES and mode not in PRACTICE_MODES and mode != "voice":
         raise TutorError("Unknown request.", 400)
     if mode == "drill" and not drill:
         raise TutorError("Pick the drill's range first.", 400)
@@ -899,33 +1119,51 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=Fa
     label = MODE_LABELS.get(mode) or (f"Brush up: {question.strip()}" if mode == "brush" else question.strip())
     if extra and mode in MODE_LABELS:
         label = f"{MODE_LABELS[mode]}: {extra}"
+    if mode == "practice" and question.strip():     # /practice <words>: the words go with the opening prompt
+        label = f"{MODE_LABELS[mode]}: {question.strip()}"
     if mode == "drill":
         label = f"Exam drill: {_range_short(drill).split(' (')[0]}" + (f" · {', '.join(drill['papers'])}" if drill["papers"] else "")
+    fresh = mode in ("drill", "practice")       # both always start their own chat
+    if mode in PRACTICE_MODES:
+        web = False                             # practice stays inside the slides
     now = time.strftime("%Y-%m-%d %H:%M")
     lock = _course_lock(cdir)
     with lock:
-        chat_id = None if mode == "drill" else current_chat(cdir)
+        chat_id = None if fresh else current_chat(cdir)
         chat = load_chat(chat_id) if chat_id else None
         joined = chat is None and chat_id in _PENDING
         if joined:      # another turn is starting this chat right now: join it
             chat = dict(_PENDING[chat_id])
         created = chat is None
         if created:     # the file is saved only once Claude has answered
-            chat = {"id": (None if mode == "drill" else _WARM_IDS.pop(cdir.name, None)) or uuid.uuid4().hex[:12],
+            chat = {"id": (None if fresh else _WARM_IDS.pop(cdir.name, None)) or uuid.uuid4().hex[:12],
                     "course": cdir.name, "code": L.course_meta(cdir)[0], "deck": tag, "created": now, "messages": [],
-                    "title": label[:90] if mode == "drill" else
-                    f"{label[:70]} · " + (tag if mode in DECK_MODES or whole_deck else f"s{n}")}
+                    "title": label[:90] if mode == "drill" else f"{MODE_LABELS['practice']} · {tag}" if mode == "practice" else
+                    f"{label[:70]} · " + (tag if mode in DECK_MODES or mode == "practice" or whole_deck else f"s{n}")}
             if mode == "drill":
                 chat["drill"] = drill
+            if mode == "practice":
+                chat["practice"] = {"deck": tag, "topics": [], "at": 0, "started": now}
             _PENDING[chat["id"]] = dict(chat, messages=[])
             S.set_chat(cdir, chat["id"])
     if mode in DRILL_MODES and not chat.get("drill"):
         raise TutorError("No drill is running in this chat. Start one with Exam drill.", 400)
+    if mode in PRACTICE_MODES and not chat.get("practice"):
+        raise TutorError("No practice is running in this chat. Start one with Practice by topic.", 400)
+    if chat.get("practice"):
+        web = False                             # a practice chat stays inside the slides, whatever is asked in it
+    # A "done" names topic at+1 in its prompt: that index is where it lands, so two dones sent at once move one topic.
+    target = chat["practice"].get("at", 0) + 1 if mode == "practice_reply" and is_done(question) else None
     # (A drill from before photos went with the Ask box may still have some waiting on it: they go with this turn.)
     sent_photos = list((chat.get("drill") or {}).get("photos") or []) if mode in DRILL_MODES and mode != "drill" else []
     photo_txt = photos_note(photos + [p for p in sent_photos if p not in photos])
     if mode in DRILL_MODES:
         prompt = _drill_prompt(cdir, chat, mode, tag, n, question, photo_txt)
+    elif mode in PRACTICE_MODES:
+        prompt = _practice_prompt(cdir, chat, mode, question)
+        if mode == "practice" and question.strip():
+            prompt += EXTRA.format(extra=question.strip()[:2000])
+        prompt += photo_txt
     elif mode == "voice":
         prompt = voice_prompt(cdir, f"the whole deck {deck_where(cdir, tag)}" if whole_deck else f"slide {where(cdir, tag, n)}",
                               question.strip())
@@ -950,6 +1188,14 @@ def chat_turn(cdir, tag, n, mode, question, model, web, emit=None, whole_deck=Fa
                 msg["text"] = _drill_record(cdir, chat, msg["text"])
                 if sent_photos:         # photos sent with this turn have been read: the next turn starts empty
                     chat["drill"]["photos"] = [p for p in chat["drill"].get("photos", []) if p not in sent_photos]
+            if chat.get("practice"):    # the hidden plan line goes onto the chat; a "done" moves to the next topic
+                msg["text"] = _practice_record(chat, msg["text"])
+                cfg = chat["practice"]
+                if target is not None and cfg.get("topics"):
+                    if target < len(cfg["topics"]):
+                        cfg["at"] = max(cfg.get("at", 0), target)
+                    else:
+                        cfg["finished"] = True
             chat["session"] = r["session"] or chat.get("session")       # the last finished turn's
             chat["updated"] = time.strftime("%Y-%m-%d %H:%M")
             q = {"role": "q", "mode": mode, "deck": tag, "slide": n, "text": label}

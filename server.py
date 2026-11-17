@@ -459,7 +459,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             mode = str(req.get("mode", "ask"))
             q = str(req.get("question") or "")
             photos = req.get("photos") if isinstance(req.get("photos"), list) else []
-            if mode in ("ask", "brush", "voice", "grill_reply") and not q.strip() and not photos:
+            if mode in ("ask", "brush", "voice", "grill_reply", "practice_reply") and not q.strip() and not photos:
                 return self._json({"error": "Type a question first."}, 400)
             drill = None
             if mode == "drill":
@@ -490,7 +490,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             break
                     raise
                 DRAFTS.turn_end(c.name, turn, chat=chat["id"])
-                return {"chat": chat["id"], "message": msg, "drill": chat.get("drill")}
+                return {"chat": chat["id"], "message": msg, "drill": chat.get("drill"), "practice": chat.get("practice")}
             return self._answer(req, work)
         if path == "/api/side":              # a side question about a term or a selection (forks the chat)
             tag = str(req.get("tag", ""))
