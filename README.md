@@ -83,6 +83,10 @@ python tests/test_layout.py             # the library layout, me/private, the mi
 These build demo libraries in a temporary folder and never touch your courses. The skill's own test lives
 beside the skill because the skill is copied into each library.
 
+`tests/e2e/` is the end-to-end workflow suite (Playwright): every user workflow, run against the hub with the AI
+and speech models faked. It is the behavioural baseline, described in plain language in
+[docs/functional-spec/](docs/functional-spec/README.md). See [tests/e2e/README.md](tests/e2e/README.md) to run it.
+
 `tests/verify/` holds the tools used to check the hub against an older version on copies of the same data
 (`verify_hubs.py`: everything each hub shows, sends to the model and writes, compared), plus a short run with a real
 model (`live_smoke.py`) and a browser run (`browser_smoke.py`, needs Playwright). Each takes its paths as arguments
