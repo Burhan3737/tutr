@@ -1,0 +1,13 @@
+{
+  "name": "tutr-e2e",
+  "private": true,
+  "description": "End-to-end workflow tests for Tutr: the behavioural baseline for the rewrite",
+  "scripts": {
+    "test": "playwright test",
+    "report": "playwright show-report .runs/report"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.0",
+    "@types/node": "^22.20.5"
+  }
+}
